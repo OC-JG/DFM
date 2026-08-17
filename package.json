@@ -1,0 +1,19 @@
+{
+  "name": "onlycat-dfm",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Injection moulding design-for-manufacture analyser — single-file browser tool",
+  "type": "module",
+  "scripts": {
+    "build": "node build.js",
+    "fixtures": "node test/make-fixtures.mjs",
+    "test": "node build.js && node test/make-fixtures.mjs && node test/smoke.mjs"
+  },
+  "devDependencies": {
+    "jspdf": "2.5.1",
+    "three": "0.128.0"
+  },
+  "comments": {
+    "devDependencies": "Only the smoke test uses these. The shipped dfm-tool.html loads three.js and jsPDF from a CDN at runtime; the test serves these local copies in their place so it never depends on the network."
+  }
+}

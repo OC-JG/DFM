@@ -1,0 +1,220 @@
+/*
+ * Flow-length analysis — geodesic distance from the gate across the mesh
+ * surface, and the resulting L/T ratio per triangle.
+ *
+ * Two rewrites versus the original, both about scale:
+ *
+ *  1. Adjacency is built as CSR (compressed sparse row) over deduplicated
+ *     neighbours. The original pushed six entries per triangle into an array
+ *     of arrays, so every vertex appeared once per incident triangle and each
+ *     duplicate was relaxed again.
+ *
+ *  2. Dijkstra uses a binary heap. The original scanned the whole frontier
+ *     linearly for the minimum, which is O(V²) — its own comment conceded
+ *     this was "adequate up to ~10k verts", and a tessellated STEP part is
+ *     routinely five times that.
+ */
+
+/* Minimal binary min-heap over (vertex, distance) pairs, backed by typed
+   arrays so there is no per-node object churn. */
+class MinHeap {
+  constructor(capacity) {
+    this.nodes = new Int32Array(capacity);
+    this.keys = new Float64Array(capacity);
+    this.size = 0;
+    this.capacity = capacity;
+  }
+
+  push(node, key) {
+    if (this.size === this.capacity) {
+      this.capacity = Math.ceil(this.capacity * 1.6);
+      const n = new Int32Array(this.capacity); n.set(this.nodes); this.nodes = n;
+      const k = new Float64Array(this.capacity); k.set(this.keys); this.keys = k;
+    }
+    let i = this.size++;
+    this.nodes[i] = node;
+    this.keys[i] = key;
+    while (i > 0) {
+      const parent = (i - 1) >> 1;
+      if (this.keys[parent] <= this.keys[i]) break;
+      this._swap(i, parent);
+      i = parent;
+    }
+  }
+
+  pop() {
+    const topNode = this.nodes[0];
+    const topKey = this.keys[0];
+    this.size--;
+    if (this.size > 0) {
+      this.nodes[0] = this.nodes[this.size];
+      this.keys[0] = this.keys[this.size];
+      let i = 0;
+      while (true) {
+        const l = 2 * i + 1, r = l + 1;
+        let smallest = i;
+        if (l < this.size && this.keys[l] < this.keys[smallest]) smallest = l;
+        if (r < this.size && this.keys[r] < this.keys[smallest]) smallest = r;
+        if (smallest === i) break;
+        this._swap(i, smallest);
+        i = smallest;
+      }
+    }
+    return { node: topNode, key: topKey };
+  }
+
+  _swap(a, b) {
+    const n = this.nodes[a]; this.nodes[a] = this.nodes[b]; this.nodes[b] = n;
+    const k = this.keys[a]; this.keys[a] = this.keys[b]; this.keys[b] = k;
+  }
+}
+
+/* Build deduplicated vertex adjacency in CSR form: neighbours of vertex v
+   live in adj[offsets[v] .. offsets[v+1]). */
+function buildAdjacency(indices, triCount, vertCount) {
+  const degree = new Uint32Array(vertCount + 1);
+  for (let t = 0; t < triCount; t++) {
+    degree[indices[t * 3]] += 2;
+    degree[indices[t * 3 + 1]] += 2;
+    degree[indices[t * 3 + 2]] += 2;
+  }
+  const offsets = new Uint32Array(vertCount + 1);
+  let acc = 0;
+  for (let v = 0; v < vertCount; v++) { offsets[v] = acc; acc += degree[v]; }
+  offsets[vertCount] = acc;
+
+  const cursor = Uint32Array.from(offsets.subarray(0, vertCount));
+  const raw = new Uint32Array(acc);
+  const add = (a, b) => { raw[cursor[a]++] = b; };
+  for (let t = 0; t < triCount; t++) {
+    const a = indices[t * 3], b = indices[t * 3 + 1], c = indices[t * 3 + 2];
+    add(a, b); add(a, c);
+    add(b, a); add(b, c);
+    add(c, a); add(c, b);
+  }
+
+  /* Compact each vertex's neighbour run in place, dropping duplicates. */
+  const outOffsets = new Uint32Array(vertCount + 1);
+  let w = 0;
+  for (let v = 0; v < vertCount; v++) {
+    const start = offsets[v], end = offsets[v + 1];
+    outOffsets[v] = w;
+    const run = raw.subarray(start, end);
+    run.sort();
+    let prev = -1;
+    for (let i = 0; i < run.length; i++) {
+      if (run[i] !== prev) { raw[w++] = run[i]; prev = run[i]; }
+    }
+  }
+  outOffsets[vertCount] = w;
+  return { offsets: outOffsets, adj: raw.subarray(0, w) };
+}
+
+export function computeFlowLengths(geom, gateLoc, triCentroid, triThickness, triCount, ltMax, triAreas) {
+  const { vertices, indices, vertCount } = geom;
+
+  // 1. Nearest vertex and nearest triangle to the picked gate point.
+  let nearestV = 0, nearestD2 = Infinity;
+  for (let v = 0; v < vertCount; v++) {
+    const dx = vertices[v * 3] - gateLoc[0];
+    const dy = vertices[v * 3 + 1] - gateLoc[1];
+    const dz = vertices[v * 3 + 2] - gateLoc[2];
+    const d2 = dx * dx + dy * dy + dz * dz;
+    if (d2 < nearestD2) { nearestD2 = d2; nearestV = v; }
+  }
+  let nearestTri = -1, nearestTriD2 = Infinity;
+  for (let t = 0; t < triCount; t++) {
+    const dx = triCentroid[t * 3] - gateLoc[0];
+    const dy = triCentroid[t * 3 + 1] - gateLoc[1];
+    const dz = triCentroid[t * 3 + 2] - gateLoc[2];
+    const d2 = dx * dx + dy * dy + dz * dz;
+    if (d2 < nearestTriD2) { nearestTriD2 = d2; nearestTri = t; }
+  }
+  const gateLocalThickness = (nearestTri >= 0 && triThickness && !isNaN(triThickness[nearestTri]))
+    ? triThickness[nearestTri] : null;
+
+  // 2. Dijkstra over the vertex graph, edges weighted by Euclidean length.
+  const { offsets, adj } = buildAdjacency(indices, triCount, vertCount);
+  const dist = new Float64Array(vertCount).fill(Infinity);
+  const visited = new Uint8Array(vertCount);
+  dist[nearestV] = 0;
+
+  const heap = new MinHeap(Math.max(64, vertCount >> 2));
+  heap.push(nearestV, 0);
+  while (heap.size > 0) {
+    const { node: u, key: du } = heap.pop();
+    if (visited[u]) continue;      // stale entry from a since-improved key
+    visited[u] = 1;
+    const ux = vertices[u * 3], uy = vertices[u * 3 + 1], uz = vertices[u * 3 + 2];
+    for (let e = offsets[u]; e < offsets[u + 1]; e++) {
+      const w = adj[e];
+      if (visited[w]) continue;
+      const dx = vertices[w * 3] - ux;
+      const dy = vertices[w * 3 + 1] - uy;
+      const dz = vertices[w * 3 + 2] - uz;
+      const nd = du + Math.sqrt(dx * dx + dy * dy + dz * dz);
+      if (nd < dist[w]) { dist[w] = nd; heap.push(w, nd); }
+    }
+  }
+
+  // 3. Per-triangle flow length (mean of its vertices) and L/T ratio.
+  const triFlow = new Float32Array(triCount);
+  const triLT = new Float32Array(triCount);
+  let maxFlow = 0, maxLT = 0, tMaxLT = -1;
+  let areaOverLT = 0, areaTotal = 0;
+
+  for (let t = 0; t < triCount; t++) {
+    const a = indices[t * 3], b = indices[t * 3 + 1], c = indices[t * 3 + 2];
+    const fl = (dist[a] + dist[b] + dist[c]) / 3;
+    triFlow[t] = isFinite(fl) ? fl : NaN;
+    if (isFinite(fl) && fl > maxFlow) maxFlow = fl;
+
+    const th = triThickness[t];
+    if (!isNaN(th) && isFinite(fl) && th > 0.01) {
+      const lt = fl / th;
+      triLT[t] = lt;
+      if (lt > maxLT) { maxLT = lt; tMaxLT = t; }
+      const area = triAreas ? triAreas[t] : 1;
+      areaTotal += area;
+      if (lt > ltMax) areaOverLT += area;
+    } else {
+      triLT[t] = NaN;
+    }
+  }
+
+  const worstLocation = tMaxLT >= 0
+    ? [triCentroid[tMaxLT * 3], triCentroid[tMaxLT * 3 + 1], triCentroid[tMaxLT * 3 + 2]]
+    : null;
+
+  // 4. Weld-line approximation: the furthest-fill triangles, spread apart.
+  //    These are where the last-arriving flow fronts meet.
+  const candidates = [];
+  const order = [];
+  for (let t = 0; t < triCount; t++) {
+    if (isFinite(triFlow[t]) && !isNaN(triThickness[t])) order.push(t);
+  }
+  order.sort((a, b) => triFlow[b] - triFlow[a]);
+  const minSep = maxFlow * 0.1;
+  for (const t of order) {
+    const cx = triCentroid[t * 3], cy = triCentroid[t * 3 + 1], cz = triCentroid[t * 3 + 2];
+    let tooClose = false;
+    for (const w of candidates) {
+      const dx = w[0] - cx, dy = w[1] - cy, dz = w[2] - cz;
+      if (dx * dx + dy * dy + dz * dz < minSep * minSep) { tooClose = true; break; }
+    }
+    if (!tooClose) candidates.push([cx, cy, cz]);
+    if (candidates.length >= 3) break;
+  }
+
+  return {
+    gate: gateLoc,
+    nearestVertex: [vertices[nearestV * 3], vertices[nearestV * 3 + 1], vertices[nearestV * 3 + 2]],
+    triFlow, triLT,
+    maxFlow, maxLT,
+    pctOverLT: areaTotal > 0 ? (areaOverLT / areaTotal) * 100 : 0,
+    ltMax,
+    worstLocation,
+    gateLocalThickness,
+    weldCandidates: candidates,
+  };
+}
