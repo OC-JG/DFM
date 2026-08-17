@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>OnlyCat DFM // Injection Moulding Analyser</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="Injection moulding design-for-manufacture analyser for STL and STEP parts.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Archivo:wght@400;500;700;900&display=swap" rel="stylesheet">
+<!-- three.js is required for the viewer. jsPDF and the OpenCascade STEP
+     reader are loaded on demand, so a session that never exports a PDF or
+     opens a STEP file never pays for them. -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<style>
+/*@CSS@*/
+</style>
+</head>
+<body>
+
+<a class="skip-link" href="#viewer">Skip to viewer</a>
+
+<header>
+  <div class="brand">
+    <img src="data:image/png;base64,@LOGO@" alt="OnlyCat" class="brand-logo">
+    <div class="brand-sub">Injection&nbsp;Moulding&nbsp;Analyser&nbsp;//&nbsp;v2.0</div>
+  </div>
+  <div class="meta-row">
+    <span>SESSION&nbsp;<b id="sessionId">—</b></span>
+    <span>RUN&nbsp;<b id="runCount">000</b></span>
+    <span id="timestamp">—</span>
+    <span id="threadNote" class="thread-note"></span>
+  </div>
+  <div class="status-pill" id="statusPill" role="status" aria-live="polite">AWAITING&nbsp;INPUT</div>
+</header>
+
+<main>
+
+  <!-- ══ LEFT: INPUTS ══════════════════════════════════════════════════ -->
+  <aside class="panel" aria-label="Inputs">
+    <div class="panel-header"><span>01 // Input</span><span>geometry + material</span></div>
+
+    <!-- Geometry source — always open -->
+    <section class="section">
+      <h2 class="section-title">Geometry source</h2>
+      <div class="field">
+        <label for="analysisMode">Mode</label>
+        <select id="analysisMode">
+          <option value="single">Single part</option>
+          <option value="twoshot">Two-shot / Overmould</option>
+        </select>
+      </div>
+      <p class="mode-hint" id="modeHint">Switch to <b>Two-shot / Overmould</b> to analyse a substrate + overmould pair and check material adhesion, thermal &amp; shrinkage compatibility.</p>
+
+      <div id="shot1Zone">
+        <div class="zone-label" id="shot1Label">Part</div>
+        <div class="upload-zone" id="dropZone" role="button" tabindex="0" aria-controls="fileInput">
+          <strong>Drop STL or STEP file</strong>
+          <small>.stl · .step · .stp · or click to browse</small>
+        </div>
+        <input type="file" id="fileInput" accept=".stl,.step,.stp" class="visually-hidden">
+        <div class="file-info" id="fileInfo" aria-live="polite"></div>
+      </div>
+
+      <div id="opticalWindowField" hidden>
+        <div class="field">
+          <label for="windowType">Window type</label>
+          <select id="windowType">
+            <option value="none">Standard overmould</option>
+            <option value="optical">Optical / indicator window</option>
+            <option value="ir">IR sensor window (850–940 nm)</option>
+          </select>
+        </div>
+        <div id="opticalNote" class="side-note" hidden></div>
+      </div>
+
+      <div id="shot2Zone" hidden>
+        <div class="zone-label">Shot 2 / Overmould</div>
+        <div class="upload-zone" id="dropZone2" role="button" tabindex="0" aria-controls="fileInput2">
+          <strong>Drop Shot 2 file</strong>
+          <small>Overmould geometry (STL or STEP)</small>
+        </div>
+        <input type="file" id="fileInput2" accept=".stl,.step,.stp" class="visually-hidden">
+        <div class="file-info" id="fileInfo2" aria-live="polite"></div>
+      </div>
+    </section>
+
+    <!-- Solid bodies — only for multi-body STEP files -->
+    <details class="section" id="bodiesSection" open hidden>
+      <summary class="section-title">Solid bodies</summary>
+      <div class="section-body">
+        <p class="hint">This STEP file contains multiple bodies. Toggle visibility for inspection. <b>Analysis always runs on all bodies.</b></p>
+        <div class="bodies-toolbar">
+          <button type="button" class="btn secondary bodies-btn" id="bodiesAllBtn">All</button>
+          <button type="button" class="btn secondary bodies-btn" id="bodiesNoneBtn">None</button>
+          <button type="button" class="btn secondary bodies-btn" id="bodiesInvertBtn">Invert</button>
+        </div>
+        <div class="bodies-count" id="bodiesCount"></div>
+        <div id="bodiesList"></div>
+      </div>
+    </details>
+
+    <!-- Material -->
+    <details class="section" open>
+      <summary class="section-title">Material</summary>
+      <div class="section-body">
+        <div class="field">
+          <label for="material" id="mat1Label">Polymer</label>
+          <select id="material"></select>
+        </div>
+        <div class="field" id="mat2Field" hidden>
+          <label for="material2">Shot 2 material</label>
+          <select id="material2"></select>
+        </div>
+        <div id="compatBadge" class="side-note" hidden></div>
+        <div class="field">
+          <label for="surfaceFinish">Surface finish</label>
+          <select id="surfaceFinish"></select>
+        </div>
+        <div id="materialInfo" class="mat-grid"></div>
+      </div>
+    </details>
+
+    <!-- Mould alignment -->
+    <details class="section" open>
+      <summary class="section-title">Mould alignment</summary>
+      <div class="section-body">
+        <div class="field">
+          <label for="moldType">Mould type</label>
+          <select id="moldType">
+            <option value="two-piece">Two-piece parting</option>
+            <option value="single-pull">Single-pull (one half)</option>
+          </select>
+        </div>
+        <fieldset class="axis-fieldset">
+          <legend>Pull direction</legend>
+          <div class="axis-btns" id="axisBtns">
+            <button type="button" class="axis-btn" data-axis="+x" aria-pressed="false">+X</button>
+            <button type="button" class="axis-btn" data-axis="-x" aria-pressed="false">−X</button>
+            <button type="button" class="axis-btn" data-axis="+y" aria-pressed="false">+Y</button>
+            <button type="button" class="axis-btn" data-axis="-y" aria-pressed="false">−Y</button>
+            <button type="button" class="axis-btn active" data-axis="+z" aria-pressed="true">+Z</button>
+            <button type="button" class="axis-btn" data-axis="-z" aria-pressed="false">−Z</button>
+          </div>
+        </fieldset>
+        <div class="btn-row">
+          <button type="button" class="btn secondary" id="pickFaceBtn" aria-pressed="false">⊕ Pick face</button>
+          <button type="button" class="btn secondary" id="autoPullBtn">⊕ Auto</button>
+        </div>
+        <div id="pullDirInfo" class="hint" aria-live="polite">Pull <b>+Z</b>. Auto-detects best axis from mesh.</div>
+      </div>
+    </details>
+
+    <!-- Gate location -->
+    <details class="section" open>
+      <summary class="section-title">Gate location</summary>
+      <div class="section-body">
+        <div class="btn-row">
+          <button type="button" class="btn secondary" id="pickGateBtn" aria-pressed="false">⊕ Pick gate</button>
+          <button type="button" class="btn secondary" id="clearGateBtn">× Clear</button>
+        </div>
+        <div id="gateInfo" class="hint" aria-live="polite">
+          Click <b>Pick gate</b>, then click any point on the 3D part. A red dot will mark the gate. Required for flow length (L/T) check.
+        </div>
+      </div>
+    </details>
+
+    <!-- Manual specification -->
+    <details class="section" id="manualSection">
+      <summary class="section-title">Manual specification</summary>
+      <div class="section-body">
+        <div class="from-mesh-badge" id="fromMeshBadge">✓ Values inferred from mesh</div>
+        <div class="field">
+          <label for="wallThk">Nominal wall</label>
+          <div><input type="number" id="wallThk" step="0.1" min="0.1"><span class="field-unit">mm</span></div>
+        </div>
+        <div class="field">
+          <label for="wallMin">Min wall</label>
+          <div><input type="number" id="wallMin" step="0.1" min="0"><span class="field-unit">mm</span></div>
+        </div>
+        <div class="field">
+          <label for="wallMax">Max wall</label>
+          <div><input type="number" id="wallMax" step="0.1" min="0"><span class="field-unit">mm</span></div>
+        </div>
+        <div class="field">
+          <label for="draftAngle">Draft angle</label>
+          <div><input type="number" id="draftAngle" step="0.1" min="0"><span class="field-unit">°</span></div>
+        </div>
+        <div class="field">
+          <label for="ribThk">Rib thickness</label>
+          <div><input type="number" id="ribThk" step="0.1" min="0"><span class="field-unit">mm</span></div>
+        </div>
+        <div class="field">
+          <label for="ribH">Rib height</label>
+          <div><input type="number" id="ribH" step="0.1" min="0"><span class="field-unit">mm</span></div>
+        </div>
+        <div class="field">
+          <label for="ribRadius">Rib base radius</label>
+          <div><input type="number" id="ribRadius" step="0.05" min="0"><span class="field-unit">mm</span></div>
+        </div>
+        <div class="field">
+          <label for="bossOD">Boss OD</label>
+          <div><input type="number" id="bossOD" step="0.1" min="0"><span class="field-unit">mm</span></div>
+        </div>
+        <div class="field">
+          <label for="bossWall">Boss wall</label>
+          <div><input type="number" id="bossWall" step="0.1" min="0"><span class="field-unit">mm</span></div>
+        </div>
+        <div class="field">
+          <label for="hasUndercut">Has undercuts</label>
+          <select id="hasUndercut">
+            <option value="0">No</option>
+            <option value="1">Yes — slide req'd</option>
+            <option value="2">Yes — lifter req'd</option>
+          </select>
+        </div>
+      </div>
+    </details>
+
+    <!-- Overmoulded inserts -->
+    <details class="section">
+      <summary class="section-title">Overmoulded inserts</summary>
+      <div class="section-body">
+        <div class="field">
+          <span class="field-label">FPC overmould</span>
+          <label class="checkbox-inline" for="fpcEnabled"><input type="checkbox" id="fpcEnabled"> Overmoulds a flexible circuit</label>
+        </div>
+        <div id="fpcOptions" hidden>
+          <div class="field">
+            <label for="fpcThickness">FPC thickness</label>
+            <div><input type="number" id="fpcThickness" step="0.01" min="0.05" max="2"><span class="field-unit">mm</span></div>
+          </div>
+          <div class="field">
+            <label for="fpcCover">Min cover each side</label>
+            <div><input type="number" id="fpcCover" step="0.05" min="0.1" max="2"><span class="field-unit">mm</span></div>
+          </div>
+          <div class="field">
+            <label for="fpcAnchors">FPC has anchors</label>
+            <select id="fpcAnchors">
+              <option value="none">None (relies on adhesion)</option>
+              <option value="holes">Through-holes / cutouts</option>
+              <option value="tabs">Tabs / protrusions</option>
+              <option value="both">Holes + tabs</option>
+            </select>
+          </div>
+          <div id="fpcInfo" class="hint">
+            FPC inserts limit polymer melt temperature, raise effective minimum wall, and reduce safe flow length.
+          </div>
+        </div>
+      </div>
+    </details>
+
+    <!-- Checks -->
+    <details class="section">
+      <summary class="section-title">Advanced checks</summary>
+      <div class="section-body">
+        <div class="checklist">
+          <label><input type="checkbox" id="chk_wall"> Wall thickness &amp; uniformity</label>
+          <label><input type="checkbox" id="chk_draft"> Draft angles</label>
+          <label><input type="checkbox" id="chk_ribs"> Ribs &amp; bosses geometry</label>
+          <label><input type="checkbox" id="chk_undercut"> Undercuts &amp; parting line</label>
+          <label><input type="checkbox" id="chk_sink"> Sink-mark risk</label>
+          <label><input type="checkbox" id="chk_warp"> Shrinkage &amp; warpage risk</label>
+          <label><input type="checkbox" id="chk_transitions"> Wall transitions <span class="dim">(STEP — STL unreliable)</span></label>
+          <label><input type="checkbox" id="chk_flow"> Flow length (L/T) — needs gate</label>
+          <label><input type="checkbox" id="chk_fpc"> FPC overmoulding</label>
+        </div>
+      </div>
+    </details>
+
+    <div class="section">
+      <button type="button" class="btn" id="runBtn">▶ Run analysis</button>
+      <button type="button" class="btn secondary" id="resetBtn">Start over</button>
+    </div>
+  </aside>
+
+  <!-- ══ CENTRE: VIEWER ════════════════════════════════════════════════ -->
+  <div class="viewer-wrap">
+    <div class="part-summary" id="partSummary"></div>
+    <div id="viewer" tabindex="-1"></div>
+
+    <div class="viewer-overlay">
+      <div>VIEW <b id="viewMode">isometric</b></div>
+    </div>
+
+    <div class="viewer-legend" id="viewerLegend" style="display:none;"></div>
+
+    <div class="viewer-controls">
+      <div class="btn-group" role="group" aria-label="Camera view">
+        <button type="button" class="view-btn" data-view="iso" aria-pressed="false">ISO</button>
+        <button type="button" class="view-btn" data-view="top" aria-pressed="false">TOP</button>
+        <button type="button" class="view-btn" data-view="front" aria-pressed="false">FRONT</button>
+        <button type="button" class="view-btn" data-view="right" aria-pressed="false">RIGHT</button>
+        <button type="button" class="view-btn" id="frameBtn" title="Frame to fit (F)">FRAME</button>
+      </div>
+      <div class="btn-group" id="heatModes" role="group" aria-label="Heatmap mode"></div>
+    </div>
+
+    <div class="nav-hint" id="navHint">
+      <span><b>drag</b> orbit</span>
+      <span><b>shift+drag</b> pan</span>
+      <span><b>wheel</b> zoom</span>
+      <span><b>dbl-click</b> recentre</span>
+      <span><b>F</b> fit</span>
+    </div>
+
+    <div class="viewer-empty" id="viewerEmpty">
+      <h2>Drop&nbsp;a&nbsp;part to&nbsp;begin</h2>
+      <p>STL · STEP · or use manual mode</p>
+    </div>
+
+    <div class="viewer-hint" id="viewerHint">
+      <div class="onboard-step" id="onboardStep1"><span class="onboard-num">1</span><span class="onboard-txt">Drop an STL or STEP file</span></div>
+      <div class="onboard-step" id="onboardStep2"><span class="onboard-num">2</span><span class="onboard-txt">Select a material</span></div>
+      <div class="onboard-step" id="onboardStep3"><span class="onboard-num">3</span><span class="onboard-txt">Run analysis</span></div>
+    </div>
+
+    <div class="progress-overlay" id="progressOverlay">
+      <div class="progress-box">
+        <div class="progress-label" id="progressLabel">Working…</div>
+        <div class="progress-track"><div class="progress-bar" id="progressBar"></div></div>
+        <div class="progress-hint">OnlyCat DFM</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══ RIGHT: RESULTS ════════════════════════════════════════════════ -->
+  <aside class="panel" aria-label="Results">
+    <div class="panel-header"><span>02 // Results</span><span id="resultStatus">idle</span></div>
+
+    <div id="resultsEmpty" class="empty-state">
+      No analysis yet —<br>
+      configure inputs and run
+    </div>
+
+    <div id="resultsContent" style="display:none;">
+      <div class="score-block">
+        <div class="score-label">Manufacturability Index</div>
+        <div class="score-value" id="scoreValue">—</div>
+        <div class="score-grade" id="scoreGrade"></div>
+        <div class="score-blocker" id="scoreBlocker"></div>
+        <div class="score-bars" id="scoreBars"></div>
+      </div>
+
+      <div id="checksList"></div>
+
+      <div id="toolingSection" style="display:none;">
+        <button type="button" class="tooling-toggle" id="toolingToggle" aria-expanded="true" aria-controls="toolingActions">
+          <span id="toolingToggleLabel">Tooling actions</span>
+          <span class="tooling-toggle-arrow open" id="toolingArrow" aria-hidden="true">▴</span>
+        </button>
+        <div id="toolingActions"></div>
+      </div>
+
+      <div id="twoShotResults" style="display:none;">
+        <div class="score-block score-block-alt">
+          <div class="score-label">Two-Shot Interface Score</div>
+          <div class="score-value" id="tsScore">—</div>
+          <div class="score-grade" id="tsGrade"></div>
+          <div class="score-blocker" id="tsBlocker"></div>
+          <div class="score-bars" id="tsBars"></div>
+        </div>
+        <div id="tsChecksList"></div>
+      </div>
+
+      <div class="actions">
+        <button type="button" class="btn" id="pdfBtn">↓ Export PDF report</button>
+        <button type="button" class="btn secondary" id="jsonBtn">↓ Export JSON</button>
+      </div>
+    </div>
+  </aside>
+
+</main>
+
+<footer>
+  <span>OnlyCat DFM — guidelines based on ANSI &amp; standard moulder practice</span>
+  <span id="footerTick">○○○○○</span>
+</footer>
+
+<script type="module">
+/*@APP@*/
+</script>
+
+</body>
+</html>

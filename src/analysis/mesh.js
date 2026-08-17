@@ -1,0 +1,398 @@
+import { buildBVH, castRay } from '../geometry/bvh.js';
+import { computeBounds } from '../geometry/weld.js';
+import { stats, resolvePullDir } from './stats.js';
+import { clusterUndercuts } from './undercuts.js';
+import { detectWallTransitions } from './transitions.js';
+import { computeFlowLengths } from './flow.js';
+
+/*
+ * Mesh analysis: per-triangle draft, wall thickness, sink risk, undercuts,
+ * wall transitions and flow length.
+ *
+ * This module is deliberately free of any DOM access. The original read
+ * `document.getElementById('material').value` from the middle of the maths,
+ * which made the analysis impossible to run off the main thread and — in
+ * two-shot mode — silently analysed shot 2 using shot 1's material. Every
+ * process input now arrives through `opts`.
+ */
+
+/* Above this triangle count, per-triangle thickness is subsampled. Full
+   coverage is one BVH ray per triangle, which is affordable well past the
+   old 20k limit, especially in a worker. */
+const THICKNESS_FULL_CAP = 200000;
+
+export function analyseMesh(geom, opts = {}) {
+  const {
+    material,
+    finishKey = 'spi-a2',
+    moldType = 'two-piece',
+    minDraft: minDraftOpt,
+    manualWall,
+    gateLocation,
+    samples = 3000,
+    onProgress,
+  } = opts;
+
+  if (!material) throw new Error('analyseMesh requires a material');
+
+  const [pdx, pdy, pdz] = resolvePullDir(opts.pullDir, opts.pullAxis);
+  const { vertices, indices, triCount } = geom;
+
+  const boundsInfo = computeBounds(vertices);
+  const bbox = { min: boundsInfo.min, max: boundsInfo.max, size: boundsInfo.size };
+  const diag = boundsInfo.diag;
+  const eps = diag * 1e-5;
+
+  const minDraft = minDraftOpt != null ? minDraftOpt : material.draftMin;
+  const baseMinDraft = material.draftMin;
+  const isTwoPiece = moldType !== 'single-pull';
+
+  // ── Per-triangle geometry ────────────────────────────────────────────────
+  const triAreas = new Float32Array(triCount);
+  const triFNorm = new Float32Array(triCount * 3);
+  const triCentroid = new Float32Array(triCount * 3);
+  const triPullDot = new Float32Array(triCount);   // n · pullDir, signed
+  const triDraft = new Float32Array(triCount);
+  const triUndercut = new Uint8Array(triCount);    // 0 none, 1 slide, 2 lifter
+  let area = 0, volume = 0;
+
+  for (let t = 0; t < triCount; t++) {
+    const ia = indices[t * 3] * 3, ib = indices[t * 3 + 1] * 3, ic = indices[t * 3 + 2] * 3;
+    const ax = vertices[ia], ay = vertices[ia + 1], az = vertices[ia + 2];
+    const bx = vertices[ib], by = vertices[ib + 1], bz = vertices[ib + 2];
+    const cx = vertices[ic], cy = vertices[ic + 1], cz = vertices[ic + 2];
+    const e1x = bx - ax, e1y = by - ay, e1z = bz - az;
+    const e2x = cx - ax, e2y = cy - ay, e2z = cz - az;
+    const nx = e1y * e2z - e1z * e2y;
+    const ny = e1z * e2x - e1x * e2z;
+    const nz = e1x * e2y - e1y * e2x;
+    const dlen = Math.sqrt(nx * nx + ny * ny + nz * nz);
+
+    triAreas[t] = 0.5 * dlen;
+    area += triAreas[t];
+    /* Signed tetrahedron volume against the origin; summed over a closed
+       mesh this is the enclosed volume. */
+    volume += (ax * (by * cz - bz * cy) + ay * (bz * cx - bx * cz) + az * (bx * cy - by * cx)) / 6;
+
+    const inv = 1 / (dlen || 1);
+    const nnx = nx * inv, nny = ny * inv, nnz = nz * inv;
+    triFNorm[t * 3] = nnx; triFNorm[t * 3 + 1] = nny; triFNorm[t * 3 + 2] = nnz;
+    triCentroid[t * 3] = (ax + bx + cx) / 3;
+    triCentroid[t * 3 + 1] = (ay + by + cy) / 3;
+    triCentroid[t * 3 + 2] = (az + bz + cz) / 3;
+
+    /* +1 faces with the pull (top), −1 against it (bottom), 0 sidewall. */
+    triPullDot[t] = nnx * pdx + nny * pdy + nnz * pdz;
+  }
+  volume = Math.abs(volume);
+
+  if (onProgress) onProgress(0.2, 'Building BVH');
+  const bvh = buildBVH(geom);
+
+  // ── Inner vs outer face classification ───────────────────────────────────
+  // For each sidewall triangle, cast four short rays outward along the face
+  // normal from points spread across a small disc in the face plane. Rays
+  // that hit more mesh mean this face looks into a cavity.
+  //
+  // Sampling four origins rather than one centroid makes the test robust to
+  // glancing rays and small mesh gaps. A correctly drafted *inner* wall has
+  // its normal pointing inward, so its raw pullDot sign reads as negative
+  // draft even though the draft is right — hence the sign correction below.
+  const triFaceSide = new Uint8Array(triCount); // 0 outer/top/bottom, 1 inner
+  const discR = eps * 50;
+  for (let t = 0; t < triCount; t++) {
+    if (Math.abs(triPullDot[t]) > 0.7) continue; // top/bottom: side is irrelevant
+
+    const cx = triCentroid[t * 3], cy = triCentroid[t * 3 + 1], cz = triCentroid[t * 3 + 2];
+    const nx = triFNorm[t * 3], ny = triFNorm[t * 3 + 1], nz = triFNorm[t * 3 + 2];
+
+    /* Two tangents spanning the face plane, via Gram-Schmidt off the normal. */
+    let ux = Math.abs(nx) < 0.9 ? 1 : 0, uy = Math.abs(nx) < 0.9 ? 0 : 1, uz = 0;
+    const d = ux * nx + uy * ny + uz * nz;
+    ux -= d * nx; uy -= d * ny; uz -= d * nz;
+    const uLen = Math.hypot(ux, uy, uz) || 1;
+    ux /= uLen; uy /= uLen; uz /= uLen;
+    const vx = ny * uz - nz * uy, vy = nz * ux - nx * uz, vz = nx * uy - ny * ux;
+
+    let hits = 0;
+    for (let k = 0; k < 4; k++) {
+      const ang = (k - 1) * (2 * Math.PI / 3);
+      const du = k === 0 ? 0 : discR * Math.cos(ang);
+      const dv = k === 0 ? 0 : discR * Math.sin(ang);
+      const ox = cx + ux * du + vx * dv + nx * eps;
+      const oy = cy + uy * du + vy * dv + ny * eps;
+      const oz = cz + uz * du + vz * dv + nz * eps;
+      const dist = castRay(bvh, geom, ox, oy, oz, nx, ny, nz, eps, t);
+      if (dist !== Infinity && dist < diag * 0.95) hits++;
+    }
+    if (hits >= 2) triFaceSide[t] = 1; // majority rules
+  }
+
+  for (let t = 0; t < triCount; t++) {
+    const effectivePD = triFaceSide[t] === 1 ? -triPullDot[t] : triPullDot[t];
+    triDraft[t] = Math.asin(Math.max(-1, Math.min(1, effectivePD))) * 180 / Math.PI;
+  }
+
+  // ── Area-weighted sidewall draft, split by face side ─────────────────────
+  // In a two-piece mould the same sidewall may belong to either half, so a
+  // face passes if it releases cleanly from *either* — that is, |draft| ≥ min.
+  // This is what makes drafted-then-shelled parts pass: the outer and inner
+  // walls of one feature have opposite signs and both are correct.
+  // A single-pull mould gets the strict test.
+  let sideArea = 0, sideAreaUnderMin = 0, sideAreaUnderHalf = 0, sideCount = 0;
+  let outerArea = 0, outerAreaUnderMin = 0;
+  let innerArea = 0, innerAreaUnderMin = 0;
+
+  for (let t = 0; t < triCount; t++) {
+    if (Math.abs(triPullDot[t]) >= 0.5) continue;
+    const a = triAreas[t];
+    const isInner = triFaceSide[t] === 1;
+    sideArea += a;
+    sideCount++;
+    if (isInner) innerArea += a; else outerArea += a;
+
+    const effectiveDraft = isTwoPiece ? Math.abs(triDraft[t]) : triDraft[t];
+    if (effectiveDraft < minDraft) {
+      sideAreaUnderMin += a;
+      if (isInner) innerAreaUnderMin += a; else outerAreaUnderMin += a;
+    }
+    if (effectiveDraft < minDraft * 0.5) sideAreaUnderHalf += a;
+  }
+
+  if (onProgress) onProgress(0.4, 'Sampling wall thickness');
+
+  // ── Wall thickness ───────────────────────────────────────────────────────
+  const thicknesses = sampleWallThickness(geom, bvh, triAreas, triCentroid, triFNorm, diag, samples);
+  const wallStats = stats(thicknesses);
+
+  if (onProgress) onProgress(0.6, 'Tagging thin/thick regions');
+
+  /* Per-triangle local thickness, for the heatmap and the sink/transition
+     checks. Below the cap every triangle gets a ray; above it we stride, and
+     the coverage figures below are then measured against the sampled area
+     rather than the full surface area. The original always used total area
+     as the denominator, so on any mesh over 20k triangles it under-reported
+     sink coverage by exactly the stride factor. */
+  const heatStride = triCount > THICKNESS_FULL_CAP ? Math.ceil(triCount / THICKNESS_FULL_CAP) : 1;
+  const triThickness = new Float32Array(triCount).fill(NaN);
+  let measuredArea = 0;
+  for (let t = 0; t < triCount; t += heatStride) {
+    const cx = triCentroid[t * 3], cy = triCentroid[t * 3 + 1], cz = triCentroid[t * 3 + 2];
+    const nx = triFNorm[t * 3], ny = triFNorm[t * 3 + 1], nz = triFNorm[t * 3 + 2];
+    const dist = castRay(bvh, geom, cx - nx * eps, cy - ny * eps, cz - nz * eps, -nx, -ny, -nz, eps, t);
+    if (dist !== Infinity && dist < diag) {
+      triThickness[t] = dist;
+      measuredArea += triAreas[t];
+    }
+  }
+
+  if (onProgress) onProgress(0.75, 'Computing sink risk');
+
+  // ── Sink-mark risk ───────────────────────────────────────────────────────
+  // Sink appears where local thickness runs well above nominal: the mass
+  // behind the visible surface cannot cool uniformly. Ribs are kept to ≤0.6×
+  // wall for exactly this reason, so accumulated mass at ratio > 1.6 is the
+  // point where risk starts, reaching full severity by 3.0×.
+  const meshNominal = (wallStats.n > 10) ? wallStats.median : null;
+  const nominalWall = meshNominal != null ? meshNominal
+    : (manualWall || (material.wallLo + material.wallHi) / 2);
+
+  const triSinkRisk = new Float32Array(triCount);
+  let sinkArea = 0, sinkAreaModerate = 0, sinkAreaSevere = 0;
+  for (let t = 0; t < triCount; t++) {
+    const th = triThickness[t];
+    if (isNaN(th)) continue;
+    const ratio = th / nominalWall;
+    const risk = ratio > 1.6 ? Math.min(1, (ratio - 1.6) / 1.4) : 0;
+    triSinkRisk[t] = risk;
+    if (risk > 0) sinkArea += triAreas[t];
+    if (risk > 0.3) sinkAreaModerate += triAreas[t];
+    if (risk > 0.6) sinkAreaSevere += triAreas[t];
+  }
+  const sinkDenom = measuredArea > 0 ? measuredArea : area;
+
+  if (onProgress) onProgress(0.85, 'Detecting undercuts');
+
+  // ── Undercut detection ───────────────────────────────────────────────────
+  // A face is a true undercut when releasing the part would drag the tool
+  // over solid material. Cases handled:
+  //
+  //  (1) Sidewall undercut — near-vertical wall leaning toward the parting
+  //      plane. Only meaningful for single-pull moulds: in a two-piece mould
+  //      such a wall simply belongs to the other half.
+  //  (2) External underbelly — a face pointing against pull whose outward ray
+  //      escapes to infinity. Lip undersides, snap-hook barbs.
+  //  (3) Excluded — faces near the part's pull-minimum boundary, which are
+  //      formed by the cavity half and release with its retraction, not with
+  //      a slide or lifter.
+  //
+  // Slide vs lifter comes from the outward-normal ray: escaping to infinity
+  // means external (slide), hitting more mesh means an internal pocket
+  // (lifter).
+  let pullMin = Infinity, pullMax = -Infinity;
+  for (let i = 0; i < vertices.length; i += 3) {
+    const d = vertices[i] * pdx + vertices[i + 1] * pdy + vertices[i + 2] * pdz;
+    if (d < pullMin) pullMin = d;
+    if (d > pullMax) pullMax = d;
+  }
+  const partingBand = (pullMax - pullMin) * 0.08;
+  const minSin = Math.sin(minDraft * Math.PI / 180);
+
+  for (let t = 0; t < triCount; t++) {
+    const pd = triPullDot[t];
+    const cd = triCentroid[t * 3] * pdx + triCentroid[t * 3 + 1] * pdy + triCentroid[t * 3 + 2] * pdz;
+    const distFromPullMin = cd - pullMin;
+
+    let isCandidate;
+    if (isTwoPiece) {
+      isCandidate = pd < -0.7 && distFromPullMin > partingBand;
+    } else {
+      isCandidate = (Math.abs(pd) < 0.7 && pd < -minSin)
+                 || (pd < -0.7 && distFromPullMin > partingBand);
+    }
+    if (!isCandidate) { triUndercut[t] = 0; continue; }
+
+    const cx = triCentroid[t * 3], cy = triCentroid[t * 3 + 1], cz = triCentroid[t * 3 + 2];
+    const nx = triFNorm[t * 3], ny = triFNorm[t * 3 + 1], nz = triFNorm[t * 3 + 2];
+    const outwardHit = castRay(bvh, geom,
+      cx + nx * eps * 10, cy + ny * eps * 10, cz + nz * eps * 10, nx, ny, nz, eps, t);
+    const exitsToInfinity = outwardHit === Infinity || outwardHit > diag * 0.99;
+
+    if (pd < -0.7) {
+      /* An underbelly only counts if it is genuinely external. */
+      triUndercut[t] = exitsToInfinity ? 1 : 0;
+    } else {
+      triUndercut[t] = exitsToInfinity ? 1 : 2;
+    }
+  }
+
+  let slideArea = 0, lifterArea = 0;
+  for (let t = 0; t < triCount; t++) {
+    if (triUndercut[t] === 1) slideArea += triAreas[t];
+    else if (triUndercut[t] === 2) lifterArea += triAreas[t];
+  }
+
+  if (onProgress) onProgress(0.95, 'Clustering tooling regions');
+  const undercutRegions = clusterUndercuts(
+    triCentroid, triAreas, triFNorm, triUndercut, triCount, diag, [pdx, pdy, pdz], geom);
+
+  if (onProgress) onProgress(0.97, 'Detecting wall transitions');
+  /* Transitions need both triangles of an edge pair to carry a reading, so
+     they are only meaningful over a full-coverage thickness pass. */
+  const wallTransitions = heatStride === 1 && wallStats.n > 10
+    ? detectWallTransitions(geom, triThickness, triCentroid, triCount, wallStats.median, diag)
+    : [];
+
+  if (onProgress) onProgress(0.99, 'Computing flow lengths');
+  const flowAnalysis = (gateLocation && Array.isArray(gateLocation))
+    ? computeFlowLengths(geom, gateLocation, triCentroid, triThickness, triCount, material.ltMax, triAreas)
+    : null;
+
+  return {
+    bbox, area, volume, triCount, diag,
+
+    triAreas, triDraft, triFNorm, triCentroid, triThickness,
+    triPullDot, triUndercut, triSinkRisk, triFaceSide,
+
+    sideCount, sideArea,
+    sidePctUnderMin: sideArea > 0 ? (sideAreaUnderMin / sideArea) * 100 : 0,
+    sidePctUnderHalf: sideArea > 0 ? (sideAreaUnderHalf / sideArea) * 100 : 0,
+    outerArea, innerArea, outerAreaUnderMin, innerAreaUnderMin,
+    outerPctUnderMin: outerArea > 0 ? (outerAreaUnderMin / outerArea) * 100 : 0,
+    innerPctUnderMin: innerArea > 0 ? (innerAreaUnderMin / innerArea) * 100 : 0,
+
+    wallStats, thicknesses,
+    thicknessCoverage: heatStride === 1 ? 1 : 1 / heatStride,
+
+    sinkArea, sinkAreaModerate, sinkAreaSevere,
+    sinkPctModerate: sinkDenom > 0 ? (sinkAreaModerate / sinkDenom) * 100 : 0,
+    sinkPctSevere: sinkDenom > 0 ? (sinkAreaSevere / sinkDenom) * 100 : 0,
+
+    slideArea, lifterArea, undercutRegions,
+    wallTransitions, flowAnalysis,
+
+    bvh,
+    nominalWall,
+    pullDir: [pdx, pdy, pdz],
+    pullAxis: opts.pullAxis || '+z',
+    minDraft, baseMinDraft, finishKey, moldType,
+    material,
+  };
+}
+
+/*
+ * Area-weighted wall thickness sampling.
+ *
+ * Triangles are drawn from the cumulative area distribution by stratified
+ * sampling, so large faces contribute proportionally and the resulting
+ * percentiles describe the part rather than its tessellation. From each
+ * sampled centroid a ray is cast straight into the solid; the first hit on
+ * the far surface is the local wall.
+ */
+function sampleWallThickness(geom, bvh, triAreas, triCentroid, triFNorm, diag, target) {
+  const { triCount } = geom;
+  const cdf = new Float64Array(triCount);
+  let acc = 0;
+  for (let i = 0; i < triCount; i++) { acc += triAreas[i]; cdf[i] = acc; }
+  const totalArea = acc;
+  if (totalArea <= 0) return [];
+
+  const result = [];
+  const samples = Math.min(target, triCount);
+  const eps = diag * 1e-5;
+
+  for (let s = 0; s < samples; s++) {
+    const u = (s + Math.random()) / samples * totalArea;
+    let lo = 0, hi = triCount - 1;
+    while (lo < hi) {
+      const m = (lo + hi) >> 1;
+      if (cdf[m] < u) lo = m + 1; else hi = m;
+    }
+    const t = lo;
+    const cx = triCentroid[t * 3], cy = triCentroid[t * 3 + 1], cz = triCentroid[t * 3 + 2];
+    const nx = triFNorm[t * 3], ny = triFNorm[t * 3 + 1], nz = triFNorm[t * 3 + 2];
+    const dist = castRay(bvh, geom, cx - nx * eps, cy - ny * eps, cz - nz * eps, -nx, -ny, -nz, eps, t);
+    if (dist !== Infinity && dist < diag) result.push(dist);
+  }
+  return result;
+}
+
+/*
+ * Suggest a pull direction by scoring all six cardinal axes on undercut area
+ * and taking the lowest. Cheap enough to run on every file load.
+ */
+export function suggestPullDirection(geom) {
+  const { indices, vertices, triCount } = geom;
+  const axes = [
+    { name: '+Z', vec: [0, 0, 1] }, { name: '-Z', vec: [0, 0, -1] },
+    { name: '+X', vec: [1, 0, 0] }, { name: '-X', vec: [-1, 0, 0] },
+    { name: '+Y', vec: [0, 1, 0] }, { name: '-Y', vec: [0, -1, 0] },
+  ];
+
+  const tA = new Float32Array(triCount);
+  const tN = new Float32Array(triCount * 3);
+  for (let t = 0; t < triCount; t++) {
+    const ia = indices[t * 3] * 3, ib = indices[t * 3 + 1] * 3, ic = indices[t * 3 + 2] * 3;
+    const ax = vertices[ia], ay = vertices[ia + 1], az = vertices[ia + 2];
+    const e1x = vertices[ib] - ax, e1y = vertices[ib + 1] - ay, e1z = vertices[ib + 2] - az;
+    const e2x = vertices[ic] - ax, e2y = vertices[ic + 1] - ay, e2z = vertices[ic + 2] - az;
+    const nx = e1y * e2z - e1z * e2y, ny = e1z * e2x - e1x * e2z, nz = e1x * e2y - e1y * e2x;
+    const dlen = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1;
+    tA[t] = 0.5 * dlen;
+    tN[t * 3] = nx / dlen; tN[t * 3 + 1] = ny / dlen; tN[t * 3 + 2] = nz / dlen;
+  }
+
+  const sinMin = Math.sin(1 * Math.PI / 180); // 1° draft threshold
+  let best = null;
+  for (const a of axes) {
+    let undercutArea = 0, totalArea = 0;
+    for (let t = 0; t < triCount; t++) {
+      const pd = tN[t * 3] * a.vec[0] + tN[t * 3 + 1] * a.vec[1] + tN[t * 3 + 2] * a.vec[2];
+      totalArea += tA[t];
+      if (Math.abs(pd) < 0.5 && pd < -sinMin) undercutArea += tA[t];
+    }
+    const pct = totalArea > 0 ? (undercutArea / totalArea) * 100 : 0;
+    if (!best || pct < best.pct) best = { name: a.name, dir: a.vec, pct };
+  }
+  return { dir: best.dir, name: best.name, reason: `${best.name} — ${best.pct.toFixed(1)}% undercut area (lowest)` };
+}
