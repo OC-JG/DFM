@@ -11,6 +11,9 @@
  *
  * Run: npm install && node test/make-fixtures.mjs && node test/smoke.mjs
  * Playwright is resolved from the global install; set NODE_PATH if needed.
+ * Set DFM_CHROMIUM to an existing Chromium binary to use that instead of the
+ * one Playwright downloads — handy on a machine that already has one but at a
+ * different build number than the installed Playwright expects.
  */
 import { createServer } from 'node:http';
 import { readFileSync, existsSync } from 'node:fs';
@@ -47,7 +50,8 @@ async function main() {
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   const url = `http://127.0.0.1:${server.address().port}/`;
 
-  const browser = await chromium.launch();
+  const browser = await chromium.launch(
+    process.env.DFM_CHROMIUM ? { executablePath: process.env.DFM_CHROMIUM } : {});
   const page = await browser.newPage({ viewport: { width: 1600, height: 1000 } });
 
   /* Answer the app's CDN requests from node_modules. Also asserts, implicitly,
@@ -189,6 +193,64 @@ async function main() {
     check('reset clears results', !(await page.locator('#resultsContent').isVisible()));
 
     check('no console errors during run', consoleErrors.length === 0, consoleErrors.slice(0, 3).join(' | '));
+
+    // ── mesh health gate ──────────────────────────────────────────────────
+    // The panel that has to be read before the score is. Driven on a fresh
+    // page so it cannot be confused with the state the run above left behind.
+    const healthPage = await browser.newPage({ viewport: { width: 1600, height: 1000 } });
+    await healthPage.route(/^https:\/\/(cdnjs\.cloudflare\.com|cdn\.jsdelivr\.net)\//, (route) => {
+      const hit = Object.keys(vendored).find((name) => route.request().url().endsWith(name));
+      return hit
+        ? route.fulfill({ status: 200, contentType: 'application/javascript', body: readFileSync(vendored[hit]) })
+        : route.abort();
+    });
+    await healthPage.route(/^https:\/\/fonts\./, (route) => route.fulfill({ status: 200, contentType: 'text/css', body: '' }));
+    await healthPage.goto(url, { waitUntil: 'networkidle' });
+
+    const loadInto = async (name) => {
+      await healthPage.setInputFiles('#fileInput', join(FIXTURES, name));
+      await healthPage.waitForFunction(
+        () => !document.getElementById('meshHealth').hidden, null, { timeout: 30000 });
+    };
+
+    await loadInto('part.stl');
+    check('mesh health: sound part reports no issues',
+      (await healthPage.locator('#meshHealth .mh-head.high').count()) === 1
+      && (await healthPage.locator('#meshHealth .mh-issue.error, #meshHealth .mh-issue.warn').count()) === 0,
+      await healthPage.textContent('#meshHealth'));
+
+    /* Regression: an inch-authored STL is a valid file describing a 1.57 mm
+       part. Before this gate existed it analysed silently and failed the wall
+       check on a part that is fine. */
+    await healthPage.reload({ waitUntil: 'networkidle' });
+    await loadInto('part-inches.stl');
+    check('mesh health: inch-authored part is caught',
+      (await healthPage.locator('#meshHealth .mh-head.unusable').count()) === 1
+      && (await healthPage.textContent('#meshHealth')).includes('not in millimetres'),
+      (await healthPage.textContent('#meshHealth')).slice(0, 140));
+    check('mesh health: offers the inch conversion',
+      (await healthPage.locator('#meshHealth .mh-fix-btn').count()) >= 1,
+      await healthPage.textContent('#meshHealth'));
+
+    await healthPage.locator('#meshHealth .mh-fix-btn').first().click();
+    await healthPage.waitForFunction(
+      () => document.querySelector('#meshHealth .mh-head.high') !== null, null, { timeout: 15000 });
+    check('mesh health: rescaling fixes it',
+      (await healthPage.textContent('#meshHealth')).includes('40.0 × 30.0 × 20.0'),
+      await healthPage.textContent('#meshHealth'));
+
+    await healthPage.click('#runBtn');
+    await healthPage.waitForFunction(() => document.getElementById('resultStatus').textContent === 'complete', null, { timeout: 60000 });
+    const rescaledWall = await healthPage.locator('#checksList .check', { hasText: 'Wall thickness' }).first().textContent();
+    check('mesh health: rescaled part measures its true 2 mm wall',
+      /2\.\d\d mm/.test(rescaledWall), rescaledWall.slice(0, 120));
+
+    await healthPage.reload({ waitUntil: 'networkidle' });
+    await loadInto('part-open.stl');
+    check('mesh health: open mesh is reported',
+      (await healthPage.textContent('#meshHealth')).includes('not closed'),
+      (await healthPage.textContent('#meshHealth')).slice(0, 140));
+    await healthPage.close();
 
     // ── main-thread fallback ──────────────────────────────────────────────
     // Opened from a Downloads folder the page runs on file://, where Chrome

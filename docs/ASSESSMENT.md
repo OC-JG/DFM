@@ -168,11 +168,31 @@ only code that even notices non-manifold edges, and it just skips them.
 
 `weld.js:56` quantises each coordinate to a `diag × 1e-5` grid and looks up only
 the exact quantised key. Two vertices closer than the tolerance but straddling a
-cell boundary land in different cells and are never merged. The result is a
-hairline crack in an otherwise closed mesh, through which every ray cast in the
-thickness and face-side passes can escape — producing local thickness readings of
-`Infinity` (discarded) or a spurious far-wall hit (kept, and wrong). Probing the
-26 neighbouring cells, or switching to a radius query, closes this.
+cell boundary land in different cells and are never merged, leaving a hairline
+crack in an otherwise closed mesh.
+
+Measured, on a 96-segment tube with a true 2 mm wall given vertex noise well
+below the weld tolerance — physically the same part:
+
+```
+vertices        384 → 984          (2.6× inflation from unmerged seams)
+boundary edges    0 → 1782         (the mesh is no longer closed)
+flow length    98.2 → 203.7 mm     (Dijkstra detours around the cracks)
+max L/T        42.8 → 102.0        (the short-shot predictor, 2.4× out)
+transitions     208 → 44 candidates (edge pairs no longer share an edge)
+wall median   1.9982 → 1.9982 mm   (unaffected)
+```
+
+Note where the damage lands. Ray casting is *not* affected — the cracks are
+sub-micron and a ray essentially never finds one, so thickness, draft and sink
+come through clean. What breaks is everything that treats the mesh as a graph:
+flow length walks vertex adjacency and has to detour around every crack, and
+transition detection needs both triangles of an edge pair and no longer finds
+them. On a PC part (L/T limit 120) that 42.8 → 102.0 shift is the difference
+between "fills comfortably" and a warning.
+
+Probing the 26 neighbouring cells, and accepting candidates on true Euclidean
+distance rather than cell identity, closes this.
 
 **B4 — Wall thickness is non-deterministic.** *(medium)*
 

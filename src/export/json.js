@@ -6,7 +6,7 @@ import { formatPullAxis } from '../analysis/stats.js';
  * Includes the two-shot block, which the original omitted: running an
  * overmould analysis and then exporting produced a file with no trace of it.
  */
-export function buildExportJSON({ sessionId, dfm, analysis, twoShot, interface: iface, settings }) {
+export function buildExportJSON({ sessionId, dfm, analysis, twoShot, interface: iface, validation, settings }) {
   const out = {
     tool: 'OnlyCat DFM',
     session: sessionId,
@@ -26,6 +26,11 @@ export function buildExportJSON({ sessionId, dfm, analysis, twoShot, interface: 
       metrics: c.metrics,
     })),
     mesh_summary: analysis ? meshSummary(analysis) : null,
+    /* What the geometry was before any of the above was measured on it. A
+       consumer of this record should read the confidence first: a score
+       derived from an inch-scaled or open mesh is arithmetic, not a
+       manufacturability judgement. */
+    mesh_health: validation ? meshHealth(validation) : null,
   };
 
   if (twoShot) {
@@ -53,6 +58,29 @@ export function buildExportJSON({ sessionId, dfm, analysis, twoShot, interface: 
   return out;
 }
 
+function meshHealth(v) {
+  return {
+    confidence: v.confidence,
+    analysable: v.analysable,
+    bbox_mm: v.bbox.size,
+    largest_dimension_mm: v.maxDim,
+    closed: v.closed,
+    winding_consistent: v.windingConsistent,
+    normals_inverted: v.inverted,
+    enclosed_volume_mm3: v.volume,
+    edges: {
+      total: v.edges.total,
+      boundary: v.edges.boundary,
+      non_manifold: v.edges.nonManifold,
+      inconsistent_winding: v.edges.inconsistent,
+    },
+    degenerate_triangles: v.degenerate,
+    scale_suspicion: v.scale.suspect,
+    weld: v.weld,
+    issues: v.issues.map((i) => ({ level: i.level, code: i.code, title: i.title, detail: i.detail })),
+  };
+}
+
 function meshSummary(a) {
   return {
     tris: a.triCount,
@@ -70,6 +98,14 @@ function meshSummary(a) {
     wall_iqr_ratio: a.wallStats.p75 / Math.max(0.01, a.wallStats.p25),
     wall_cv_raw: a.wallStats.cv,
     wall_cv_robust: a.wallStats.cvRobust,
+    wall_samples: a.wallStats.n,
+    wall_median_ci95_mm: (a.wallStats.medLo != null) ? [a.wallStats.medLo, a.wallStats.medHi] : null,
+    /* Second, independent thickness estimate: the largest sphere that fits
+       inside the solid at each sampled point. Equal to the ray figure on
+       parallel walls, lower wherever they are not. */
+    wall_sphere_median_mm: a.sphereStats ? a.sphereStats.median : null,
+    wall_sphere_over_ray: a.wallMethod ? a.wallMethod.ratio : null,
+    weld: a.weld || null,
     thickness_sample_coverage: a.thicknessCoverage,
     sink_moderate_area_pct: a.sinkPctModerate,
     sink_severe_area_pct: a.sinkPctSevere,

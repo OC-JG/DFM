@@ -64,6 +64,8 @@ export const runtime = {
   fileName1: null,
   fileName2: null,
 
+  validation: null,            // shot 1 mesh health report
+  validation2: null,           // shot 2 mesh health report
   analysis: null,              // shot 1 mesh analysis
   analysis2: null,             // shot 2 mesh analysis
   interface: null,             // two-shot interface measurement
@@ -149,6 +151,8 @@ export function resetRuntime() {
   runtime.bodies = null;
   runtime.fileName1 = null;
   runtime.fileName2 = null;
+  runtime.validation = null;
+  runtime.validation2 = null;
   runtime.analysis = null;
   runtime.analysis2 = null;
   runtime.interface = null;

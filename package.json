@@ -7,7 +7,8 @@
   "scripts": {
     "build": "node build.js",
     "fixtures": "node test/make-fixtures.mjs",
-    "test": "node build.js && node test/make-fixtures.mjs && node test/smoke.mjs"
+    "test:unit": "node test/unit.mjs",
+    "test": "node build.js && node test/unit.mjs && node test/make-fixtures.mjs && node test/smoke.mjs"
   },
   "devDependencies": {
     "jspdf": "2.5.1",

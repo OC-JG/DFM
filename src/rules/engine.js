@@ -92,6 +92,26 @@ export function runDFM(input) {
     ];
     if (fpcFloor !== null) wallMetrics.splice(4, 0, ['FPC floor', `${fpcFloor.toFixed(2)} mm`]);
 
+    /* How well pinned down the nominal is, and whether the two independent
+       thickness methods agree about it. Both are reported, neither moves the
+       score: the deduction still follows the ray-derived nominal, so that the
+       verdict on a given part does not change meaning underneath anyone. */
+    if (mesh && mesh.wallStats.n > 10) {
+      const ws = mesh.wallStats;
+      wallMetrics.push(['Samples', `${ws.n}`]);
+      wallMetrics.push(['Median 95% CI', `${ws.medLo.toFixed(2)}–${ws.medHi.toFixed(2)} mm`]);
+      if (ws.medUncertainty > 0.05) {
+        detail += ` The nominal is pinned only to ±${(ws.medUncertainty * 100).toFixed(0)}% at 95% confidence (${ws.medLo.toFixed(2)}–${ws.medHi.toFixed(2)} mm): the wall varies enough across this part that one figure is a weak summary of it. Read the WALL heatmap rather than this number.`;
+      }
+      const wm = mesh.wallMethod;
+      if (wm) {
+        wallMetrics.push(['Ray / sphere', `${wm.rayMedian.toFixed(2)} / ${wm.sphereMedian.toFixed(2)} mm`]);
+        if (wm.ratio < 0.85) {
+          detail += ` Inscribed-sphere thickness (${wm.sphereMedian.toFixed(2)} mm) runs ${((1 - wm.ratio) * 100).toFixed(0)}% below the ray-cast thickness (${wm.rayMedian.toFixed(2)} mm), so the walls are markedly non-parallel — taper, angled ribs, or mass piling up at corners. The checks above use the ray figure, which is the optimistic one; confirm the thin sections locally before cutting steel.`;
+        }
+      }
+    }
+
     checks.push({ key: 'wall', name: 'Wall thickness', status, detail, penalty, metrics: wallMetrics });
   }
 

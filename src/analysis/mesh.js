@@ -1,6 +1,6 @@
 import { buildBVH, castRay } from '../geometry/bvh.js';
 import { computeBounds } from '../geometry/weld.js';
-import { stats, resolvePullDir } from './stats.js';
+import { stats, resolvePullDir, makeRandom } from './stats.js';
 import { clusterUndercuts } from './undercuts.js';
 import { detectWallTransitions } from './transitions.js';
 import { computeFlowLengths } from './flow.js';
@@ -162,8 +162,21 @@ export function analyseMesh(geom, opts = {}) {
   if (onProgress) onProgress(0.4, 'Sampling wall thickness');
 
   // ── Wall thickness ───────────────────────────────────────────────────────
-  const thicknesses = sampleWallThickness(geom, bvh, triAreas, triCentroid, triFNorm, diag, samples);
+  const sampled = sampleWallThickness(
+    geom, bvh, triAreas, triCentroid, triFNorm, diag, samples, opts.sampleSeed);
+  const thicknesses = sampled.ray;
   const wallStats = stats(thicknesses);
+  const sphereStats = sampled.sphere.length > 10 ? stats(sampled.sphere) : null;
+
+  /* Ray and sphere measure different things, and where they disagree the
+     geometry is telling us something. See sphereThicknessAt below. */
+  const wallMethod = (sphereStats && wallStats.n > 10) ? {
+    rayMedian: wallStats.median,
+    sphereMedian: sphereStats.median,
+    ratio: wallStats.median > 0.01 ? sphereStats.median / wallStats.median : 1,
+    sphereP5: sphereStats.p5,
+    sphereP95: sphereStats.p95,
+  } : null;
 
   if (onProgress) onProgress(0.6, 'Tagging thin/thick regions');
 
@@ -302,6 +315,7 @@ export function analyseMesh(geom, opts = {}) {
     innerPctUnderMin: innerArea > 0 ? (innerAreaUnderMin / innerArea) * 100 : 0,
 
     wallStats, thicknesses,
+    sphereStats, wallMethod,
     thicknessCoverage: heatStride === 1 ? 1 : 1 / heatStride,
 
     sinkArea, sinkAreaModerate, sinkAreaSevere,
@@ -321,28 +335,38 @@ export function analyseMesh(geom, opts = {}) {
 }
 
 /*
- * Area-weighted wall thickness sampling.
+ * Area-weighted wall thickness sampling, by two independent methods.
  *
  * Triangles are drawn from the cumulative area distribution by stratified
  * sampling, so large faces contribute proportionally and the resulting
- * percentiles describe the part rather than its tessellation. From each
- * sampled centroid a ray is cast straight into the solid; the first hit on
- * the far surface is the local wall.
+ * percentiles describe the part rather than its tessellation.
+ *
+ * The stratum jitter comes from a seeded generator, not Math.random(). The
+ * same file has to produce the same report twice; see makeRandom in stats.js
+ * for why a regular grid is not a safe substitute.
  */
-function sampleWallThickness(geom, bvh, triAreas, triCentroid, triFNorm, diag, target) {
+function sampleWallThickness(geom, bvh, triAreas, triCentroid, triFNorm, diag, target, seed) {
   const { triCount } = geom;
   const cdf = new Float64Array(triCount);
   let acc = 0;
   for (let i = 0; i < triCount; i++) { acc += triAreas[i]; cdf[i] = acc; }
   const totalArea = acc;
-  if (totalArea <= 0) return [];
+  if (totalArea <= 0) return { ray: [], sphere: [] };
 
-  const result = [];
+  const ray = [];
+  const sphere = [];
   const samples = Math.min(target, triCount);
   const eps = diag * 1e-5;
+  const random = makeRandom(seed != null ? seed : DEFAULT_SAMPLE_SEED);
+
+  /* The sphere estimate costs 33 rays where the ray estimate costs one, and
+     it only has to support a distribution-level comparison rather than the
+     percentiles the rules are judged on. Taking it on a strided subset keeps
+     the whole pass inside about a tenth of the run instead of a third. */
+  const sphereStride = Math.max(1, Math.ceil(samples / SPHERE_SAMPLE_BUDGET));
 
   for (let s = 0; s < samples; s++) {
-    const u = (s + Math.random()) / samples * totalArea;
+    const u = (s + random()) / samples * totalArea;
     let lo = 0, hi = triCount - 1;
     while (lo < hi) {
       const m = (lo + hi) >> 1;
@@ -352,9 +376,100 @@ function sampleWallThickness(geom, bvh, triAreas, triCentroid, triFNorm, diag, t
     const cx = triCentroid[t * 3], cy = triCentroid[t * 3 + 1], cz = triCentroid[t * 3 + 2];
     const nx = triFNorm[t * 3], ny = triFNorm[t * 3 + 1], nz = triFNorm[t * 3 + 2];
     const dist = castRay(bvh, geom, cx - nx * eps, cy - ny * eps, cz - nz * eps, -nx, -ny, -nz, eps, t);
-    if (dist !== Infinity && dist < diag) result.push(dist);
+    if (dist !== Infinity && dist < diag) {
+      ray.push(dist);
+      if (s % sphereStride === 0) {
+        sphere.push(sphereThicknessAt(bvh, geom, t, cx, cy, cz, nx, ny, nz, eps, diag, dist));
+      }
+    }
   }
-  return result;
+  return { ray, sphere };
+}
+
+/* How many of the sampled points also get the 33-ray sphere treatment. */
+const SPHERE_SAMPLE_BUDGET = 1000;
+
+/* Default jitter seed. Any fixed value does; this one is the golden-ratio
+   constant, which is conventional and carries no other meaning. */
+const DEFAULT_SAMPLE_SEED = 0x9E3779B9;
+
+/*
+ * Probe directions for the inscribed-sphere estimate: the axial ray plus four
+ * rings around it, stored as coefficients on the (inward, u, v) basis.
+ *
+ * For two surfaces converging at angle α the binding direction sits at
+ * θ = α/2, so rings out to 60° cover convergence up to 120° — well past
+ * anything a moulded wall does. Thirty-three rays per sample, on 3000
+ * samples, is around 99k extra casts: cheap next to the per-triangle pass.
+ */
+export const CONE_RINGS_DEG = [15, 30, 45, 60];
+export const CONE_AZIMUTHS = 8;
+const CONE_DIRS = (() => {
+  const out = [];
+  for (const deg of CONE_RINGS_DEG) {
+    const th = deg * Math.PI / 180;
+    const st = Math.sin(th), ct = Math.cos(th);
+    for (let k = 0; k < CONE_AZIMUTHS; k++) {
+      const ph = (k / CONE_AZIMUTHS) * Math.PI * 2;
+      out.push([ct, st * Math.cos(ph), st * Math.sin(ph)]);
+    }
+  }
+  return out;
+})();
+
+/*
+ * Local wall thickness as the diameter of the largest sphere that fits inside
+ * the solid and touches the surface at this point.
+ *
+ * The single inward ray that this codebase has always used is directional. On
+ * a wall whose opposite face is parallel it is exactly right, but on a wedge,
+ * a tapered boss or a rib meeting a wall at an angle it reads the *slant*
+ * distance and so overstates the wall — which is the optimistic direction,
+ * and therefore the dangerous one for a sink or short-shot call.
+ *
+ * The sphere is the quantity a moulder means by "wall". Deriving it is easy:
+ * a sphere of radius R tangent at p has its centre at p + R·n̂, so along a
+ * direction d at angle θ from n̂ its far surface sits 2R·cos θ from p. A mesh
+ * hit at distance t along d therefore bounds R ≤ t / (2·cos θ), and
+ *
+ *     thickness = 2R = min over probe directions of ( t / cos θ )
+ *
+ * which collapses to the plain ray value when θ = 0 binds, and is otherwise
+ * strictly smaller. Rays that escape the part constrain nothing and are
+ * skipped.
+ *
+ * A consequence worth knowing: near an external edge the largest inscribed
+ * sphere is genuinely small, so this reads lower there than the ray does.
+ * That is correct — it is local material, not slant distance — but it is why
+ * the two medians are reported side by side rather than one replacing the
+ * other.
+ */
+function sphereThicknessAt(bvh, geom, t, cx, cy, cz, nx, ny, nz, eps, diag, axialHit) {
+  /* Probe into the solid, i.e. around the inward normal. */
+  const ix = -nx, iy = -ny, iz = -nz;
+  let best = axialHit;
+
+  /* Two tangents spanning the plane, via Gram-Schmidt off the normal. */
+  let ux = Math.abs(ix) < 0.9 ? 1 : 0, uy = Math.abs(ix) < 0.9 ? 0 : 1, uz = 0;
+  const d = ux * ix + uy * iy + uz * iz;
+  ux -= d * ix; uy -= d * iy; uz -= d * iz;
+  const uLen = Math.hypot(ux, uy, uz) || 1;
+  ux /= uLen; uy /= uLen; uz /= uLen;
+  const vx = iy * uz - iz * uy, vy = iz * ux - ix * uz, vz = ix * uy - iy * ux;
+
+  const ox = cx + ix * eps, oy = cy + iy * eps, oz = cz + iz * eps;
+
+  for (let k = 0; k < CONE_DIRS.length; k++) {
+    const cn = CONE_DIRS[k][0], cu = CONE_DIRS[k][1], cv = CONE_DIRS[k][2];
+    const dx = ix * cn + ux * cu + vx * cv;
+    const dy = iy * cn + uy * cu + vy * cv;
+    const dz = iz * cn + uz * cu + vz * cv;
+    const hit = castRay(bvh, geom, ox, oy, oz, dx, dy, dz, eps, t);
+    if (hit === Infinity || hit >= diag) continue; // escapes: constrains nothing
+    const bound = hit / cn;
+    if (bound < best) best = bound;
+  }
+  return best;
 }
 
 /*

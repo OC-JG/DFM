@@ -2,6 +2,7 @@ import { MATERIALS } from '../core/materials.js';
 import { effectiveMinDraft } from '../core/finishes.js';
 import { parseSTL } from '../geometry/stl.js';
 import { parseSTEP } from '../geometry/step.js';
+import { validateGeometry, rescaleGeometry, flipWinding } from '../geometry/validate.js';
 import { suggestPullDirection } from '../analysis/mesh.js';
 import { computeBounds } from '../geometry/weld.js';
 import { runDFM } from '../rules/engine.js';
@@ -49,6 +50,65 @@ async function parseGeometryFile(file, onProgress) {
   return { geom: parseSTL(buffer, onProgress), format: 'STL' };
 }
 
+/*
+ * Install a freshly loaded or freshly corrected part.
+ *
+ * Validation runs here rather than inside the analysis, because the things it
+ * catches — wrong units, an open surface, inside-out normals — are properties
+ * of the file, and the moment to raise them is when the file arrives, not
+ * buried in a check three panels down after a score has already been shown.
+ */
+function installGeometry(geom, file) {
+  runtime.geom1 = geom;
+  runtime.validation = validateGeometry(geom);
+  runtime.gateLocation = null;
+  viewer.clearGateMarker();
+
+  runtime.bodies = viewer.loadGeometry(geom);
+  panel.renderBodiesList(runtime.bodies, toggleBody);
+  if (file) panel.setFileInfo(1, file, geom);
+  panel.renderMeshHealth(runtime.validation, applyMeshFix);
+  panel.updatePartSummary();
+  panel.updateOnboarding();
+
+  $('viewerEmpty').style.display = 'none';
+  $('gateInfo').innerHTML = 'No gate set. Flow length (L/T) check needs a gate.';
+
+  autoSuggestPull();
+  return runtime.validation;
+}
+
+/*
+ * Apply one of the corrections the health panel offered. Both of them move the
+ * geometry under everything downstream of it, so the analysis and the picked
+ * gate are discarded rather than left describing the old mesh.
+ */
+function applyMeshFix(fix) {
+  if (!runtime.geom1 || !fix || !fix.action) return;
+  let next = null;
+  let note = '';
+  if (fix.action === 'scale' && fix.factor > 0) {
+    next = rescaleGeometry(runtime.geom1, fix.factor);
+    note = `Rescaled by ×${fix.factor}. Largest dimension is now ${Math.max(...validateGeometry(next).bbox.size).toFixed(1)} mm.`;
+  } else if (fix.action === 'flip') {
+    next = flipWinding(runtime.geom1);
+    note = 'Normals flipped. Draft and undercuts will now be measured from the outside.';
+  }
+  if (!next) return;
+
+  runtime.analysis = null;
+  runtime.analysis2 = null;
+  runtime.interface = null;
+  runtime.dfm = null;
+  runtime.twoShot = null;
+  clearResults();
+  installGeometry(next, null);
+  refreshHeatAvailability();
+  setHeatMode('flat');
+  toast(`${note} Re-run the analysis.`, 'info', 6000);
+  setStatus('GEOMETRY CORRECTED');
+}
+
 async function handleFile1(file) {
   panel.setFileInfo(1, file, null);
   setStatus(STEP_EXTS.has(file.name.toLowerCase().split('.').pop()) ? 'LOADING STEP' : 'PARSING STL');
@@ -56,20 +116,13 @@ async function handleFile1(file) {
 
   try {
     const { geom, format } = await parseGeometryFile(file, updateProgress);
-    runtime.geom1 = geom;
     runtime.fileName1 = file.name;
-    runtime.gateLocation = null;
-
-    runtime.bodies = viewer.loadGeometry(geom);
-    panel.renderBodiesList(runtime.bodies, toggleBody);
-    panel.setFileInfo(1, file, geom);
-    panel.updatePartSummary();
-    panel.updateOnboarding();
-
-    $('viewerEmpty').style.display = 'none';
-    $('gateInfo').innerHTML = 'No gate set. Flow length (L/T) check needs a gate.';
-
-    autoSuggestPull();
+    const report = installGeometry(geom, file);
+    if (report.confidence === 'unusable') {
+      toast(`${file.name} loaded, but the mesh needs attention before the numbers mean anything — see the panel under the drop zone.`, 'error', 9000);
+    } else if (report.confidence === 'reduced') {
+      toast(`${file.name} loaded with caveats — see the mesh panel under the drop zone.`, 'warn', 7000);
+    }
     setStatus(`${format} LOADED`);
   } catch (err) {
     console.error(err);
@@ -92,8 +145,17 @@ async function handleFile2(file) {
     const { geom } = await parseGeometryFile(file, updateProgress);
     runtime.geom2 = geom;
     runtime.fileName2 = file.name;
+    runtime.validation2 = validateGeometry(geom);
     viewer.loadGeometry2(geom);
     panel.setFileInfo(2, file, geom);
+    /* The overmould gets the same scrutiny, but reported as a toast rather
+       than a second panel: the interface pass measures shot 2 against shot 1,
+       so a bad shot-2 mesh corrupts the two-shot result just as thoroughly. */
+    if (runtime.validation2.confidence !== 'high') {
+      const worst = runtime.validation2.issues.find((i) => i.level === 'error')
+        || runtime.validation2.issues.find((i) => i.level === 'warn');
+      if (worst) toast(`Overmould mesh: ${worst.title.toLowerCase()}. ${worst.detail}`, runtime.validation2.confidence === 'unusable' ? 'error' : 'warn', 8000);
+    }
   } catch (err) {
     console.error(err);
     panel.setFileError(2, err.message);
@@ -423,6 +485,7 @@ function doExportJSON() {
     analysis: runtime.analysis,
     twoShot: runtime.twoShot,
     interface: runtime.interface,
+    validation: runtime.validation,
     settings,
   });
   downloadJSON(data, `dfm_${runtime.sessionId}_${Date.now()}.json`);
@@ -440,6 +503,7 @@ async function doExportPDF() {
       dfm: runtime.dfm,
       analysis: runtime.analysis,
       twoShot: runtime.twoShot,
+      validation: runtime.validation,
       settings,
     });
   } catch (err) {

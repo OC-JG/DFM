@@ -462,6 +462,56 @@ details.section > .section-body { animation: revealDown 0.16s ease; }
 .file-info.show { display: block; }
 .file-info b { color: var(--accent); }
 
+/* ── mesh health ─────────────────────────────────────────────────────────
+   Sits directly under the drop zone. It describes the input, so it has to be
+   read before the score is, not alongside it. */
+.mesh-health {
+  margin-top: 8px;
+  border: 1px solid var(--ink);
+  background: var(--paper-2);
+  font-size: 11px;
+}
+.mh-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(10, 14, 12, 0.15);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+.mh-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--ok);
+}
+.mh-head.reduced .mh-dot { background: var(--warn); }
+.mh-head.unusable .mh-dot { background: var(--fail); }
+.mh-head.reduced { color: var(--warn); }
+.mh-head.unusable { color: var(--fail); }
+.mh-title { flex: 1; }
+.mh-dims {
+  font-weight: 400;
+  opacity: 0.6;
+  color: var(--ink);
+  white-space: nowrap;
+}
+.mh-issue {
+  padding: 8px 12px;
+  border-left: 3px solid transparent;
+  border-top: 1px solid rgba(10, 14, 12, 0.08);
+}
+.mh-issue:first-of-type { border-top: 0; }
+.mh-issue.error { border-left-color: var(--fail); background: rgba(185, 28, 28, 0.06); }
+.mh-issue.warn { border-left-color: var(--warn); background: rgba(217, 119, 6, 0.06); }
+.mh-issue.info { border-left-color: rgba(10, 14, 12, 0.25); }
+.mh-issue-title { font-weight: 700; margin-bottom: 3px; }
+.mh-issue-detail { line-height: 1.6; opacity: 0.85; max-width: 60ch; }
+.mh-fixes { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.mh-fix-btn { font-size: 10px; padding: 5px 9px; }
+
 .field {
   display: grid;
   grid-template-columns: 1fr auto;

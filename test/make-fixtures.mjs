@@ -67,5 +67,19 @@ const part = [
    from its underside land on the substrate. */
 const overmould = boxTriangles([0, 0, 20], [40, 30, 22]);
 
-console.log('part.stl      ', writeBinarySTL(join(OUT_DIR, 'part.stl'), part), 'triangles');
-console.log('overmould.stl ', writeBinarySTL(join(OUT_DIR, 'overmould.stl'), overmould), 'triangles');
+/* The same shelled box, authored in inches. STL carries no units, so this is
+   byte-for-byte a legitimate file — it just describes a 1.57 mm part unless
+   somebody notices. The mesh health panel is what notices. */
+const inchPart = part.map((triangle) => triangle.map((v) => v.map((c) => c / 25.4)));
+
+/* A shelled box with its lid left off: four boundary edges, so ray casts
+   escape and the enclosed volume is undefined. */
+const openPart = [
+  ...boxTriangles([0, 0, 0], [40, 30, 20]).filter((_, i) => i !== 2 && i !== 3),
+  ...boxTriangles([2, 2, 2], [38, 28, 18], true),
+];
+
+console.log('part.stl        ', writeBinarySTL(join(OUT_DIR, 'part.stl'), part), 'triangles');
+console.log('overmould.stl   ', writeBinarySTL(join(OUT_DIR, 'overmould.stl'), overmould), 'triangles');
+console.log('part-inches.stl ', writeBinarySTL(join(OUT_DIR, 'part-inches.stl'), inchPart), 'triangles');
+console.log('part-open.stl   ', writeBinarySTL(join(OUT_DIR, 'part-open.stl'), openPart), 'triangles');

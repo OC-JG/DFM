@@ -64,6 +64,20 @@ function makeCursor(doc) {
       doc.setFont('helvetica', 'normal');
       doc.setFontSize(9);
     },
+    /* A wrapped run of body text, broken across pages a line at a time so a
+       long paragraph never overflows the footer. */
+    paragraph(text, size = 8.5) {
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(size);
+      doc.setTextColor(10, 14, 12);
+      const lines = doc.splitTextToSize(stripMarkup(text), PAGE_W - 2 * MARGIN);
+      for (const line of lines) {
+        this.space(6);
+        doc.text(line, MARGIN, y);
+        y += 4;
+      }
+      y += 2;
+    },
     /* Two-column label/value rows. */
     pairs(rows, labelWidth = 46) {
       doc.setFontSize(9);
@@ -141,7 +155,7 @@ function stripMarkup(text) {
   return String(text).replace(/<[^>]+>/g, '');
 }
 
-export async function exportPDF({ sessionId, dfm, analysis, twoShot, settings }) {
+export async function exportPDF({ sessionId, dfm, analysis, twoShot, validation, settings }) {
   const jsPDF = await loadJsPDF();
   const doc = new jsPDF({ unit: 'mm', format: 'a4' });
   const r = dfm.result;
@@ -202,6 +216,31 @@ export async function exportPDF({ sessionId, dfm, analysis, twoShot, settings })
     ['FPC overmould', inp.fpc && inp.fpc.enabled ? `Yes (${inp.fpc.thickness} mm, ${inp.fpc.anchors})` : 'No'],
   ]);
 
+  // ── mesh health ──────────────────────────────────────────────────────────
+  // Ahead of the mesh analysis on purpose. Everything in that section is
+  // measured on this geometry, so whether the geometry can carry it is the
+  // first thing a reader needs, not a footnote after the numbers.
+  if (validation) {
+    cur.heading('MESH HEALTH');
+    const CONF = { high: 'SOUND', reduced: 'ANALYSABLE WITH CAVEATS', unusable: 'NEEDS ATTENTION' };
+    cur.pairs([
+      ['Verdict', CONF[validation.confidence] || validation.confidence],
+      ['Largest dimension', `${validation.maxDim.toFixed(1)} mm`],
+      ['Closed surface', validation.closed ? 'Yes' : `No — ${validation.edges.boundary.toLocaleString()} open edges`],
+      ['Winding', validation.windingConsistent
+        ? (validation.inverted ? 'Consistent but inverted' : 'Consistent')
+        : `${validation.edges.inconsistent.toLocaleString()} inconsistent edges`],
+      ['Non-manifold edges', validation.edges.nonManifold.toLocaleString()],
+      ['Degenerate triangles', validation.degenerate.toLocaleString()],
+    ], 50);
+    if (validation.issues.length) {
+      doc.setFontSize(8.5);
+      for (const issue of validation.issues) {
+        cur.paragraph(`${issue.level.toUpperCase()} — ${issue.title}: ${issue.detail}`);
+      }
+    }
+  }
+
   // ── mesh summary ─────────────────────────────────────────────────────────
   if (analysis) {
     cur.heading('MESH ANALYSIS');
@@ -215,6 +254,12 @@ export async function exportPDF({ sessionId, dfm, analysis, twoShot, settings })
       ['Median wall (est)', `${analysis.wallStats.median?.toFixed(2) ?? '—'} mm`],
       ['Bulk wall (p25–p75)', `${analysis.wallStats.p25?.toFixed(2) ?? '—'}–${analysis.wallStats.p75?.toFixed(2) ?? '—'} mm`],
       ['Wall CV (robust)', `${((analysis.wallStats.cvRobust || 0) * 100).toFixed(0)}%`],
+      ['Median 95% CI', analysis.wallStats.medLo != null
+        ? `${analysis.wallStats.medLo.toFixed(2)}–${analysis.wallStats.medHi.toFixed(2)} mm (n=${analysis.wallStats.n})`
+        : '—'],
+      ['Sphere-fit wall', analysis.wallMethod
+        ? `${analysis.wallMethod.sphereMedian.toFixed(2)} mm (${(analysis.wallMethod.ratio * 100).toFixed(0)}% of ray)`
+        : '—'],
       ['Sidewall <min draft', `${analysis.sidePctUnderMin.toFixed(1)}%`],
       ['Sink moderate area', `${analysis.sinkPctModerate.toFixed(1)}%`],
       ['Sink severe area', `${analysis.sinkPctSevere.toFixed(1)}%`],
