@@ -70,8 +70,11 @@ class MinHeap {
 }
 
 /* Build deduplicated vertex adjacency in CSR form: neighbours of vertex v
-   live in adj[offsets[v] .. offsets[v+1]). */
-function buildAdjacency(indices, triCount, vertCount) {
+   live in adj[offsets[v] .. offsets[v+1]).
+
+   Exported because the gate search runs one Dijkstra per candidate position
+   over the same graph, and rebuilding it each time would dominate the cost. */
+export function buildAdjacency(indices, triCount, vertCount) {
   const degree = new Uint32Array(vertCount + 1);
   for (let t = 0; t < triCount; t++) {
     degree[indices[t * 3]] += 2;
@@ -110,7 +113,7 @@ function buildAdjacency(indices, triCount, vertCount) {
   return { offsets: outOffsets, adj: raw.subarray(0, w) };
 }
 
-export function computeFlowLengths(geom, gateLoc, triCentroid, triThickness, triCount, ltMax, triAreas) {
+export function computeFlowLengths(geom, gateLoc, triCentroid, triThickness, triCount, ltMax, triAreas, adjacency) {
   const { vertices, indices, vertCount } = geom;
 
   // 1. Nearest vertex and nearest triangle to the picked gate point.
@@ -134,28 +137,8 @@ export function computeFlowLengths(geom, gateLoc, triCentroid, triThickness, tri
     ? triThickness[nearestTri] : null;
 
   // 2. Dijkstra over the vertex graph, edges weighted by Euclidean length.
-  const { offsets, adj } = buildAdjacency(indices, triCount, vertCount);
-  const dist = new Float64Array(vertCount).fill(Infinity);
-  const visited = new Uint8Array(vertCount);
-  dist[nearestV] = 0;
-
-  const heap = new MinHeap(Math.max(64, vertCount >> 2));
-  heap.push(nearestV, 0);
-  while (heap.size > 0) {
-    const { node: u, key: du } = heap.pop();
-    if (visited[u]) continue;      // stale entry from a since-improved key
-    visited[u] = 1;
-    const ux = vertices[u * 3], uy = vertices[u * 3 + 1], uz = vertices[u * 3 + 2];
-    for (let e = offsets[u]; e < offsets[u + 1]; e++) {
-      const w = adj[e];
-      if (visited[w]) continue;
-      const dx = vertices[w * 3] - ux;
-      const dy = vertices[w * 3 + 1] - uy;
-      const dz = vertices[w * 3 + 2] - uz;
-      const nd = du + Math.sqrt(dx * dx + dy * dy + dz * dz);
-      if (nd < dist[w]) { dist[w] = nd; heap.push(w, nd); }
-    }
-  }
+  const graph = adjacency || buildAdjacency(indices, triCount, vertCount);
+  const dist = geodesicFrom(vertices, vertCount, graph, nearestV);
 
   // 3. Per-triangle flow length (mean of its vertices) and L/T ratio.
   const triFlow = new Float32Array(triCount);
@@ -217,4 +200,166 @@ export function computeFlowLengths(geom, gateLoc, triCentroid, triThickness, tri
     gateLocalThickness,
     weldCandidates: candidates,
   };
+}
+
+
+/*
+ * Geodesic distance from one vertex to every other, across the mesh surface.
+ *
+ * Split out of computeFlowLengths so the gate search can run it many times
+ * against one prebuilt graph. Nothing else changed: still a binary heap over
+ * typed arrays, still O(E log V).
+ */
+export function geodesicFrom(vertices, vertCount, graph, sourceVertex) {
+  const { offsets, adj } = graph;
+  const dist = new Float64Array(vertCount).fill(Infinity);
+  const visited = new Uint8Array(vertCount);
+  dist[sourceVertex] = 0;
+
+  const heap = new MinHeap(Math.max(64, vertCount >> 2));
+  heap.push(sourceVertex, 0);
+  while (heap.size > 0) {
+    const { node: u, key: du } = heap.pop();
+    if (visited[u]) continue;      // stale entry from a since-improved key
+    visited[u] = 1;
+    const ux = vertices[u * 3], uy = vertices[u * 3 + 1], uz = vertices[u * 3 + 2];
+    for (let e = offsets[u]; e < offsets[u + 1]; e++) {
+      const w = adj[e];
+      if (visited[w]) continue;
+      const dx = vertices[w * 3] - ux;
+      const dy = vertices[w * 3 + 1] - uy;
+      const dz = vertices[w * 3 + 2] - uz;
+      const nd = du + Math.sqrt(dx * dx + dy * dy + dz * dz);
+      if (nd < dist[w]) { dist[w] = nd; heap.push(w, nd); }
+    }
+  }
+  return dist;
+}
+
+/*
+ * Where should the gate go?
+ *
+ * The flow check is only as good as the gate it was given, and until now the
+ * gate came from wherever the user happened to click. Two clicks a centimetre
+ * apart on a long part can be the difference between "fills comfortably" and a
+ * short-shot warning, and nothing in the tool suggested which was which — so
+ * the single most consequential input was also the least informed one.
+ *
+ * This tries a spread of candidate positions and ranks them by the same
+ * measure the check itself uses: the worst flow-length-to-thickness ratio
+ * anywhere on the part, then how much of the part sits over the limit.
+ *
+ * Candidates are drawn from outward-facing triangles only. A gate has to be
+ * reachable by a sprue, and the inward faces of a cavity are not — which is
+ * what triFaceSide already knows, another thing the analysis computes and
+ * nothing read. They are spread by farthest-point sampling rather than taken at
+ * random, because a random dozen points on a long part will cluster and miss
+ * the ends, and the ends are where gating decisions are made.
+ */
+export function searchGateCandidates({
+  geom, triCentroid, triThickness, triAreas, triFaceSide, triCount, ltMax,
+  candidateCount = 12, adjacency,
+}) {
+  const { vertices, indices, vertCount } = geom;
+  if (!(candidateCount > 0) || triCount < 4) return null;
+
+  /* Eligible: outward-facing, with a thickness reading to divide by. */
+  let eligible = [];
+  for (let t = 0; t < triCount; t++) {
+    if (triFaceSide && triFaceSide[t] === 1) continue;
+    if (isNaN(triThickness[t])) continue;
+    eligible.push(t);
+  }
+  if (eligible.length < 2) return null;
+
+  /* Drop the below-median-area faces. Farthest-point sampling knows nothing
+     about how big a triangle is, so on a long thin part half the candidates
+     landed on the 2 mm sliver down the edge rather than on the broad faces a
+     sprue would actually meet. Anything at or above the median is a face worth
+     gating on. */
+  if (eligible.length > candidateCount * 4) {
+    const areas = eligible.map((t) => triAreas[t]).sort((a, b) => a - b);
+    const medianArea = areas[areas.length >> 1];
+    const substantial = eligible.filter((t) => triAreas[t] >= medianArea);
+    if (substantial.length >= candidateCount) eligible = substantial;
+  }
+
+  const picks = farthestPointSample(eligible, triCentroid, triAreas, Math.min(candidateCount, eligible.length));
+  const graph = adjacency || buildAdjacency(indices, triCount, vertCount);
+
+  const candidates = [];
+  for (const t of picks) {
+    const point = [triCentroid[t * 3], triCentroid[t * 3 + 1], triCentroid[t * 3 + 2]];
+    const result = computeFlowLengths(geom, point, triCentroid, triThickness, triCount, ltMax, triAreas, graph);
+    candidates.push({
+      point,
+      triangle: t,
+      rayThicknessAtGate: triThickness[t],
+      maxLT: result.maxLT,
+      maxFlow: result.maxFlow,
+      pctOverLT: result.pctOverLT,
+    });
+  }
+
+  /* Lower worst-case L/T first, then less of the part beyond the limit, then
+     the shorter longest-flow-path.
+
+     Not ranked on the thickness at the gate, tempting though it is — a part
+     should fill from its thickest section outward or the gate freezes off
+     before packing completes, but the ray reading at an arbitrary face is not
+     that thickness. On the side face of a 2 mm bar it reads the 20 mm width.
+     The figure is still reported, as the ray measurement it is. */
+  candidates.sort((a, b) =>
+    (a.maxLT - b.maxLT)
+    || (a.pctOverLT - b.pctOverLT)
+    || (a.maxFlow - b.maxFlow));
+
+  return {
+    candidates,
+    best: candidates[0],
+    worst: candidates[candidates.length - 1],
+    considered: candidates.length,
+    eligible: eligible.length,
+  };
+}
+
+/*
+ * Spread `count` triangles across the surface, greedily.
+ *
+ * Seeded at the largest eligible face, then each further pick is whichever
+ * candidate lies farthest from everything chosen so far. Deterministic, and it
+ * covers the extremities that a random sample tends to miss — which matters
+ * because the ends of a part are exactly where gating decisions get made.
+ */
+function farthestPointSample(eligible, triCentroid, triAreas, count) {
+  let seed = eligible[0];
+  for (const t of eligible) if (triAreas[t] > triAreas[seed]) seed = t;
+
+  const chosen = [seed];
+  /* Distance from each candidate to the nearest chosen point so far. */
+  const nearest = new Float64Array(eligible.length).fill(Infinity);
+  const updateFrom = (pick) => {
+    const px = triCentroid[pick * 3], py = triCentroid[pick * 3 + 1], pz = triCentroid[pick * 3 + 2];
+    for (let i = 0; i < eligible.length; i++) {
+      const t = eligible[i];
+      const dx = triCentroid[t * 3] - px;
+      const dy = triCentroid[t * 3 + 1] - py;
+      const dz = triCentroid[t * 3 + 2] - pz;
+      const d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 < nearest[i]) nearest[i] = d2;
+    }
+  };
+  updateFrom(seed);
+
+  while (chosen.length < count) {
+    let bestI = -1, bestD = -1;
+    for (let i = 0; i < eligible.length; i++) {
+      if (nearest[i] > bestD) { bestD = nearest[i]; bestI = i; }
+    }
+    if (bestI < 0 || bestD <= 0) break;
+    const pick = eligible[bestI];
+    chosen.push(pick);
+    updateFrom(pick);
+  }
+  return chosen;
 }

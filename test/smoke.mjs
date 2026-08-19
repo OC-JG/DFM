@@ -11,6 +11,9 @@
  *
  * Run: npm install && node test/make-fixtures.mjs && node test/smoke.mjs
  * Playwright is resolved from the global install; set NODE_PATH if needed.
+ * Set DFM_CHROMIUM to an existing Chromium binary to use that instead of the
+ * one Playwright downloads — handy on a machine that already has one but at a
+ * different build number than the installed Playwright expects.
  */
 import { createServer } from 'node:http';
 import { readFileSync, existsSync } from 'node:fs';
@@ -40,6 +43,18 @@ async function main() {
   const { chromium } = require('playwright');
 
   const html = readFileSync(BUILT);
+
+  /* The deliverable travels on its own, so it has to say what it is and what
+     may be done with it. Checked before the browser starts, since this is a
+     property of the file rather than of the running page. */
+  const source = html.toString('utf8');
+  check('built file carries the MIT notice',
+    /Released under the MIT License/.test(source));
+  check('licence banner follows the doctype, not preceding it',
+    /^\s*<!DOCTYPE html>\s*<!--/i.test(source),
+    'a comment before the doctype puts browsers into quirks mode');
+  check('built file names the runtime dependencies it does not contain',
+    /fetched from a CDN/.test(source) && /NOTICE/.test(source));
   const server = createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(html);
@@ -47,7 +62,8 @@ async function main() {
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   const url = `http://127.0.0.1:${server.address().port}/`;
 
-  const browser = await chromium.launch();
+  const browser = await chromium.launch(
+    process.env.DFM_CHROMIUM ? { executablePath: process.env.DFM_CHROMIUM } : {});
   const page = await browser.newPage({ viewport: { width: 1600, height: 1000 } });
 
   /* Answer the app's CDN requests from node_modules. Also asserts, implicitly,
@@ -118,6 +134,36 @@ async function main() {
     check('wall check reports a plausible nominal', /2\.\d\d mm/.test(wallText), wallText.slice(0, 120));
     void medianWall;
 
+    // ── moulding estimates ────────────────────────────────────────────────
+    // Not scored checks: what it costs to make the part rather than whether it
+    // can be made. The fixture is a 40×30×20 shell with 2 mm walls.
+    check('moulding estimates shown', await page.locator('#shotSection').isVisible());
+    const shotText = await page.textContent('#shotSection');
+    check('part mass reported', /\d+\.\d\s*g/.test(shotText), shotText.slice(0, 160));
+    check('projected area reported', /12\.0\s*cm²/.test(shotText), shotText.slice(0, 200));
+    check('machine size reported', /Machine size\s*\d+\s*t/.test(shotText), shotText.slice(0, 220));
+
+    // ── gate suggestion ───────────────────────────────────────────────────
+    // With no gate set the flow check has nothing to compute, so it searches
+    // for where the gate should go instead of only asking for one.
+    const flowInfo = await page.locator('#checksList .check', { hasText: 'Flow length' }).first().textContent();
+    check('flow check reports a searched gate position', /candidate positions tried/.test(flowInfo), flowInfo.slice(0, 200));
+    check('best-candidate L/T reported', /Best candidate L\/T/.test(flowInfo), flowInfo.slice(0, 260));
+    check('use-best button enabled', !(await page.locator('#suggestGateBtn').isDisabled()));
+
+    await page.click('#suggestGateBtn');
+    check('suggested gate placed', (await page.textContent('#gateInfo')).includes('best of'),
+      await page.textContent('#gateInfo'));
+    check('use-best button retires once a gate is set', await page.locator('#suggestGateBtn').isDisabled());
+
+    await page.click('#runBtn');
+    await page.waitForFunction(() => document.getElementById('resultStatus').textContent === 'complete', null, { timeout: 60000 });
+    const suggestedFlow = await page.locator('#checksList .check', { hasText: 'Flow length' }).first().textContent();
+    check('the suggested gate produces a real L/T', /Max L\/T = \d+/.test(suggestedFlow), suggestedFlow.slice(0, 160));
+
+    await page.click('#clearGateBtn');
+    check('clearing the gate re-offers the suggestion', !(await page.locator('#suggestGateBtn').isDisabled()));
+
     // ── heat modes ────────────────────────────────────────────────────────
     for (const mode of ['draft', 'thickness', 'sink', 'undercut']) {
       await page.click(`.heat-btn[data-heat="${mode}"]`);
@@ -171,12 +217,27 @@ async function main() {
     /* Regression: the original never wrote the two-shot result to the export. */
     check('JSON export includes two-shot block', !!exported.two_shot && Array.isArray(exported.two_shot.checks));
     check('JSON export includes flow data', !!exported.mesh_summary.flow);
+    check('JSON export includes moulding estimates',
+      !!exported.moulding && typeof exported.moulding.part_mass_g === 'number'
+      && typeof exported.moulding.machine_clamp_tonnes === 'number',
+      JSON.stringify(exported.moulding).slice(0, 160));
 
     const pdfDownload = page.waitForEvent('download', { timeout: 40000 });
     await page.click('#pdfBtn');
     const pdfFile = await pdfDownload;
     const pdfBytes = readFileSync(await pdfFile.path());
     check('PDF export produced a real PDF', pdfBytes.subarray(0, 5).toString() === '%PDF-', `${pdfBytes.length} bytes`);
+
+    // ── revision comparison ───────────────────────────────────────────────
+    // Fed the export from this same run, so every check should read unchanged
+    // and the panel should notice it is looking at one geometry twice.
+    await page.setInputFiles('#compareInput', jsonPath);
+    await page.waitForFunction(
+      () => document.getElementById('compareSection').style.display !== 'none', null, { timeout: 15000 });
+    const cmpText = await page.textContent('#compareSection');
+    check('comparison panel shown', await page.locator('#compareSection').isVisible());
+    check('comparing a run with itself moves nothing', /No check changed band/.test(cmpText), cmpText.slice(0, 200));
+    check('comparison warns it is the same geometry', /same geometry twice/.test(cmpText), cmpText.slice(0, 300));
 
     // ── persistence ───────────────────────────────────────────────────────
     await page.reload({ waitUntil: 'networkidle' });
@@ -189,6 +250,64 @@ async function main() {
     check('reset clears results', !(await page.locator('#resultsContent').isVisible()));
 
     check('no console errors during run', consoleErrors.length === 0, consoleErrors.slice(0, 3).join(' | '));
+
+    // ── mesh health gate ──────────────────────────────────────────────────
+    // The panel that has to be read before the score is. Driven on a fresh
+    // page so it cannot be confused with the state the run above left behind.
+    const healthPage = await browser.newPage({ viewport: { width: 1600, height: 1000 } });
+    await healthPage.route(/^https:\/\/(cdnjs\.cloudflare\.com|cdn\.jsdelivr\.net)\//, (route) => {
+      const hit = Object.keys(vendored).find((name) => route.request().url().endsWith(name));
+      return hit
+        ? route.fulfill({ status: 200, contentType: 'application/javascript', body: readFileSync(vendored[hit]) })
+        : route.abort();
+    });
+    await healthPage.route(/^https:\/\/fonts\./, (route) => route.fulfill({ status: 200, contentType: 'text/css', body: '' }));
+    await healthPage.goto(url, { waitUntil: 'networkidle' });
+
+    const loadInto = async (name) => {
+      await healthPage.setInputFiles('#fileInput', join(FIXTURES, name));
+      await healthPage.waitForFunction(
+        () => !document.getElementById('meshHealth').hidden, null, { timeout: 30000 });
+    };
+
+    await loadInto('part.stl');
+    check('mesh health: sound part reports no issues',
+      (await healthPage.locator('#meshHealth .mh-head.high').count()) === 1
+      && (await healthPage.locator('#meshHealth .mh-issue.error, #meshHealth .mh-issue.warn').count()) === 0,
+      await healthPage.textContent('#meshHealth'));
+
+    /* Regression: an inch-authored STL is a valid file describing a 1.57 mm
+       part. Before this gate existed it analysed silently and failed the wall
+       check on a part that is fine. */
+    await healthPage.reload({ waitUntil: 'networkidle' });
+    await loadInto('part-inches.stl');
+    check('mesh health: inch-authored part is caught',
+      (await healthPage.locator('#meshHealth .mh-head.unusable').count()) === 1
+      && (await healthPage.textContent('#meshHealth')).includes('not in millimetres'),
+      (await healthPage.textContent('#meshHealth')).slice(0, 140));
+    check('mesh health: offers the inch conversion',
+      (await healthPage.locator('#meshHealth .mh-fix-btn').count()) >= 1,
+      await healthPage.textContent('#meshHealth'));
+
+    await healthPage.locator('#meshHealth .mh-fix-btn').first().click();
+    await healthPage.waitForFunction(
+      () => document.querySelector('#meshHealth .mh-head.high') !== null, null, { timeout: 15000 });
+    check('mesh health: rescaling fixes it',
+      (await healthPage.textContent('#meshHealth')).includes('40.0 × 30.0 × 20.0'),
+      await healthPage.textContent('#meshHealth'));
+
+    await healthPage.click('#runBtn');
+    await healthPage.waitForFunction(() => document.getElementById('resultStatus').textContent === 'complete', null, { timeout: 60000 });
+    const rescaledWall = await healthPage.locator('#checksList .check', { hasText: 'Wall thickness' }).first().textContent();
+    check('mesh health: rescaled part measures its true 2 mm wall',
+      /2\.\d\d mm/.test(rescaledWall), rescaledWall.slice(0, 120));
+
+    await healthPage.reload({ waitUntil: 'networkidle' });
+    await loadInto('part-open.stl');
+    check('mesh health: open mesh is reported',
+      (await healthPage.textContent('#meshHealth')).includes('not closed'),
+      (await healthPage.textContent('#meshHealth')).slice(0, 140));
+    await healthPage.close();
 
     // ── main-thread fallback ──────────────────────────────────────────────
     // Opened from a Downloads folder the page runs on file://, where Chrome

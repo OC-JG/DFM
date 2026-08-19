@@ -25,15 +25,40 @@ JSON export are entirely local.
 ## Building
 
 ```sh
-node build.js          # writes dfm-tool.html
+node build.js            # writes dfm-tool.html
+node build.js --vendor   # ... with three.js and jsPDF built in, so it needs no network
 ```
 
 No dependencies, no install step. The bundler is ~150 lines in `build.js`.
 
+The committed `dfm-tool.html` is the CDN-loading one. `--vendor` inlines three.js
+and jsPDF instead — about 1.4 MB rather than 500 kB, and nothing to fetch, which
+is what you want if the file is going to a machine with no internet. `npm run
+test:offline` proves that build works with every off-origin request refused, then
+puts the normal one back. STEP import is not covered: the OpenCascade reader is
+6 MB, it is already loaded lazily, and it stays network-dependent.
+
 ```sh
-npm install            # only needed for the test
-npm test               # build + fixtures + browser smoke test
+npm install            # only needed for the tests
+npm run browser        # once: fetches the Chromium the smoke test drives
+npm test               # build + unit tests + fixtures + browser smoke test
+
+npm run test:unit      # just the unit tests: no browser, no network, sub-second
+npm run test:offline   # proves the --vendor build runs with no network at all
+npm run verify:build   # asserts the committed dfm-tool.html matches src/
 ```
+
+`npm install` brings in the Playwright library but not a browser binary, which
+is what `npm run browser` is for. If you already have a Chromium — a different
+Playwright install, a system one — point `DFM_CHROMIUM` at it and skip that
+step.
+
+`test/unit.mjs` asserts numbers. Every fixture it uses has a known answer —
+analytic where the geometry gives one (a 2 mm hollow cylinder measures 2 mm, a
+3° frustum reads 3.000°), and otherwise checked against an independent
+brute-force implementation in `test/lib/reference.mjs` written from the
+definition rather than from the code under test. It imports the pure modules
+straight into Node, which is what the one-way dependency direction below buys.
 
 The smoke test drives a real Chromium through the whole pipeline — load,
 analyse, heatmaps, gate picking, two-shot, both exports, persistence, reset,
@@ -49,13 +74,16 @@ src/
   index.html           markup, with slots the build fills
   styles/app.css
   core/                material, finish and adhesion data
-  geometry/            STL + STEP parsing, vertex welding, BVH
+  geometry/            STL + STEP parsing, vertex welding, validation, BVH
   analysis/            mesh measurement, flow, undercuts, transitions
   rules/               DFM rule engine, two-shot rules, FMEA scoring
   worker/              off-thread analysis entry point
   app/                 viewer, camera, panels, state, wiring
   export/              PDF and JSON
-test/                  fixture generator + smoke test
+test/                  fixture generator, unit tests, browser smoke test
+  lib/shapes.mjs       analytic fixtures with known answers
+  lib/reference.mjs    slow, independent reference implementations
+.github/workflows/     CI: unit tests, artifact-sync check, browser suite
 legacy/                the original single-file v1, kept for reference
 ```
 
@@ -178,12 +206,148 @@ threshold at each call site.
 
 ---
 
+## How the score works
+
+Each check owns a **weight** — how much that kind of problem is worth at worst —
+and each rule returns a **severity**: `minor`, `major` or `critical`, spending a
+quarter, a half or all of that weight. Nothing else moves the number. The eight
+checks that run by default sum to 100, so a part with no findings scores exactly
+100, and the score is normalised over the checks that actually ran, so enabling
+the FPC or wall-transition checks widens the exposure rather than making 0
+unreachable.
+
+Two things the score deliberately will not do:
+
+- **Advisories cost nothing.** Not having picked a gate yet is not a defect in
+  the part. Neither is the corner-radius reminder, which has no way to measure a
+  radius from an STL. Both report as `info` and deduct zero.
+- **The grade cannot outrun the findings.** A single critical finding on a light
+  check leaves a score in the high eighties, and no part with a critical finding
+  is called PRODUCTION READY on the strength of where the arithmetic landed. The
+  band is the worse of what the score says and what the worst finding allows.
+
+The JSON export carries the severity, the weight and the deduction for every
+check, plus the total and the budget it came out of, so any figure on the page
+can be traced back to the rule that produced it.
+
+## Mesh health
+
+Everything downstream assumes a closed, consistently wound, millimetre-scale
+solid, so that gets checked when the file lands rather than assumed. An STL
+carries no units at all — an inch-authored part reads 25.4× small, and every
+threshold in this tool is in millimetres — and an open or inside-out mesh
+otherwise produces a full report with a confident number on the front of it.
+
+The panel under the drop zone reports unit plausibility, closure, manifold and
+winding consistency, inverted normals and degenerate triangles, and offers
+one-click rescale and normal-flip where those are the fix. Units are asked about
+rather than asserted: a part under 2 mm across is almost certainly mis-scaled,
+but one between 2 and 15 mm gets a question, because an 8 mm clip is a real
+thing. Only a surface with no interior is refused outright.
+
+Both exports carry the report, and the PDF puts it ahead of the measurements it
+qualifies.
+
+## Wall thickness, measured twice
+
+The wall is measured two ways. A ray cast into the solid along the inward face
+normal is exact when the opposite face is parallel and overstates the wall when
+it is not — a wedge, a tapered boss, a rib meeting a wall at an angle. The other
+is the diameter of the largest sphere that fits inside the solid touching that
+point, which is what a moulder means by "wall".
+
+**The checks are judged on the sphere figure**, because overstating a wall is the
+optimistic direction, and optimism is what lets a section that will sink or
+short-shot read as comfortably in band. On a 45° wedge the reported nominal is
+20 mm rather than the ray's 30 mm. Both are printed, and where they diverge by
+more than 15% the check says so — that divergence is itself a finding about the
+geometry.
+
+Two comparisons deliberately stay on the ray figure at both ends, because mixing
+measurements there would invent findings: the sink check, which holds a
+per-triangle local thickness against the nominal, and the thin-gate advisory,
+which holds a single reading at the gate against the median.
+
+## Where to put the gate
+
+Flow length, and therefore the short-shot prediction, depends entirely on where
+the gate is. On a 200 × 20 × 2 mm bar two plausible gate positions differ by
+1.87× in worst-case L/T — the difference between "fills comfortably" and a
+warning — so leaving that to wherever someone happened to click made the most
+consequential input the least informed one.
+
+Run an analysis without a gate and the tool searches instead of asking. It tries
+a spread of positions across the part's outer surface — the inner faces of a
+cavity are not somewhere a sprue can reach — and ranks them by worst-case L/T,
+then by how much of the part sits over the limit. The flow check reports the best
+position and how much the choice matters, and **Use best** places it.
+
+Placing the suggestion reproduces the L/T the search promised; the tests assert
+that. The search only runs when there is no gate, so it costs nothing once one is
+set, and it tries fewer positions on very large meshes to keep the cost bounded.
+
+## Moulding estimates
+
+Alongside the manufacturability checks the report carries what it takes to make
+the part: volume, mass, projected area, the clamp force that implies and the
+smallest standard machine that covers it. These are not scored — they are not
+pass-or-fail properties of the part — but they are usually the numbers someone
+wants first.
+
+Projected area is measured by casting a grid of rays along the pull axis rather
+than by summing the triangles' contributions, which matters for holes: a bore
+running along the pull axis is formed by a core pin shutting off against the
+opposite half, so no melt bears on it and it must not count towards clamp force.
+On a 2 mm-wall tube the triangle sum gives the full disc; this gives the annulus.
+
+Cavity pressure is the one assumption in the chain, and it is printed next to the
+result. Mass is withheld when the mesh is not a closed solid rather than
+estimated from the bounding box.
+
+Cycle time is not included. The material table carries a cooling coefficient per
+grade, but its documented convention gives the theoretical cooling floor rather
+than a practical cooling time — the two readings differ by about 4× — and a
+cycle time is exactly the kind of number that gets quoted from. See
+`src/analysis/shot.js` for the detail.
+
+## Comparing revisions
+
+**Compare with JSON** reads a previous export and says what moved: the score, the
+grade, which checks changed band, and which measurements shifted and in which
+direction. Comparisons work against files from weeks ago and older schema
+versions — a field the old record does not have is reported as unavailable rather
+than treated as zero.
+
+It also declines to mislead. Changing material, changing mode or running a
+different set of checks all make score movement something other than a change in
+the part, and each raises a caveat above the diff.
+
+## Licence
+
+MIT — see `LICENSE`. The built `dfm-tool.html` carries the notice in a comment at
+the top of the file, because the file gets handed to people on its own and a
+recipient should be able to find out what they may do with it by opening it.
+
+three.js, jsPDF and the OpenCascade STEP reader are all MIT too. The default
+build fetches them at runtime, so they are not part of the file; `--vendor`
+embeds three.js and jsPDF, and their own copyright headers are embedded verbatim
+with them, which is what MIT asks of a redistribution. `NOTICE` records all of
+this in one place and `npm run test:offline` asserts the notices survive the
+build.
+
 ## Known constraints
 
 - **three.js is pinned to r128**, the last version shipping a UMD build usable
   from a plain `<script>` tag. Moving to a modern release means either an
   import map or a real bundler for the vendor code, which would cost the
   single-file property. Not worth it for what the viewer does here.
+- **Undercut candidacy assumes a flat parting line** at the pull minimum. Which
+  faces are undercuts is judged against a single tool pulling one way, so the
+  cavity ceiling of a hollow part reads as an undercut even though a real
+  two-piece tool's core forms it and withdraws away from it. Whether a face needs
+  a slide or a lifter *is* decided properly — by whether a side-action core could
+  physically reach it — but the question of which faces are undercuts at all
+  needs a parting-line model.
 - **Corner radii cannot be detected**, only advised on. That needs B-rep face
   topology; STL does not carry it, and the STEP path does not yet plumb
   through the face groups the parser already extracts. Those groups are

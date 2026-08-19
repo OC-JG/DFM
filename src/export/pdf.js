@@ -14,6 +14,10 @@ import { formatPullAxis } from '../analysis/stats.js';
 
 const JSPDF_CDN = 'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js';
 
+/* The whole initialiser is the placeholder, so a --vendor build swaps it for
+   `true` rather than prefixing it and leaving two expressions behind. */
+const VENDORED = /*@VENDORED@*/false;
+
 const PAGE_W = 210;
 const MARGIN = 14;
 const FOOTER_Y = 290;
@@ -25,6 +29,12 @@ function loadJsPDF() {
   if (jsPdfPromise) return jsPdfPromise;
   jsPdfPromise = new Promise((resolve, reject) => {
     if (window.jspdf && window.jspdf.jsPDF) { resolve(window.jspdf.jsPDF); return; }
+    /* A vendored build already has it on the page, so there is nothing to fetch
+       and no reason to fail if the network is absent. */
+    if (VENDORED) {
+      reject(new Error('The PDF library was expected to be built in but is not present. Rebuild with `node build.js --vendor`.'));
+      return;
+    }
     const s = document.createElement('script');
     s.src = JSPDF_CDN;
     s.onload = () => {
@@ -63,6 +73,20 @@ function makeCursor(doc) {
       y += 4;
       doc.setFont('helvetica', 'normal');
       doc.setFontSize(9);
+    },
+    /* A wrapped run of body text, broken across pages a line at a time so a
+       long paragraph never overflows the footer. */
+    paragraph(text, size = 8.5) {
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(size);
+      doc.setTextColor(10, 14, 12);
+      const lines = doc.splitTextToSize(stripMarkup(text), PAGE_W - 2 * MARGIN);
+      for (const line of lines) {
+        this.space(6);
+        doc.text(line, MARGIN, y);
+        y += 4;
+      }
+      y += 2;
     },
     /* Two-column label/value rows. */
     pairs(rows, labelWidth = 46) {
@@ -141,7 +165,7 @@ function stripMarkup(text) {
   return String(text).replace(/<[^>]+>/g, '');
 }
 
-export async function exportPDF({ sessionId, dfm, analysis, twoShot, settings }) {
+export async function exportPDF({ sessionId, dfm, analysis, twoShot, validation, shot, settings }) {
   const jsPDF = await loadJsPDF();
   const doc = new jsPDF({ unit: 'mm', format: 'a4' });
   const r = dfm.result;
@@ -183,7 +207,21 @@ export async function exportPDF({ sessionId, dfm, analysis, twoShot, settings })
   doc.setFontSize(9);
   doc.text(`Material: ${m.name}`, 70, cur.y + 25);
   doc.text(`Shrinkage: ${m.shrinkLo}–${m.shrinkHi}%   ·   Warp risk: ${m.warpRisk.toUpperCase()}`, 70, cur.y + 30);
-  cur.y += 44;
+  cur.y += 40;
+
+  /* State the arithmetic on the report itself. A bare index invites the reader
+     to treat it as a measurement; saying what it was out of, and how many
+     findings were critical, makes it a summary of the findings below. */
+  doc.setFontSize(7.5);
+  doc.setTextColor(90, 94, 92);
+  const criticals = r.criticalCount === 1 ? '1 critical finding' : `${r.criticalCount} critical findings`;
+  doc.text(
+    `${r.totalDeduction.toFixed(1)} points deducted from a ${r.budget}-point budget across ${r.checks.length} checks · `
+    + `${r.criticalCount ? criticals : 'no critical findings'} · a check spends a quarter of its weight on a minor `
+    + 'finding, half on a major, all of it on a critical',
+    MARGIN, cur.y);
+  doc.setTextColor(10, 14, 12);
+  cur.y += 8;
 
   // ── inputs ───────────────────────────────────────────────────────────────
   cur.heading('PART INPUTS');
@@ -202,6 +240,31 @@ export async function exportPDF({ sessionId, dfm, analysis, twoShot, settings })
     ['FPC overmould', inp.fpc && inp.fpc.enabled ? `Yes (${inp.fpc.thickness} mm, ${inp.fpc.anchors})` : 'No'],
   ]);
 
+  // ── mesh health ──────────────────────────────────────────────────────────
+  // Ahead of the mesh analysis on purpose. Everything in that section is
+  // measured on this geometry, so whether the geometry can carry it is the
+  // first thing a reader needs, not a footnote after the numbers.
+  if (validation) {
+    cur.heading('MESH HEALTH');
+    const CONF = { high: 'SOUND', reduced: 'ANALYSABLE WITH CAVEATS', unusable: 'NEEDS ATTENTION' };
+    cur.pairs([
+      ['Verdict', CONF[validation.confidence] || validation.confidence],
+      ['Largest dimension', `${validation.maxDim.toFixed(1)} mm`],
+      ['Closed surface', validation.closed ? 'Yes' : `No — ${validation.edges.boundary.toLocaleString()} open edges`],
+      ['Winding', validation.windingConsistent
+        ? (validation.inverted ? 'Consistent but inverted' : 'Consistent')
+        : `${validation.edges.inconsistent.toLocaleString()} inconsistent edges`],
+      ['Non-manifold edges', validation.edges.nonManifold.toLocaleString()],
+      ['Degenerate triangles', validation.degenerate.toLocaleString()],
+    ], 50);
+    if (validation.issues.length) {
+      doc.setFontSize(8.5);
+      for (const issue of validation.issues) {
+        cur.paragraph(`${issue.level.toUpperCase()} — ${issue.title}: ${issue.detail}`);
+      }
+    }
+  }
+
   // ── mesh summary ─────────────────────────────────────────────────────────
   if (analysis) {
     cur.heading('MESH ANALYSIS');
@@ -215,12 +278,32 @@ export async function exportPDF({ sessionId, dfm, analysis, twoShot, settings })
       ['Median wall (est)', `${analysis.wallStats.median?.toFixed(2) ?? '—'} mm`],
       ['Bulk wall (p25–p75)', `${analysis.wallStats.p25?.toFixed(2) ?? '—'}–${analysis.wallStats.p75?.toFixed(2) ?? '—'} mm`],
       ['Wall CV (robust)', `${((analysis.wallStats.cvRobust || 0) * 100).toFixed(0)}%`],
+      ['Median 95% CI', analysis.wallStats.medLo != null
+        ? `${analysis.wallStats.medLo.toFixed(2)}–${analysis.wallStats.medHi.toFixed(2)} mm (n=${analysis.wallStats.n})`
+        : '—'],
+      ['Sphere-fit wall', analysis.wallMethod
+        ? `${analysis.wallMethod.sphereMedian.toFixed(2)} mm (${(analysis.wallMethod.ratio * 100).toFixed(0)}% of ray)`
+        : '—'],
       ['Sidewall <min draft', `${analysis.sidePctUnderMin.toFixed(1)}%`],
       ['Sink moderate area', `${analysis.sinkPctModerate.toFixed(1)}%`],
       ['Sink severe area', `${analysis.sinkPctSevere.toFixed(1)}%`],
       ['Slide undercut area', `${analysis.slideArea.toFixed(1)} mm²`],
       ['Lifter undercut area', `${analysis.lifterArea.toFixed(1)} mm²`],
     ], 50);
+  }
+
+  // ── moulding estimates ───────────────────────────────────────────────────
+  if (shot) {
+    cur.heading('MOULDING ESTIMATES');
+    cur.pairs([
+      ['Part volume', shot.volumeCm3 != null ? `${shot.volumeCm3.toFixed(2)} cm³` : '—'],
+      ['Part mass', shot.massG != null ? `${shot.massG.toFixed(1)} g` : '—'],
+      ['Projected area', shot.projectedAreaCm2 != null ? `${shot.projectedAreaCm2.toFixed(1)} cm²` : '—'],
+      ['Cavity pressure', shot.cavityPressureMPa ? `${shot.cavityPressureMPa.lo}–${shot.cavityPressureMPa.hi} MPa` : '—'],
+      ['Clamp force', shot.clampTonnes ? `${shot.clampTonnes.lo.toFixed(0)}–${shot.clampTonnes.hi.toFixed(0)} tonnes` : '—'],
+      ['Machine clamp', shot.machineTonnes ? `${shot.machineTonnes} tonnes` : '—'],
+    ], 50);
+    for (const note of shot.notes) cur.paragraph(note);
   }
 
   // ── tooling actions ──────────────────────────────────────────────────────
@@ -280,6 +363,7 @@ export async function exportPDF({ sessionId, dfm, analysis, twoShot, settings })
     cur.heading('TWO-SHOT INTERFACE');
     cur.pairs([
       ['Interface score', `${twoShot.score} — ${twoShot.grade.label}`],
+      ['Interface basis', `−${twoShot.totalDeduction.toFixed(1)} of ${twoShot.budget} pts`],
       ['Shot 1 (substrate)', twoShot.mat1.name],
       ['Shot 2 (overmould)', twoShot.mat2.name],
       ['Window type', settings.windowType],

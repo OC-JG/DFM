@@ -238,8 +238,14 @@ function rayTriIdx(ox, oy, oz, dx, dy, dz, vertices, indices, t) {
 /*
  * Nearest hit along a ray, or Infinity for a miss.
  * excludeTri skips the originating triangle so a face does not self-hit.
+ *
+ * maxDist caps the search: nodes and hits beyond it are discarded, and the
+ * result is Infinity if nothing closer exists. Callers that only care whether
+ * anything lies within a known distance — the inscribed-sphere probe, which
+ * only wants rays that beat the bound it already has — save most of the
+ * traversal by saying so.
  */
-export function castRay(bvh, geom, ox, oy, oz, dx, dy, dz, eps, excludeTri) {
+export function castRay(bvh, geom, ox, oy, oz, dx, dy, dz, eps, excludeTri, maxDist) {
   const { bounds, meta, triIdx } = bvh;
   const { vertices, indices } = geom;
   const idx = 1 / dx, idy = 1 / dy, idz = 1 / dz;
@@ -247,7 +253,7 @@ export function castRay(bvh, geom, ox, oy, oz, dx, dy, dz, eps, excludeTri) {
   const stack = RAY_STACK;
   let sp = 0;
   stack[sp++] = 0;
-  let nearest = Infinity;
+  let nearest = maxDist > 0 ? maxDist : Infinity;
 
   while (sp > 0) {
     const ni = stack[--sp];
@@ -269,5 +275,6 @@ export function castRay(bvh, geom, ox, oy, oz, dx, dy, dz, eps, excludeTri) {
       stack[sp++] = meta[m3 + 1];
     }
   }
-  return nearest;
+  /* Reaching the cap means nothing was found inside it. */
+  return nearest === maxDist ? Infinity : nearest;
 }

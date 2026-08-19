@@ -1,0 +1,37 @@
+OnlyCat DFM — third-party components
+====================================
+
+dfm-tool.html is the deliverable, and it is meant to be handed to people. This
+records what travels with it and under what terms, so a recipient does not have
+to take the file apart to find out.
+
+The tool's own code is MIT — see LICENSE.
+
+Loaded at runtime from a CDN by the default build
+-------------------------------------------------
+
+  three.js 0.128.0 (r128)      MIT     Copyright 2010-2021 Three.js Authors
+                                       https://github.com/mrdoob/three.js
+  jsPDF 2.5.1                  MIT     Copyright (c) 2010-2021 James Hall,
+                                       yWorks GmbH, Lukas Hollaender
+                                       https://github.com/parallax/jsPDF
+  occt-import-js 0.0.23        MIT     OpenCascade bindings, used only to read
+                                       STEP files
+                                       https://github.com/kovacsv/occt-import-js
+
+Built into the file by `node build.js --vendor`
+----------------------------------------------
+
+three.js and jsPDF are embedded in the output. Both are MIT, which requires the
+copyright notice to be included with the distribution; both minified builds
+carry their own `@license` header and those headers are embedded verbatim, so
+the notices travel with the artifact. `npm run test:offline` asserts they are
+still present.
+
+The OpenCascade reader is never embedded — it is 6 MB and only a STEP import
+needs it — so STEP support remains network-dependent in every build.
+
+Development only, never distributed
+-----------------------------------
+
+  playwright 1.62.1            Apache-2.0   drives the browser test suite

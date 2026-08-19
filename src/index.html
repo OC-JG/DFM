@@ -11,6 +11,7 @@
 <!-- three.js is required for the viewer. jsPDF and the OpenCascade STEP
      reader are loaded on demand, so a session that never exports a PDF or
      opens a STEP file never pays for them. -->
+<!--@VENDOR@-->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <style>
 /*@CSS@*/
@@ -60,6 +61,7 @@
         </div>
         <input type="file" id="fileInput" accept=".stl,.step,.stp" class="visually-hidden">
         <div class="file-info" id="fileInfo" aria-live="polite"></div>
+        <div class="mesh-health" id="meshHealth" aria-live="polite" hidden></div>
       </div>
 
       <div id="opticalWindowField" hidden>
@@ -158,6 +160,7 @@
         <div class="btn-row">
           <button type="button" class="btn secondary" id="pickGateBtn" aria-pressed="false">⊕ Pick gate</button>
           <button type="button" class="btn secondary" id="clearGateBtn">× Clear</button>
+          <button type="button" class="btn secondary" id="suggestGateBtn" disabled>⌾ Use best</button>
         </div>
         <div id="gateInfo" class="hint" aria-live="polite">
           Click <b>Pick gate</b>, then click any point on the 3D part. A red dot will mark the gate. Required for flow length (L/T) check.
@@ -344,6 +347,11 @@
 
       <div id="checksList"></div>
 
+      <div id="shotSection" style="display:none;">
+        <div class="section-subhead">Moulding estimates</div>
+        <div id="shotBody"></div>
+      </div>
+
       <div id="toolingSection" style="display:none;">
         <button type="button" class="tooling-toggle" id="toolingToggle" aria-expanded="true" aria-controls="toolingActions">
           <span id="toolingToggleLabel">Tooling actions</span>
@@ -363,9 +371,16 @@
         <div id="tsChecksList"></div>
       </div>
 
+      <div id="compareSection" style="display:none;">
+        <div class="section-subhead">Compared with a previous run</div>
+        <div id="compareBody"></div>
+      </div>
+
       <div class="actions">
         <button type="button" class="btn" id="pdfBtn">↓ Export PDF report</button>
         <button type="button" class="btn secondary" id="jsonBtn">↓ Export JSON</button>
+        <button type="button" class="btn secondary" id="compareBtn">⇄ Compare with JSON</button>
+        <input type="file" id="compareInput" accept=".json,application/json" class="visually-hidden">
       </div>
     </div>
   </aside>

@@ -2,17 +2,20 @@ import { MATERIALS } from '../core/materials.js';
 import { effectiveMinDraft } from '../core/finishes.js';
 import { parseSTL } from '../geometry/stl.js';
 import { parseSTEP } from '../geometry/step.js';
+import { validateGeometry, rescaleGeometry, flipWinding } from '../geometry/validate.js';
 import { suggestPullDirection } from '../analysis/mesh.js';
+import { estimateShot } from '../analysis/shot.js';
 import { computeBounds } from '../geometry/weld.js';
 import { runDFM } from '../rules/engine.js';
 import { runTwoShotDFM } from '../rules/twoshot.js';
+import { compareRuns } from '../rules/compare.js';
 import { buildExportJSON, downloadJSON } from '../export/json.js';
 import { exportPDF } from '../export/pdf.js';
 import { runAnalysis, initWorker } from './analysis-runner.js';
 import { computeHeatColours, computeInterfaceColours, buildLegend, HEAT_MODES } from './heatmap.js';
 import * as viewer from './viewer.js';
 import * as panel from './panels-input.js';
-import { renderResults, renderTwoShotResults, hideTwoShotResults, clearResults } from './panels-results.js';
+import { renderResults, renderShot, renderComparison, renderTwoShotResults, hideTwoShotResults, clearResults } from './panels-results.js';
 import { settings, runtime, loadSettings, resetSettings, resetRuntime, isTwoShot } from './state.js';
 import { $, $$, el, toast, nextFrame } from './dom.js';
 
@@ -49,6 +52,67 @@ async function parseGeometryFile(file, onProgress) {
   return { geom: parseSTL(buffer, onProgress), format: 'STL' };
 }
 
+/*
+ * Install a freshly loaded or freshly corrected part.
+ *
+ * Validation runs here rather than inside the analysis, because the things it
+ * catches — wrong units, an open surface, inside-out normals — are properties
+ * of the file, and the moment to raise them is when the file arrives, not
+ * buried in a check three panels down after a score has already been shown.
+ */
+function installGeometry(geom, file) {
+  runtime.geom1 = geom;
+  runtime.validation = validateGeometry(geom);
+  runtime.gateLocation = null;
+  /* Positions were searched on the old geometry and mean nothing on this one. */
+  runtime.gateSuggestion = null;
+  viewer.clearGateMarker();
+
+  runtime.bodies = viewer.loadGeometry(geom);
+  panel.renderBodiesList(runtime.bodies, toggleBody);
+  if (file) panel.setFileInfo(1, file, geom);
+  panel.renderMeshHealth(runtime.validation, applyMeshFix);
+  panel.updatePartSummary();
+  panel.updateOnboarding();
+
+  $('viewerEmpty').style.display = 'none';
+  $('gateInfo').innerHTML = 'No gate set. Flow length (L/T) check needs a gate.';
+
+  autoSuggestPull();
+  return runtime.validation;
+}
+
+/*
+ * Apply one of the corrections the health panel offered. Both of them move the
+ * geometry under everything downstream of it, so the analysis and the picked
+ * gate are discarded rather than left describing the old mesh.
+ */
+function applyMeshFix(fix) {
+  if (!runtime.geom1 || !fix || !fix.action) return;
+  let next = null;
+  let note = '';
+  if (fix.action === 'scale' && fix.factor > 0) {
+    next = rescaleGeometry(runtime.geom1, fix.factor);
+    note = `Rescaled by ×${fix.factor}. Largest dimension is now ${Math.max(...validateGeometry(next).bbox.size).toFixed(1)} mm.`;
+  } else if (fix.action === 'flip') {
+    next = flipWinding(runtime.geom1);
+    note = 'Normals flipped. Draft and undercuts will now be measured from the outside.';
+  }
+  if (!next) return;
+
+  runtime.analysis = null;
+  runtime.analysis2 = null;
+  runtime.interface = null;
+  runtime.dfm = null;
+  runtime.twoShot = null;
+  clearResults();
+  installGeometry(next, null);
+  refreshHeatAvailability();
+  setHeatMode('flat');
+  toast(`${note} Re-run the analysis.`, 'info', 6000);
+  setStatus('GEOMETRY CORRECTED');
+}
+
 async function handleFile1(file) {
   panel.setFileInfo(1, file, null);
   setStatus(STEP_EXTS.has(file.name.toLowerCase().split('.').pop()) ? 'LOADING STEP' : 'PARSING STL');
@@ -56,20 +120,13 @@ async function handleFile1(file) {
 
   try {
     const { geom, format } = await parseGeometryFile(file, updateProgress);
-    runtime.geom1 = geom;
     runtime.fileName1 = file.name;
-    runtime.gateLocation = null;
-
-    runtime.bodies = viewer.loadGeometry(geom);
-    panel.renderBodiesList(runtime.bodies, toggleBody);
-    panel.setFileInfo(1, file, geom);
-    panel.updatePartSummary();
-    panel.updateOnboarding();
-
-    $('viewerEmpty').style.display = 'none';
-    $('gateInfo').innerHTML = 'No gate set. Flow length (L/T) check needs a gate.';
-
-    autoSuggestPull();
+    const report = installGeometry(geom, file);
+    if (report.confidence === 'unusable') {
+      toast(`${file.name} loaded, but the mesh needs attention before the numbers mean anything — see the panel under the drop zone.`, 'error', 9000);
+    } else if (report.confidence === 'reduced') {
+      toast(`${file.name} loaded with caveats — see the mesh panel under the drop zone.`, 'warn', 7000);
+    }
     setStatus(`${format} LOADED`);
   } catch (err) {
     console.error(err);
@@ -92,8 +149,17 @@ async function handleFile2(file) {
     const { geom } = await parseGeometryFile(file, updateProgress);
     runtime.geom2 = geom;
     runtime.fileName2 = file.name;
+    runtime.validation2 = validateGeometry(geom);
     viewer.loadGeometry2(geom);
     panel.setFileInfo(2, file, geom);
+    /* The overmould gets the same scrutiny, but reported as a toast rather
+       than a second panel: the interface pass measures shot 2 against shot 1,
+       so a bad shot-2 mesh corrupts the two-shot result just as thoroughly. */
+    if (runtime.validation2.confidence !== 'high') {
+      const worst = runtime.validation2.issues.find((i) => i.level === 'error')
+        || runtime.validation2.issues.find((i) => i.level === 'warn');
+      if (worst) toast(`Overmould mesh: ${worst.title.toLowerCase()}. ${worst.detail}`, runtime.validation2.confidence === 'unusable' ? 'error' : 'warn', 8000);
+    }
   } catch (err) {
     console.error(err);
     panel.setFileError(2, err.message);
@@ -173,7 +239,13 @@ function setPullDir(mode, value, vec, note) {
 
 function autoSuggestPull() {
   if (!runtime.geom1) return;
-  const sugg = suggestPullDirection(runtime.geom1);
+  /* Scored against the draft this part actually has to hold and the mould type
+     selected, so the recommendation is judged by the same rules the report is. */
+  const material = MATERIALS[settings.material];
+  const sugg = suggestPullDirection(runtime.geom1, {
+    minDraft: effectiveMinDraft(material, settings.surfaceFinish),
+    moldType: settings.moldType,
+  });
   const named = Object.keys(AXIS_VECTORS).find((k) => {
     const v = AXIS_VECTORS[k];
     return v[0] === sugg.dir[0] && v[1] === sugg.dir[1] && v[2] === sugg.dir[2];
@@ -216,6 +288,7 @@ function onViewerPick(kind, data) {
     const [x, y, z] = data.local;
     $('gateInfo').innerHTML =
       `Gate set at <b>(${x.toFixed(1)}, ${y.toFixed(1)}, ${z.toFixed(1)})</b>. Re-run analysis to compute flow length.`;
+    refreshGateSuggestion();
   }
   viewer.setPickMode(null);
   refreshPickButtons();
@@ -226,6 +299,38 @@ function clearGate() {
   viewer.clearGateMarker();
   $('gateInfo').innerHTML =
     'Click <b>Pick gate</b>, then click any point on the 3D part. A red dot will mark the gate. Required for flow length (L/T) check.';
+  refreshGateSuggestion();
+}
+
+/*
+ * Offer the searched-for gate position, if there is one.
+ *
+ * The search only runs when no gate was set, so the button is live exactly
+ * when it is useful: after an analysis that had nothing to compute flow from.
+ */
+function refreshGateSuggestion() {
+  const btn = $('suggestGateBtn');
+  if (!btn) return;
+  const suggestion = runtime.gateSuggestion;
+  const available = !!(suggestion && suggestion.best && !runtime.gateLocation);
+  btn.disabled = !available;
+  btn.title = available
+    ? `Place the gate at the best of ${suggestion.considered} positions tried (worst-case L/T ${suggestion.best.maxLT.toFixed(0)})`
+    : 'Run an analysis without a gate to search for the best position';
+}
+
+function useSuggestedGate() {
+  const suggestion = runtime.gateSuggestion;
+  if (!suggestion || !suggestion.best) return;
+  const local = suggestion.best.point;
+  runtime.gateLocation = local;
+  const world = viewer.localToWorld(local);
+  if (world) viewer.setGateMarker(world, computeBounds(runtime.geom1.vertices).diag);
+  $('gateInfo').innerHTML =
+    `Gate placed at the best of ${suggestion.considered} searched positions: <b>(${local.map((v) => v.toFixed(1)).join(', ')})</b>, `
+    + `worst-case L/T <b>${suggestion.best.maxLT.toFixed(0)}</b>. Re-run analysis to score it.`;
+  refreshGateSuggestion();
+  setStatus('GATE PLACED');
 }
 
 /* ══ heat modes ══════════════════════════════════════════════════════════ */
@@ -372,6 +477,26 @@ async function doRunAnalysis() {
     runtime.dfm = { input, result };
 
     renderResults(result, runtime.analysis);
+
+    /* Shot weight and clamp force. Volume is only passed through when the
+       validator judged the surface closed — an enclosed volume is undefined
+       otherwise, and a shot weight derived from one would be invented. */
+    runtime.shot = runtime.analysis
+      ? estimateShot({
+        material: MATERIALS[settings.material],
+        volume: (runtime.validation && runtime.validation.volume != null)
+          ? runtime.validation.volume
+          : null,
+        projectedArea: runtime.analysis.projectedArea,
+      })
+      : null;
+    renderShot(runtime.shot);
+
+    /* The comparison on screen was against the previous run's numbers, which
+       these have just replaced. */
+    runtime.comparison = null;
+    renderComparison(null);
+
     panel.setFromMeshBadge(!!runtime.analysis);
     panel.updatePartSummary();
 
@@ -391,6 +516,14 @@ async function doRunAnalysis() {
       runtime.twoShot = null;
       hideTwoShotResults();
     }
+
+    /* The search only runs when there was no gate to compute flow from, so keep
+       the last one it produced: it stays valid for as long as the geometry does,
+       and clearing a gate should re-offer it rather than demand another run. */
+    if (runtime.analysis && runtime.analysis.gateSuggestion) {
+      runtime.gateSuggestion = runtime.analysis.gateSuggestion;
+    }
+    refreshGateSuggestion();
 
     /* Keep the current heat mode meaningful across re-runs. */
     refreshHeatAvailability();
@@ -415,17 +548,50 @@ async function doRunAnalysis() {
 
 /* ══ exports ═════════════════════════════════════════════════════════════ */
 
-function doExportJSON() {
-  if (!runtime.dfm) return;
-  const data = buildExportJSON({
+function currentRecord() {
+  if (!runtime.dfm) return null;
+  return buildExportJSON({
     sessionId: runtime.sessionId,
     dfm: runtime.dfm,
     analysis: runtime.analysis,
     twoShot: runtime.twoShot,
     interface: runtime.interface,
+    validation: runtime.validation,
+    shot: runtime.shot,
     settings,
   });
+}
+
+function doExportJSON() {
+  const data = currentRecord();
+  if (!data) return;
   downloadJSON(data, `dfm_${runtime.sessionId}_${Date.now()}.json`);
+}
+
+/*
+ * Compare this run against a previously exported JSON.
+ *
+ * Reading a file rather than keeping history in the page: a revision comparison
+ * is usually against something from last week, on someone else's machine, and
+ * the export already carries everything the diff needs.
+ */
+async function doCompare(file) {
+  const current = currentRecord();
+  if (!current) { toast('Run an analysis first, then compare it against a previous export.', 'warn'); return; }
+  try {
+    const text = await file.text();
+    const previous = JSON.parse(text);
+    if (!previous || typeof previous.score !== 'number' || !Array.isArray(previous.checks)) {
+      throw new Error('that file does not look like a DFM JSON export');
+    }
+    runtime.comparison = compareRuns(previous, current);
+    renderComparison(runtime.comparison);
+    toast(runtime.comparison.headline, 'info', 8000);
+    setStatus('COMPARED');
+  } catch (err) {
+    console.error(err);
+    toast(`Could not compare: ${err.message}`, 'error');
+  }
 }
 
 async function doExportPDF() {
@@ -440,6 +606,8 @@ async function doExportPDF() {
       dfm: runtime.dfm,
       analysis: runtime.analysis,
       twoShot: runtime.twoShot,
+      validation: runtime.validation,
+      shot: runtime.shot,
       settings,
     });
   } catch (err) {
@@ -469,6 +637,7 @@ function startOver() {
   refreshEverything();
   refreshPickButtons();
   clearGate();
+  refreshGateSuggestion();
   setHeatMode('flat');
   refreshHeatAvailability();
   $('viewerEmpty').style.display = '';
@@ -583,6 +752,7 @@ function boot() {
   $('pickFaceBtn').addEventListener('click', () => togglePick('face'));
   $('pickGateBtn').addEventListener('click', () => togglePick('gate'));
   $('clearGateBtn').addEventListener('click', clearGate);
+  $('suggestGateBtn').addEventListener('click', useSuggestedGate);
   $('autoPullBtn').addEventListener('click', () => {
     if (!runtime.geom1) { toast('Load a part first.', 'warn'); return; }
     autoSuggestPull();
@@ -607,6 +777,11 @@ function boot() {
   $('runBtn').addEventListener('click', doRunAnalysis);
   $('resetBtn').addEventListener('click', startOver);
   $('jsonBtn').addEventListener('click', doExportJSON);
+  $('compareBtn').addEventListener('click', () => $('compareInput').click());
+  $('compareInput').addEventListener('change', (e) => {
+    if (e.target.files.length) doCompare(e.target.files[0]);
+    e.target.value = ''; // allow re-selecting the same file
+  });
   $('pdfBtn').addEventListener('click', doExportPDF);
 
   wireKeyboard();

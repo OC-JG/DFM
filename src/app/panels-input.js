@@ -279,12 +279,80 @@ export function setFileError(which, message) {
   node.innerHTML = `<span class="fail-text">${esc(message)}</span>`;
 }
 
+/*
+ * Mesh health panel.
+ *
+ * Deliberately placed directly under the drop zone rather than with the
+ * results: it describes the input, and it has to be read before the score is,
+ * not after. Fixes that can be applied here are offered as buttons — the
+ * alternative is telling someone their file is in inches and leaving them to
+ * go and do something about it in CAD.
+ */
+export function renderMeshHealth(report, onFix) {
+  const node = $('meshHealth');
+  if (!report) {
+    node.hidden = true;
+    node.replaceChildren();
+    return;
+  }
+  node.hidden = false;
+
+  const LEVEL_ORDER = { error: 0, warn: 1, info: 2 };
+  const issues = [...report.issues].sort((a, b) => LEVEL_ORDER[a.level] - LEVEL_ORDER[b.level]);
+
+  const CONF_LABEL = {
+    high: 'Mesh looks sound',
+    reduced: 'Analysable, with caveats',
+    unusable: 'Fix this before trusting the result',
+  };
+
+  const nodes = [
+    el('div', { class: `mh-head ${report.confidence}` }, [
+      el('span', { class: 'mh-dot', 'aria-hidden': 'true' }),
+      el('span', { class: 'mh-title', text: CONF_LABEL[report.confidence] || report.confidence }),
+      el('span', {
+        class: 'mh-dims',
+        text: `${report.bbox.size.map((v) => v.toFixed(1)).join(' × ')} mm`,
+      }),
+    ]),
+  ];
+
+  for (const issue of issues) {
+    const body = [
+      el('div', { class: 'mh-issue-title', text: issue.title }),
+      el('div', { class: 'mh-issue-detail', text: issue.detail }),
+    ];
+    const actionable = (issue.fixes || []).filter((f) => f.action);
+    if (actionable.length) {
+      body.push(el('div', { class: 'mh-fixes' }, actionable.map((f) => el('button', {
+        type: 'button',
+        class: 'btn secondary mh-fix-btn',
+        text: f.label,
+        onclick: () => onFix(f),
+      }))));
+    }
+    nodes.push(el('div', { class: `mh-issue ${issue.level}` }, body));
+  }
+
+  if (!issues.length) {
+    nodes.push(el('div', { class: 'mh-issue info' }, [
+      el('div', {
+        class: 'mh-issue-detail',
+        text: `Closed, consistently wound, ${report.triCount.toLocaleString()} triangles, ${report.volume != null ? `${(report.volume / 1000).toFixed(1)} cm³` : 'volume unavailable'}.`,
+      }),
+    ]));
+  }
+
+  replaceChildren(node, nodes);
+}
+
 export function clearFileInfo() {
   for (const id of ['fileInfo', 'fileInfo2']) {
     const node = $(id);
     node.classList.remove('show');
     node.textContent = '';
   }
+  renderMeshHealth(null, null);
 }
 
 // ── multi-body STEP selector ───────────────────────────────────────────────

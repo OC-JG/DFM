@@ -22,14 +22,33 @@ function normaliseStatus(status) {
 }
 
 function deductionOf(check) {
-  return check.scoreDeduction !== undefined ? check.scoreDeduction : (check.penalty || 0);
+  return check.scoreDeduction || 0;
 }
+
+/* An advisory carries no verdict about the part, so it gets its own row style
+   rather than borrowing the one that means "passed". */
+function stripClass(check) {
+  if (check.status === 'fail') return 'fail';
+  if (check.status === 'warn') return 'warn';
+  if (check.status === 'info') return 'info';
+  return 'ok';
+}
+
+const SEVERITY_LABEL = {
+  minor: 'minor', major: 'major', critical: 'critical',
+};
 
 /* Compact status strip inside the score block. */
 function scoreStrip(check) {
-  const st = check.status === 'fail' ? 'fail' : check.status === 'warn' ? 'warn' : 'ok';
+  const st = stripClass(check);
   const deduct = deductionOf(check);
-  return el('div', { class: `score-strip ${st}` }, [
+  const sev = SEVERITY_LABEL[check.severity];
+  return el('div', {
+    class: `score-strip ${st}`,
+    title: deduct > 0
+      ? `${sev} finding: ${deduct.toFixed(1)} of this check's ${check.weight} point budget`
+      : (check.status === 'info' ? 'Advisory — carries no score' : 'No deduction'),
+  }, [
     el('span', { class: 's-dot', text: STATUS_DOT[st], 'aria-hidden': 'true' }),
     el('span', { class: 's-name', text: check.name }),
     el('span', { class: 's-pts', text: deduct > 0 ? `−${deduct.toFixed(1)}` : '0' }),
@@ -71,10 +90,121 @@ function blockerText(checks) {
   const fails = checks.filter((c) => c.status === 'fail').map((c) => c.name);
   const warns = checks.filter((c) => c.status === 'warn').map((c) => c.name);
   const total = checks.reduce((s, c) => s + deductionOf(c), 0);
-  const basis = total > 0 ? ` (−${total.toFixed(1)} pts FMEA)` : '';
+  const basis = total > 0 ? ` (−${total.toFixed(1)} pts)` : '';
   if (fails.length) return `Blocking: ${fails.join(', ')}${basis}`;
   if (warns.length) return `Warnings: ${warns.slice(0, 2).join(', ')}${warns.length > 2 ? ` +${warns.length - 2} more` : ''}${basis}`;
   return total > 0 ? `Minor deductions: ${total.toFixed(1)} pts` : '';
+}
+
+/*
+ * Moulding estimates.
+ *
+ * Deliberately outside the scored checks: shot weight and clamp force are not
+ * pass-or-fail properties of the part, they are what it costs to make it. A
+ * score of 77 does not tell anyone whether to commit to the tool; 189 g on a
+ * 220-tonne machine starts to.
+ */
+export function renderShot(shot) {
+  const section = $('shotSection');
+  if (!shot) { section.style.display = 'none'; return; }
+  section.style.display = '';
+
+  const rows = [];
+  const add = (label, value, hint) => rows.push(el('div', { class: 'shot-row', title: hint || '' }, [
+    el('span', { class: 'shot-label', text: label }),
+    el('span', { class: 'shot-value', text: value }),
+  ]));
+
+  add('Part volume', shot.volumeCm3 != null ? `${shot.volumeCm3.toFixed(2)} cm³` : '—');
+  add('Part mass', shot.massG != null ? `${shot.massG.toFixed(1)} g` : '—',
+    'Enclosed volume × material density.');
+  add('Projected area', shot.projectedAreaCm2 != null ? `${shot.projectedAreaCm2.toFixed(1)} cm²` : '—',
+    'The part\u2019s shadow along the pull axis, measured by ray casting, so holes through the pull axis are excluded.');
+  add('Cavity pressure', shot.cavityPressureMPa
+    ? `${shot.cavityPressureMPa.lo}–${shot.cavityPressureMPa.hi} MPa`
+    : '—', shot.cavityPressureMPa ? `Assumed from ${shot.cavityPressureMPa.basis}.` : '');
+  add('Clamp force', shot.clampTonnes
+    ? `${shot.clampTonnes.lo.toFixed(0)}–${shot.clampTonnes.hi.toFixed(0)} t`
+    : '—', 'Cavity pressure over the projected area.');
+  add('Machine size', shot.machineTonnes ? `${shot.machineTonnes} t` : '—',
+    'Smallest standard clamp size covering the top of the range plus 15%.');
+
+  const nodes = [el('div', { class: 'shot-grid' }, rows)];
+  for (const note of shot.notes) {
+    nodes.push(el('div', { class: 'shot-note', text: note }));
+  }
+  replaceChildren($('shotBody'), nodes);
+}
+
+/*
+ * Revision comparison.
+ *
+ * The score answers whether the part is manufacturable; this answers whether it
+ * got better, which is the question on every pass after the first. Changes that
+ * crossed a severity band come first, because those are the ones that moved the
+ * number — but a measurement improving inside its band is shown too, since that
+ * is what progress looks like before it shows up in the score.
+ */
+const CHANGE_LABEL = {
+  worsened: 'worse', improved: 'better', added: 'new check',
+  removed: 'not run', unchanged: 'unchanged',
+};
+
+export function renderComparison(diff) {
+  const section = $('compareSection');
+  if (!diff) { section.style.display = 'none'; return; }
+  section.style.display = '';
+
+  const nodes = [];
+
+  const delta = diff.score.delta;
+  const arrow = delta === null ? '' : delta > 0 ? '▲' : delta < 0 ? '▼' : '=';
+  const tone = delta === null ? 'flat' : delta > 0 ? 'better' : delta < 0 ? 'worse' : 'flat';
+  nodes.push(el('div', { class: `cmp-head ${tone}` }, [
+    el('span', { class: 'cmp-arrow', 'aria-hidden': 'true', text: arrow }),
+    el('span', {
+      class: 'cmp-score',
+      text: delta === null ? '—' : `${diff.score.before} → ${diff.score.after}`,
+    }),
+    el('span', { class: 'cmp-headline', text: diff.headline }),
+  ]));
+
+  nodes.push(el('div', { class: 'cmp-runs', text: `was: ${diff.labels.before}   ·   now: ${diff.labels.after}` }));
+
+  for (const caveat of diff.caveats) {
+    nodes.push(el('div', { class: 'cmp-caveat', text: caveat }));
+  }
+
+  const moved = diff.checks.filter((c) => c.change !== 'unchanged');
+  if (moved.length) {
+    nodes.push(el('div', { class: 'cmp-list' }, moved.map((c) => el('div', { class: `cmp-row ${c.change}` }, [
+      el('span', { class: 'cmp-row-name', text: c.name }),
+      el('span', { class: 'cmp-row-change', text: CHANGE_LABEL[c.change] || c.change }),
+      el('span', {
+        class: 'cmp-row-detail',
+        text: (c.severityBefore && c.severityAfter)
+          ? `${c.severityBefore} → ${c.severityAfter}`
+          : (c.severityAfter || c.severityBefore || ''),
+      }),
+    ]))));
+  }
+
+  const movedMetrics = diff.measurements.filter((m) => m.direction !== 'flat' && m.delta !== null);
+  if (movedMetrics.length) {
+    nodes.push(el('div', { class: 'cmp-list' }, movedMetrics.map((m) => el('div', { class: `cmp-row ${m.direction}` }, [
+      el('span', { class: 'cmp-row-name', text: m.label }),
+      el('span', {
+        class: 'cmp-row-change',
+        text: `${m.before.toFixed(m.dp)} → ${m.after.toFixed(m.dp)} ${m.unit}`,
+      }),
+      el('span', {
+        class: 'cmp-row-detail',
+        text: `${m.delta > 0 ? '+' : ''}${m.delta.toFixed(m.dp)}`,
+      }),
+    ]))));
+  }
+
+  replaceChildren($('compareBody'), nodes);
 }
 
 export function renderResults(result, analysis) {
@@ -84,8 +214,10 @@ export function renderResults(result, analysis) {
   if (hint) hint.style.display = 'none';
 
   $('scoreValue').textContent = result.score;
-  $('scoreValue').title =
-    `Score = 100 − ${result.totalDeduction.toFixed(1)} pts. Each check deducts its FMEA weight on a fail, half on a warning.`;
+  $('scoreValue').title = result.budget
+    ? `${result.totalDeduction.toFixed(1)} points deducted from a ${result.budget}-point budget across the checks that ran. `
+      + 'Each check spends a share of its own weight — a quarter for a minor finding, half for a major, all of it for a critical.'
+    : 'No checks were enabled.';
 
   replaceChildren($('scoreGrade'), [
     el('span', { class: 'dot', style: `background:${result.grade.color}` }),
@@ -188,6 +320,8 @@ function renderToolingActions(analysis) {
 export function clearResults() {
   $('resultsEmpty').style.display = '';
   $('resultsContent').style.display = 'none';
+  renderShot(null);
+  renderComparison(null);
   hideTwoShotResults();
   replaceChildren($('checksList'), []);
   replaceChildren($('scoreBars'), []);

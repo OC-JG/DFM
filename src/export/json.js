@@ -6,7 +6,7 @@ import { formatPullAxis } from '../analysis/stats.js';
  * Includes the two-shot block, which the original omitted: running an
  * overmould analysis and then exporting produced a file with no trace of it.
  */
-export function buildExportJSON({ sessionId, dfm, analysis, twoShot, interface: iface, settings }) {
+export function buildExportJSON({ sessionId, dfm, analysis, twoShot, interface: iface, validation, shot, settings }) {
   const out = {
     tool: 'OnlyCat DFM',
     session: sessionId,
@@ -14,6 +14,14 @@ export function buildExportJSON({ sessionId, dfm, analysis, twoShot, interface: 
     mode: settings.analysisMode,
     score: dfm.result.score,
     grade: dfm.result.grade.label,
+    /* How the score was arrived at. deduction/budget is the whole calculation:
+       each check spends a fraction of its weight according to how bad the
+       finding was, and the score is what is left of the budget that ran. */
+    scoring: {
+      deduction: Math.round(dfm.result.totalDeduction * 10) / 10,
+      budget: dfm.result.budget,
+      critical_findings: dfm.result.criticalCount,
+    },
     material: dfm.result.material.name,
     input: dfm.input,
     checks: dfm.result.checks.map((c) => ({
@@ -21,17 +29,42 @@ export function buildExportJSON({ sessionId, dfm, analysis, twoShot, interface: 
       name: c.name,
       status: c.status,
       detail: c.detail,
+      severity: c.severity,
+      weight: c.weight,
       score_deduction: c.scoreDeduction,
-      penalty: c.penalty,
       metrics: c.metrics,
     })),
     mesh_summary: analysis ? meshSummary(analysis) : null,
+    /* What the geometry was before any of the above was measured on it. A
+       consumer of this record should read the confidence first: a score
+       derived from an inch-scaled or open mesh is arithmetic, not a
+       manufacturability judgement. */
+    mesh_health: validation ? meshHealth(validation) : null,
+    /* What it takes to mould the part, as distinct from whether it can be:
+       arithmetic on measured geometry and tabulated material data, with the
+       one process assumption stated. */
+    moulding: shot ? {
+      part_volume_cm3: shot.volumeCm3,
+      part_mass_g: shot.massG,
+      runner_allowance_pct: shot.runnerPct,
+      shot_mass_g: shot.shotMassG,
+      projected_area_cm2: shot.projectedAreaCm2,
+      cavity_pressure_mpa: shot.cavityPressureMPa,
+      clamp_force_tonnes: shot.clampTonnes,
+      machine_clamp_tonnes: shot.machineTonnes,
+      assumptions: shot.notes,
+    } : null,
   };
 
   if (twoShot) {
     out.two_shot = {
       score: twoShot.score,
       grade: twoShot.grade.label,
+      scoring: {
+        deduction: Math.round(twoShot.totalDeduction * 10) / 10,
+        budget: twoShot.budget,
+        critical_findings: twoShot.criticalCount,
+      },
       shot1_material: twoShot.mat1.name,
       shot2_material: twoShot.mat2.name,
       window_type: settings.windowType,
@@ -45,12 +78,36 @@ export function buildExportJSON({ sessionId, dfm, analysis, twoShot, interface: 
       } : null,
       checks: twoShot.checks.map((c) => ({
         key: c.key, name: c.name, status: c.status, detail: c.detail,
-        penalty: c.penalty, metrics: c.metrics,
+        severity: c.severity, weight: c.weight, score_deduction: c.scoreDeduction,
+        metrics: c.metrics,
       })),
     };
   }
 
   return out;
+}
+
+function meshHealth(v) {
+  return {
+    confidence: v.confidence,
+    analysable: v.analysable,
+    bbox_mm: v.bbox.size,
+    largest_dimension_mm: v.maxDim,
+    closed: v.closed,
+    winding_consistent: v.windingConsistent,
+    normals_inverted: v.inverted,
+    enclosed_volume_mm3: v.volume,
+    edges: {
+      total: v.edges.total,
+      boundary: v.edges.boundary,
+      non_manifold: v.edges.nonManifold,
+      inconsistent_winding: v.edges.inconsistent,
+    },
+    degenerate_triangles: v.degenerate,
+    scale_suspicion: v.scale.suspect,
+    weld: v.weld,
+    issues: v.issues.map((i) => ({ level: i.level, code: i.code, title: i.title, detail: i.detail })),
+  };
 }
 
 function meshSummary(a) {
@@ -59,6 +116,7 @@ function meshSummary(a) {
     bbox_mm: a.bbox.size,
     surface_area_mm2: a.area,
     volume_mm3: a.volume,
+    projected_area_mm2: a.projectedArea,
     pull_direction: a.pullDir,
     pull_axis_label: formatPullAxis(a.pullAxis, a.pullDir),
     mould_type: a.moldType,
@@ -70,6 +128,14 @@ function meshSummary(a) {
     wall_iqr_ratio: a.wallStats.p75 / Math.max(0.01, a.wallStats.p25),
     wall_cv_raw: a.wallStats.cv,
     wall_cv_robust: a.wallStats.cvRobust,
+    wall_samples: a.wallStats.n,
+    wall_median_ci95_mm: (a.wallStats.medLo != null) ? [a.wallStats.medLo, a.wallStats.medHi] : null,
+    /* Second, independent thickness estimate: the largest sphere that fits
+       inside the solid at each sampled point. Equal to the ray figure on
+       parallel walls, lower wherever they are not. */
+    wall_sphere_median_mm: a.sphereStats ? a.sphereStats.median : null,
+    wall_sphere_over_ray: a.wallMethod ? a.wallMethod.ratio : null,
+    weld: a.weld || null,
     thickness_sample_coverage: a.thicknessCoverage,
     sink_moderate_area_pct: a.sinkPctModerate,
     sink_severe_area_pct: a.sinkPctSevere,
@@ -82,6 +148,25 @@ function meshSummary(a) {
       lt_limit: a.flowAnalysis.ltMax,
       area_over_limit_pct: a.flowAnalysis.pctOverLT,
       weld_line_candidates: a.flowAnalysis.weldCandidates,
+    } : null,
+    /* Where the gate should go, when none was picked. The flow figures above
+       are hostage to gate position, so a record without this is missing the
+       most consequential input to them. */
+    gate_search: a.gateSuggestion ? {
+      positions_tried: a.gateSuggestion.considered,
+      eligible_faces: a.gateSuggestion.eligible,
+      best: {
+        point: a.gateSuggestion.best.point,
+        max_lt: a.gateSuggestion.best.maxLT,
+        max_flow_mm: a.gateSuggestion.best.maxFlow,
+        area_over_limit_pct: a.gateSuggestion.best.pctOverLT,
+      },
+      candidates: a.gateSuggestion.candidates.map((c) => ({
+        point: c.point,
+        max_lt: c.maxLT,
+        max_flow_mm: c.maxFlow,
+        area_over_limit_pct: c.pctOverLT,
+      })),
     } : null,
     wall_transitions: (a.wallTransitions || []).slice(0, 50),
     undercut_regions: (a.undercutRegions || []).filter((r) => r.area > 1).map((r) => ({

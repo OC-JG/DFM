@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # The unit tests need neither a browser nor a network, so they run first
+      # and fail fast — a broken thickness calculation should not wait on a
+      # Chromium download to report itself.
+      - name: Unit tests
+        run: npm run test:unit
+
+      # dfm-tool.html is the deliverable and is committed to the repository. A
+      # source-only commit would otherwise ship a stale one, silently.
+      - name: Built artifact matches src/
+        run: npm run verify:build
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Browser smoke test
+        run: npm run test:smoke
+
+      # The tool is meant to be a file you double-click, including on a machine
+      # with no internet. This builds the vendored output and drives it with
+      # every off-origin request refused, then restores the normal build.
+      - name: Offline build works with no network
+        run: npm run test:offline
+
+      - name: Upload the built tool
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dfm-tool
+          path: dfm-tool.html
+          if-no-files-found: error
