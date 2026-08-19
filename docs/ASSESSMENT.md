@@ -794,6 +794,105 @@ or running a different set of checks all make the score movement something other
 than a change in the part, and each raises a caveat above the diff. Comparing a
 run against itself says so rather than reporting a triumphant zero.
 
+### Three of the open questions, answered
+
+**F6 partly closed — internal features are lifters now, not slides.**
+
+Slide-or-lifter was decided by whether a ray along the face's own normal escaped
+the part, which gets internal features exactly backwards. The underside of a snap
+ledge inside a housing points down into the open cavity, so that ray leaves
+through the mouth and the feature was reported as needing a **slide** — which
+cannot reach it. It is walled in on every side.
+
+It is decided now by whether a side-action core could physically get there: rays
+cast in the parting plane, where a slide travels. On a revolved cup with an
+internal annular ledge:
+
+```
+before:  1,200 mm² across two SLIDE regions
+after:     214 mm² LIFTER (the ledge, = π(18²−16²))
+         1,018 mm² LIFTER (the cavity ceiling, = π·18²)
+```
+
+That also closes the other half of F6: because every candidate face in a
+two-piece mould points against the pull, the branch that could yield a lifter was
+unreachable, so the tool could not report one **at all** — while the rule engine
+had a critical-severity branch for lifters and the tooling panel rendered cards
+that could never appear. External features are untouched: the overhang fixture is
+still one slide of 420 mm².
+
+Two things this does *not* fix, and they are the same thing:
+
+- Candidacy still assumes a **flat parting line at the pull minimum**. Under that
+  assumption the cavity ceiling of any hollow part is an undercut, which is why
+  the plain cup above reports a lifter for its ceiling. In a real two-piece tool
+  the core forms that ceiling and withdraws away from it, needing nothing. So
+  there is a false-positive class here affecting most hollow parts. It was there
+  before — reported as a *slide* — and is now at least labelled with the right
+  kind of tooling, but the fix is a parting-line model, not a patch.
+- Conversely the internal ledge is only caught because its *underside* faces
+  against the pull. The face that actually blocks the core is the inner wall
+  *above* the ledge, which is perpendicular to the pull and never a candidate. So
+  a ledge whose underside is drafted away would be missed.
+
+Both need someone to decide what parting-line model the tool should assume. That
+is the remaining question, and it is a mould-design question.
+
+**Wall thickness is judged on the inscribed sphere.**
+
+The ray cast measures straight through to the far surface: exact when that
+surface is parallel, and an overstatement when it is not. Overstating is the
+optimistic direction — it is what lets a section that will sink or short-shot
+read as comfortably inside the material's band. The sphere is what a moulder
+means by "wall", and it is the conservative of the two. On a 45° wedge the
+reported nominal moves from 30.00 mm to 20.00 mm.
+
+Applied to the wall verdict, the corner-radius guidelines, the gate-size
+recommendation and the FPC floor — every "how thick is the wall" question. Two
+places deliberately stay on the ray figure, because both sides of those
+comparisons must come from the same measurement: the **sink check**, which holds
+a per-triangle local thickness against the nominal, and the **thin-gate
+advisory**, which holds a single ray reading at the gate against the median.
+Mixing bases there would manufacture findings.
+
+The sphere pass now runs on 2,000 of the 3,000 sampled points rather than 1,000,
+because the check reports a confidence interval and adds a "not pinned down"
+caveat above ±5% — and that caveat should fire when a wall genuinely varies,
+never because the estimate was taken cheaply. On a cylinder whose wall sweeps
+1.0–4.0 mm the median's interval is ±7.6% from 500 samples, ±5.6% from 1,000,
+±4.0% from 2,000 and ±3.2% from 3,000. Two thousand is the first that stays clear
+of the threshold.
+
+**bossOD is read at last, and the bind it sits in is named.**
+
+The convention for a screw boss is an outer diameter about twice the hole, which
+with the boss wall already collected here means `bossWall ≥ bossOD / 4`. But that
+pulls directly against the sink limit in the same check, which caps boss wall at
+0.7× the nominal wall. Both can only hold when
+
+```
+bossOD / 4  ≤  0.7 × wall        i.e.   bossOD ≤ 2.8 × wall
+```
+
+So a Ø6 mm boss on a 2 mm wall satisfies neither guideline and **no boss wall
+value fixes it** — which is precisely the useful thing to say, and the tool now
+says it, along with the standard resolutions: core the base, carry the load on
+gussets or a support rib rather than thickening the boss, or reduce the diameter.
+The metrics carry the derived hole diameter and the permitted boss-wall window,
+or `none` when there isn't one.
+
+The shipped defaults were Ø6 with a 1.0 mm wall on a 2 mm part — a configuration
+that could satisfy neither rule. They are Ø4 now, which sits inside the window,
+so the out-of-box state is not reporting a bind that is an artefact of the
+defaults.
+
+**Found doing it: a check could cost points and still show a pass.** Several
+rules raise severity for a secondary finding — an undersized rib fillet, a boss
+wall outside its window — without touching the status, so the panel showed a
+green tick beside a deduction. The invariant is enforced in `scoreChecks` now
+rather than trusted to every branch, and a test asserts it across every check the
+engine can emit.
+
 ### Phase 4 — the offline build (item 20, in part)
 
 `node build.js --vendor` inlines three.js and jsPDF, producing a file that needs
@@ -821,33 +920,52 @@ them should fetch the real files and check the tool still boots afterwards.
 
 ### Costs
 
-Everything above costs about 30% of a run: 1103 ms to 1438 ms on a 96k-triangle part,
-measured against the original. Welding is ~20% slower on the common path, once,
-at load. The sphere-fit thickness pass, the projected-area raster and the
-randomised heat sampling account for the rest. All of it is inside the worker,
-and none of it touches the page's responsiveness.
+A run on a 96k-triangle part has gone from 1,469 ms to 2,531 ms — about +72%,
+measured against the original on the default path.
+
+Most of that is the inscribed-sphere pass, which is 33 rays per sampled point
+against the ray cast's one, and it is load-bearing now rather than a diagnostic:
+it is what the wall check judges the part on. The rest is the gate search (which
+costs nothing once a gate is set), the projected-area raster, and welding, which
+is ~20% slower on the common path but runs once at load. Rays in the sphere probe
+are distance-capped — a hit only matters if it lowers the bound already held —
+which recovers about 10%.
+
+All of it is inside the worker, so the page stays responsive. If a part ever feels
+slow, `SPHERE_SAMPLE_BUDGET` and `CONE_RINGS_DEG` in `src/analysis/mesh.js` are
+the two levers, and the measurements justifying their current values are in the
+comments beside them.
 
 ### Still open, in priority order
 
-**Three questions for a moulding engineer**, all recorded above: F3 (the 120 °C
-HDT margin, which condemns polypropylene as a substrate), F6 (whether lifters
-should be detectable in a two-piece tool, and the misclassification of internal
-ledges as slides), and whether the wall thresholds should move onto the
-sphere-fit figure rather than the ray one. None is a coding decision.
+**Two questions for a moulding engineer.** F3 — the 120 °C HDT margin, which
+condemns polypropylene as a substrate on the thermal check alone. And the
+parting-line model, which is what remains of F6: the tool assumes a flat parting
+line at the pull minimum, and that assumption is what makes the cavity ceiling of
+every hollow part read as an undercut. Neither is a coding decision.
+
+The other two are answered. Wall thickness is judged on the sphere figure, and
+internal features are classified as lifters.
 
 **The rest of Phase 3**: corner radii from the STEP `faceGroups` the parser
 already extracts and discards — which needs a STEP fixture, and therefore a
 decision about the OpenCascade module, before it can be written with any
 confidence. Cycle time as soon as the `coolK` question is answered.
 
-Also outstanding and small: `bossOD` is still collected, persisted and printed
-in the PDF without any rule reading it. The standard guideline — boss outer
-diameter about twice the hole it carries, which with the existing `bossWall`
-input means `bossWall ≥ bossOD / 4` — would give it a use, and would surface a
-genuine design tension, since a 6 mm boss on a 2 mm wall cannot satisfy both
-that and the 0.7× sink limit already checked. But it is new rule content rather
-than a defect fix, so it is left for someone who owns the calibration to
-approve.
+**A LICENSE.** Not housekeeping: without one, default copyright applies and
+nobody has permission to copy, modify or redistribute the tool. That matters here
+more than in most repositories, because the deliverable is a single file designed
+to be *handed to people* — moulders, suppliers, colleagues — and a file with no
+licence leaves the recipient's right to use it undefined, which a supplier's legal
+team may simply refuse. It also leaves contributions in limbo: with no inbound
+licence, an outside patch has murky ownership.
+
+The vendored build makes this concrete rather than theoretical. `--vendor`
+redistributes three.js and jsPDF inside the artifact, and both are MIT, which
+requires the copyright notice to travel with the distribution. That obligation is
+already met — both minified builds carry their `@license` headers and those
+survive into the output, which is checked — but it is an obligation the project
+now has, and it sits alongside a deliverable whose own terms are unstated.
 
 **A STEP fixture**, which needs a decision about vendoring the OpenCascade WASM
 module. The whole STEP path is currently untested.

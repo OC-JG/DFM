@@ -276,30 +276,13 @@ export function hollowFrustum(baseHalf = 20, height = 30, draftDeg = 3, wall = 2
  * (14 mm of overhang × 30 mm of extrusion) on a +Z pull.
  */
 export function overhangBlock(lower = 30, upper = 44, depth = 30, zStep = 10, zTop = 20) {
-  /* Profile outline, counter-clockwise in XZ. The two collinear vertices at
-     x = 0, z = zStep and x = lower, z = zTop are not corners of the shape —
-     they split outline edges so the cap quads below can share them. */
+  /* Profile outline, counter-clockwise in XZ — corners only, now that the caps
+     are triangulated rather than hand-written. */
   const P = [
     [0, 0], [lower, 0], [lower, zStep], [upper, zStep],
-    [upper, zTop], [lower, zTop], [0, zTop], [0, zStep],
+    [upper, zTop], [0, zTop],
   ];
-  const CAPS = [[0, 1, 2, 7], [7, 2, 5, 6], [2, 3, 4, 5]];
-
-  const at = (i, y) => [P[i][0], y, P[i][1]];
-  const out = [];
-
-  /* Front cap at y = 0, normal −Y; back cap at y = depth, normal +Y. */
-  for (const [a, b, c, d] of CAPS) {
-    quad(out, at(a, 0), at(b, 0), at(c, 0), at(d, 0));
-    quad(out, at(d, depth), at(c, depth), at(b, depth), at(a, depth));
-  }
-
-  /* One wall per outline segment, wound outward. */
-  for (let i = 0; i < P.length; i++) {
-    const j = (i + 1) % P.length;
-    quad(out, at(i, 0), at(i, depth), at(j, depth), at(j, 0));
-  }
-  return toSoup(out);
+  return extrudeProfileXZ(P, depth);
 }
 
 /*
@@ -332,4 +315,165 @@ export function subdivideSoup(soup, times = 1) {
     triCount *= 4;
   }
   return { positions, triCount };
+}
+
+/*
+ * Cup open at the bottom, with an annular snap ledge inside — the case a lifter
+ * exists for, and the case no slide can reach.
+ *
+ * Half-section, revolved about the Z axis:
+ *
+ *     z
+ *  20 |####################|        <- top wall, solid disc
+ *  18 |###|            |###|        <- cavity ceiling
+ *     |###|            |###|
+ *  12 |###|        |###|###|        <- ledge top
+ *   8 |###|        |###|###|        <- ledge underside, faces -Z
+ *     |###|            |###|
+ *   0 |###|            |###|        <- mouth, open
+ *     0  16           18  20  r
+ *
+ * The core fills the cavity and withdraws downward through the mouth. Above the
+ * ledge it is 16 mm in radius; the gap at the ledge is 14 mm. So it cannot come
+ * out — the ledge needs a lifter. And unlike an extruded channel, nothing can
+ * reach the cavity sideways: revolving closes it all the way round, so a
+ * side-action slide has no way in from any direction.
+ *
+ * Revolved rather than extruded for exactly that reason. An extruded C-section
+ * looks like a housing in cross-section but is a through-channel in the third
+ * dimension, and a slide can enter from either open end — which is what the
+ * first attempt at this fixture got wrong, and the tool was right to say so.
+ */
+export function internalLedgeCup(opts = {}) {
+  const {
+    rOuter = 20, wall = 2, height = 20, seg = 96,
+    ledgeZ = 8, ledgeH = 4, ledgeD = 2,
+  } = opts;
+  const rInner = rOuter - wall;
+  const hCeil = height - wall;
+  const rLedge = rInner - ledgeD;
+
+  const profile = [
+    [rInner, 0],                  // inner edge of the mouth
+    [rOuter, 0],                  // outer edge of the mouth
+    [rOuter, height],             // up the outside
+    [0, height],                  // across the top
+    [0, hCeil],                   // down the axis (no surface; skipped)
+    [rInner, hCeil],              // cavity ceiling, outward from the axis
+    [rInner, ledgeZ + ledgeH],    // down the inner wall to the ledge
+    [rLedge, ledgeZ + ledgeH],    // ledge top
+    [rLedge, ledgeZ],             // ledge inner face
+    [rInner, ledgeZ],             // ledge underside
+  ];
+  return revolveProfileRZ(profile, seg);
+}
+
+/*
+ * Revolve a closed (r, z) profile about the Z axis into a watertight solid.
+ *
+ * Watertight by construction: each profile segment becomes a ring of quads whose
+ * edges are shared with the rings either side and with the neighbouring angular
+ * step, so there is nowhere for a T-junction to appear. That is why the awkward
+ * fixtures here are revolved rather than extruded — an extrusion needs its end
+ * caps triangulated over the profile's own vertices, and getting that wrong
+ * fails quietly.
+ *
+ * Segments lying on the axis carry no surface and are skipped; segments touching
+ * it become triangle fans.
+ */
+export function revolveProfileRZ(profile, seg = 96) {
+  const out = [];
+  const n = profile.length;
+  const pt = (r, z, a) => [r * Math.cos(a), r * Math.sin(a), z];
+
+  for (let i = 0; i < seg; i++) {
+    const a0 = (i / seg) * Math.PI * 2;
+    const a1 = ((i + 1) / seg) * Math.PI * 2;
+    for (let j = 0; j < n; j++) {
+      const [r0, z0] = profile[j];
+      const [r1, z1] = profile[(j + 1) % n];
+      if (r0 === 0 && r1 === 0) continue;
+      if (r0 === 0) tri(out, pt(0, z0, a0), pt(r1, z1, a1), pt(r1, z1, a0));
+      else if (r1 === 0) tri(out, pt(r0, z0, a0), pt(r0, z0, a1), pt(0, z1, a0));
+      else quad(out, pt(r0, z0, a0), pt(r0, z0, a1), pt(r1, z1, a1), pt(r1, z1, a0));
+    }
+  }
+  return toSoup(out);
+}
+
+/*
+ * Extrude a closed XZ profile along Y into a watertight solid.
+ *
+ * The caps are triangulated by ear clipping over the profile's own vertices —
+ * no new points. That is the whole trick: a cap that introduces a midpoint the
+ * neighbouring side wall does not have leaves a T-junction, and the mesh stops
+ * being closed. Ear clipping also means any simple polygon works, which
+ * hand-written cap lists emphatically do not: the first attempt at the housing
+ * below both left two outline edges uncovered and produced a zero-area triangle
+ * from three collinear points, and neither was obvious by inspection.
+ */
+export function extrudeProfileXZ(profile, depth) {
+  const tris = earClipXZ(profile);
+  const at = (i, y) => [profile[i][0], y, profile[i][1]];
+  const out = [];
+  for (const [a, b, c] of tris) {
+    tri(out, at(a, 0), at(b, 0), at(c, 0));            // front cap, normal −Y
+    tri(out, at(c, depth), at(b, depth), at(a, depth)); // back cap, normal +Y
+  }
+  for (let i = 0; i < profile.length; i++) {
+    const j = (i + 1) % profile.length;
+    quad(out, at(i, 0), at(i, depth), at(j, depth), at(j, 0));
+  }
+  return toSoup(out);
+}
+
+/*
+ * Ear clipping over a counter-clockwise simple polygon in the XZ plane.
+ *
+ * Returns triangles as index triples. Every polygon edge ends up in exactly one
+ * triangle and every diagonal in exactly two, which is what makes the extruded
+ * solid watertight.
+ */
+export function earClipXZ(profile) {
+  const cross = (o, a, b) =>
+    (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+
+  const inside = (p, a, b, c) => {
+    const d1 = cross(a, b, p), d2 = cross(b, c, p), d3 = cross(c, a, p);
+    return (d1 >= 0 && d2 >= 0 && d3 >= 0) || (d1 <= 0 && d2 <= 0 && d3 <= 0);
+  };
+
+  const live = profile.map((_, i) => i);
+  const tris = [];
+  let guard = profile.length * profile.length + 8;
+
+  while (live.length > 3 && guard-- > 0) {
+    let clipped = false;
+    for (let k = 0; k < live.length; k++) {
+      const ia = live[(k - 1 + live.length) % live.length];
+      const ib = live[k];
+      const ic = live[(k + 1) % live.length];
+      const a = profile[ia], b = profile[ib], c = profile[ic];
+
+      /* Convex corner of a counter-clockwise polygon, with real area. */
+      const turn = cross(a, b, c);
+      if (turn <= 1e-9) continue;
+
+      /* No other live vertex may fall inside the ear. */
+      let blocked = false;
+      for (const io of live) {
+        if (io === ia || io === ib || io === ic) continue;
+        if (inside(profile[io], a, b, c)) { blocked = true; break; }
+      }
+      if (blocked) continue;
+
+      tris.push([ia, ib, ic]);
+      live.splice(k, 1);
+      clipped = true;
+      break;
+    }
+    if (!clipped) break; // not a simple CCW polygon; caller will see an open mesh
+  }
+  if (live.length === 3) tris.push([live[0], live[1], live[2]]);
+  return tris;
 }

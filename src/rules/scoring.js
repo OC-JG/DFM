@@ -167,6 +167,13 @@ export function scoreChecks(checks, gradeTable, profiles = CHECK_RISK_PROFILES) 
     const profile = profiles[c.key];
     const deduct = computeCheckScore(c.key, c, profiles);
     if (profile) budget += profile.weight;
+
+    /* A check that costs points cannot present itself as a pass. Several rules
+       raise severity for a secondary finding — an undersized rib fillet, a
+       boss wall outside its window — without touching the status, which left
+       the panel showing a green "ok" next to a deduction. Enforced here once
+       rather than trusted to every branch. */
+    if (c.status === 'ok' && deduct > 0) c.status = 'warn';
     /* Kept on the check so the panel and the exports can show where each
        point went, rather than only the total. */
     c.scoreDeduction = Math.round(deduct * 10) / 10;

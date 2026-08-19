@@ -250,21 +250,23 @@ qualifies.
 
 ## Wall thickness, measured twice
 
-The wall is measured by casting a ray into the solid along the inward face
-normal. That is exact when the opposite face is parallel and overstates the wall
-when it is not — a wedge, a tapered boss, a rib meeting a wall at an angle — and
-overstating is the optimistic direction, which is the dangerous one for a sink
-or short-shot call.
+The wall is measured two ways. A ray cast into the solid along the inward face
+normal is exact when the opposite face is parallel and overstates the wall when
+it is not — a wedge, a tapered boss, a rib meeting a wall at an angle. The other
+is the diameter of the largest sphere that fits inside the solid touching that
+point, which is what a moulder means by "wall".
 
-So a second estimate runs alongside it: the diameter of the largest sphere that
-fits inside the solid and touches the surface at that point, which is what a
-moulder means by "wall". Both medians are reported. They agree exactly on
-parallel walls; where they diverge by more than 15% the wall check says so,
-because that divergence is itself the finding.
+**The checks are judged on the sphere figure**, because overstating a wall is the
+optimistic direction, and optimism is what lets a section that will sink or
+short-shot read as comfortably in band. On a 45° wedge the reported nominal is
+20 mm rather than the ray's 30 mm. Both are printed, and where they diverge by
+more than 15% the check says so — that divergence is itself a finding about the
+geometry.
 
-The ray figure still drives the rules. Switching the thresholds onto the sphere
-figure would change the meaning of every historical score and is a decision for
-whoever owns the calibration.
+Two comparisons deliberately stay on the ray figure at both ends, because mixing
+measurements there would invent findings: the sink check, which holds a
+per-triangle local thickness against the nominal, and the thin-gate advisory,
+which holds a single reading at the gate against the median.
 
 ## Where to put the gate
 
@@ -326,6 +328,13 @@ the part, and each raises a caveat above the diff.
   from a plain `<script>` tag. Moving to a modern release means either an
   import map or a real bundler for the vendor code, which would cost the
   single-file property. Not worth it for what the viewer does here.
+- **Undercut candidacy assumes a flat parting line** at the pull minimum. Which
+  faces are undercuts is judged against a single tool pulling one way, so the
+  cavity ceiling of a hollow part reads as an undercut even though a real
+  two-piece tool's core forms it and withdraws away from it. Whether a face needs
+  a slide or a lifter *is* decided properly — by whether a side-action core could
+  physically reach it — but the question of which faces are undercuts at all
+  needs a parting-line model.
 - **Corner radii cannot be detected**, only advised on. That needs B-rep face
   topology; STL does not carry it, and the STEP path does not yet plumb
   through the face groups the parser already extracts. Those groups are

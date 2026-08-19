@@ -29,6 +29,7 @@ import { estimateShot, nextMachineSize, CAVITY_PRESSURE_MPA } from '../src/analy
 import { searchGateCandidates, computeFlowLengths, buildAdjacency, geodesicFrom } from '../src/analysis/flow.js';
 import { effectiveMinDraft } from '../src/core/finishes.js';
 import { MATERIALS } from '../src/core/materials.js';
+import { DEFAULT_SETTINGS } from '../src/app/state.js';
 
 // ── harness ────────────────────────────────────────────────────────────────
 
@@ -424,7 +425,7 @@ describe('validation — units');
    band, no undercuts, a material that does not warp, a finish it can hold. */
 const CLEAN_INPUT = {
   wallThk: 2.0, wallMin: 1.6, wallMax: 2.4, draftAngle: 3.0,
-  ribThk: 0.9, ribH: 2.0, ribRadius: 0.5, bossOD: 6.0, bossWall: 1.0,
+  ribThk: 0.9, ribH: 2.0, ribRadius: 0.5, bossOD: 4.0, bossWall: 1.0,
   hasUndercut: '0', material: 'abs', surfaceFinish: 'spi-a2', moldType: 'two-piece',
   fpc: { enabled: false, thickness: 0.2, cover: 0.5, anchors: 'holes' },
   runChecks: {
@@ -1167,6 +1168,262 @@ describe('revision comparison');
   it('refuses to invent a comparison from nothing', () => {
     eq(compareRuns(null, drafted), null);
     eq(compareRuns(drafted, null), null);
+  });
+}
+
+
+describe('undercuts — slide or lifter');
+{
+  const P = Math.PI;
+  /* internalLedgeCup: rOuter 20, wall 2 so rInner 18, ledge 2 mm deep so
+     rLedge 16, cavity ceiling at z 18. */
+  const LEDGE_AREA = P * (18 * 18 - 16 * 16);   // 214 mm²
+  const CEILING_AREA = P * 18 * 18;             // 1018 mm²
+
+  const cup = weld(S.internalLedgeCup());
+  const cupMesh = analyse(cup, { suggestGate: false });
+
+  it('an enclosed internal feature needs a lifter, not a slide', () => {
+    /* The regression. The ledge underside points down into the open cavity, so
+       a ray along its own normal escapes through the mouth and it was reported
+       as needing a slide — which cannot reach it: revolving the cup walls it in
+       from every direction. */
+    eq(cupMesh.slideArea, 0, 'slide area on a part nothing can reach sideways:');
+    assert(cupMesh.lifterArea > 0, 'no lifter area reported');
+    const regions = cupMesh.undercutRegions.filter((r) => r.area > 1);
+    eq(regions.length, 2, `regions found: ${regions.map((r) => r.area.toFixed(0)).join(', ')}`);
+    for (const r of regions) eq(r.type, 2, `region at z=${r.centroid[2].toFixed(1)} should be a lifter:`);
+  });
+
+  it('measures the enclosed features it finds', () => {
+    const areas = cupMesh.undercutRegions.filter((r) => r.area > 1).map((r) => r.area).sort((a, b) => a - b);
+    within(areas[0], LEDGE_AREA, 2, 'ledge underside area:');
+    within(areas[1], CEILING_AREA, 2, 'cavity ceiling area:');
+  });
+
+  it('lifters are reportable in a two-piece mould at all', () => {
+    /* They were not. Every candidate face in a two-piece tool points against
+       the pull, and the branch that could yield a lifter required a face that
+       did not — so the type was unreachable, while the rule engine had a whole
+       critical-severity branch for it and the tooling panel rendered cards that
+       could never appear. */
+    const twoPiece = analyse(cup, { moldType: 'two-piece', suggestGate: false });
+    assert(twoPiece.lifterArea > 0, 'still no lifter in two-piece mode');
+  });
+
+  it('describes a lifter that could be built', () => {
+    const lifter = cupMesh.undercutRegions.find((r) => r.type === 2 && r.area > 1);
+    assert(lifter.lifterAngleDeg > 0 && lifter.lifterAngleDeg <= 15,
+      `lifter angle ${lifter.lifterAngleDeg.toFixed(1)}° is outside the slim-lifter limit`);
+    assert(lifter.pullTravel > 0, 'lifter has no travel');
+    close(Math.hypot(...lifter.action), 1, 1e-6, 'action must be a unit vector:');
+  });
+
+  it('an external feature is still a slide', () => {
+    /* The counterweight: reclassifying enclosed features must not reclassify
+       reachable ones. A barb on an outer wall has clear paths in. */
+    const m = analyse(weld(S.overhangBlock()), { suggestGate: false });
+    eq(m.lifterArea, 0, 'lifter area on a purely external undercut:');
+    within(m.slideArea, 14 * 30, 1, 'slide area:');
+    eq(m.undercutRegions.filter((r) => r.area > 1)[0].type, 1);
+  });
+
+  it('the rule engine treats a lifter as the more serious finding', () => {
+    const lifterInput = { ...CLEAN_INPUT, mesh: cupMesh };
+    const slideInput = { ...CLEAN_INPUT, mesh: analyse(weld(S.overhangBlock()), { suggestGate: false }) };
+    const lifterCheck = runDFM(lifterInput).checks.find((c) => c.key === 'undercut');
+    const slideCheck = runDFM(slideInput).checks.find((c) => c.key === 'undercut');
+    eq(lifterCheck.severity, 'critical', 'lifter severity:');
+    assert(slideCheck.severity !== 'critical', `slide severity should be lighter, got ${slideCheck.severity}`);
+    assert(/lifter/i.test(lifterCheck.detail), `detail does not mention a lifter: ${lifterCheck.detail.slice(0, 120)}`);
+  });
+}
+
+
+describe('wall thickness — which measure the verdict rests on');
+{
+  const wallCheck = (mesh, extra = {}) =>
+    runDFM({ ...CLEAN_INPUT, ...extra, mesh }).checks.find((c) => c.key === 'wall');
+  const metric = (check, label) => {
+    const row = check.metrics.find(([k]) => k === label);
+    return row ? row[1] : null;
+  };
+
+  it('judges the part on the inscribed sphere, not the ray cast', () => {
+    /* The ray reads the distance straight through to the far surface, which
+       overstates any wall whose opposite face is not parallel — the optimistic
+       direction, and the one that lets a section which will sink read as
+       comfortably in band. On this wedge the two differ by a third. */
+    const mesh = analyse(weld(S.wedgeSlab(60, 30, 6, 45)), { suggestGate: false });
+    assert(mesh.wallMethod.sphereMedian < mesh.wallMethod.rayMedian * 0.8,
+      'fixture should make the two measures disagree substantially');
+    const check = wallCheck(mesh);
+    eq(metric(check, 'Measured as'), 'inscribed sphere');
+    within(parseFloat(metric(check, 'Nominal (median)')), mesh.wallMethod.sphereMedian, 1,
+      'the nominal it judged on:');
+  });
+
+  it('reports both measures so the gap is visible', () => {
+    const mesh = analyse(weld(S.wedgeSlab(60, 30, 6, 45)), { suggestGate: false });
+    const check = wallCheck(mesh);
+    assert(metric(check, 'Sphere / ray'), 'no side-by-side metric');
+    assert(/disagree by \d+%/.test(check.detail),
+      `detail should call out the disagreement: ${check.detail.slice(0, 200)}`);
+  });
+
+  it('says nothing about a disagreement when there is none', () => {
+    const mesh = analyse(weld(S.tube(20, 2, 40, 128)), { suggestGate: false });
+    close(mesh.wallMethod.ratio, 1, 0.005, 'parallel walls should agree exactly:');
+    assert(!/disagree by/.test(wallCheck(mesh).detail), 'spurious disagreement note');
+  });
+
+  it('falls back to the ray figure when the sphere pass did not run', () => {
+    const mesh = analyse(weld(S.tube(20, 2, 40, 128)), { suggestGate: false });
+    const stripped = { ...mesh, sphereStats: null };
+    eq(metric(wallCheck(stripped), 'Measured as'), 'ray cast');
+    within(parseFloat(metric(wallCheck(stripped), 'Nominal (median)')), mesh.wallStats.median, 1,
+      'fallback nominal:');
+  });
+
+  it('still measures a uniform wall correctly either way', () => {
+    /* Switching basis must not move the answer on a part where the two agree,
+       which is most parts. */
+    for (const [name, soup, truth] of [
+      ['hollow box 2 mm', S.hollowBox([40, 30, 20], 2), 2],
+      ['tube 1.5 mm', S.tube(20, 1.5, 40, 128), 1.5],
+    ]) {
+      const mesh = analyse(weld(soup), { suggestGate: false });
+      within(parseFloat(metric(wallCheck(mesh), 'Nominal (median)')), truth, 1, `${name}:`);
+    }
+  });
+
+  it('leaves the sink check measuring ray against ray', () => {
+    /* Sink asks how much mass sits behind a surface relative to nominal. Holding
+       a ray-derived local thickness against a sphere-derived nominal would make
+       every part look like it was about to sink. */
+    const mesh = analyse(weld(S.wedgeSlab(60, 30, 6, 45)), { suggestGate: false });
+    within(mesh.nominalWall, mesh.wallStats.median, 1,
+      'the nominal the sink check uses must stay on the ray figure:');
+  });
+}
+
+
+describe('bosses — the outer diameter, and what it fights with');
+{
+  const BOSS = {
+    ...CLEAN_INPUT,
+    wallThk: 2.0, ribThk: 0.9, ribH: 2.0, ribRadius: 0.5, mesh: null,
+  };
+  const ribs = (over) => runDFM({ ...BOSS, ...over }).checks.find((c) => c.key === 'ribs');
+  const window = (check) => check.metrics.find(([k]) => k === 'Boss wall window')[1];
+
+  it('bossOD is finally read by something', () => {
+    /* It had been collected, persisted and printed on the report since the
+       rebuild without any rule looking at it. */
+    const narrow = ribs({ bossOD: 4.0, bossWall: 1.0 });
+    const wide = ribs({ bossOD: 6.0, bossWall: 1.0 });
+    assert(window(narrow) !== window(wide), 'changing bossOD changed nothing');
+  });
+
+  it('accepts a boss wall inside both guidelines', () => {
+    /* Ø4 with a 1 mm wall on a 2 mm part: screw retention wants ≥1.00 mm, the
+       sink limit caps at 1.40 mm, so 1.00 sits in the window. */
+    const check = ribs({ bossOD: 4.0, bossWall: 1.0 });
+    eq(window(check), '1.00–1.40 mm');
+    assert(!/cannot satisfy both/.test(check.detail), 'spurious conflict reported');
+    assert(!/split around/.test(check.detail), 'spurious retention warning');
+  });
+
+  it('flags a boss wall too thin for its own hole', () => {
+    const check = ribs({ bossOD: 4.0, bossWall: 0.8 });
+    assert(/under the 1.00 mm/.test(check.detail), check.detail.slice(0, 200));
+    /* And says there is room to fix it, which there is. */
+    assert(/sink limit here is 1.40/.test(check.detail), 'no headroom stated');
+    eq(check.severity, 'major');
+  });
+
+  it('names the bind when the two guidelines cannot both be met', () => {
+    /* bossOD > 2.8 × wall makes the window empty: retention wants more boss
+       wall than the sink limit allows, and no boss wall value satisfies both. */
+    const check = ribs({ bossOD: 6.0, bossWall: 1.0 });
+    assert(/cannot satisfy both/.test(check.detail), check.detail.slice(0, 220));
+    eq(window(check), 'none — screw wants ≥1.50, sink caps at 1.40 mm');
+    /* The resolutions are geometric, not a different boss wall. */
+    assert(/gusset|support rib|core the boss/i.test(check.detail), 'no resolution offered');
+  });
+
+  it('reports the bind whatever the boss wall is set to', () => {
+    /* The conflict is a property of the boss diameter against the part wall.
+       Thickening the boss cannot resolve it, so the finding must not disappear
+       when someone tries. */
+    for (const bossWall of [0.8, 1.0, 1.4, 1.5, 2.0]) {
+      assert(/cannot satisfy both/.test(ribs({ bossOD: 6.0, bossWall }).detail),
+        `conflict vanished at bossWall ${bossWall}`);
+    }
+  });
+
+  it('the bind goes away on a thicker wall', () => {
+    /* Ø6 needs 1.50 mm; a 3 mm part wall caps at 2.10 mm, so there is a window. */
+    const check = ribs({ bossOD: 6.0, bossWall: 1.5, wallThk: 3.0, ribThk: 1.35, ribH: 3.0 });
+    eq(window(check), '1.50–2.10 mm');
+    assert(!/cannot satisfy both/.test(check.detail), check.detail.slice(0, 200));
+  });
+
+  it('does not apply the screw guideline to a solid post', () => {
+    const check = ribs({ bossOD: 2.0, bossWall: 1.0 });
+    assert(/solid post/.test(check.detail), check.detail.slice(0, 160));
+    eq(window(check), '—');
+  });
+
+  it('the shipped defaults satisfy their own guidelines', () => {
+    /* The out-of-box configuration should not be reporting a design bind. */
+    const d = DEFAULT_SETTINGS;
+    const screwMin = d.bossOD / 4;
+    const sinkMax = 0.7 * d.wallThk;
+    assert(screwMin <= sinkMax, `defaults leave no boss window: need ≥${screwMin}, capped at ${sinkMax}`);
+    assert(d.bossWall >= screwMin && d.bossWall <= sinkMax,
+      `default bossWall ${d.bossWall} is outside ${screwMin}–${sinkMax}`);
+  });
+}
+
+describe('a check that costs points cannot look like a pass');
+{
+  it('status is raised to warn wherever a deduction exists', () => {
+    /* Several rules escalate severity for a secondary finding without touching
+       the status, which showed a green tick beside a deduction. */
+    const list = [{ key: 'ribs', status: 'ok', severity: 'minor' }];
+    scoreChecks(list, PART_GRADES);
+    eq(list[0].status, 'warn');
+    assert(list[0].scoreDeduction > 0, 'no deduction to justify the warn');
+  });
+
+  it('leaves a genuine pass alone', () => {
+    const list = [{ key: 'ribs', status: 'ok', severity: 'none' }];
+    scoreChecks(list, PART_GRADES);
+    eq(list[0].status, 'ok');
+    eq(list[0].scoreDeduction, 0);
+  });
+
+  it('leaves an advisory as an advisory', () => {
+    const list = [{ key: 'corners', status: 'info', severity: 'none' }];
+    scoreChecks(list, PART_GRADES);
+    eq(list[0].status, 'info');
+  });
+
+  it('holds across every check the engine can emit', () => {
+    const meshes = [
+      analyse(weld(S.hollowFrustum(20, 30, 3, 2)), { suggestGate: false }),
+      analyse(weld(S.hollowBox([40, 30, 20], 2)), { suggestGate: false }),
+      analyse(weld(S.internalLedgeCup()), { suggestGate: false }),
+    ];
+    for (const mesh of meshes) {
+      for (const c of runDFM({ ...CLEAN_INPUT, mesh }).checks) {
+        if (c.scoreDeduction > 0) {
+          assert(c.status === 'warn' || c.status === 'fail',
+            `${c.key} deducts ${c.scoreDeduction} but reports status "${c.status}"`);
+        }
+      }
+    }
   });
 }
 

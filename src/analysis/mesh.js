@@ -372,11 +372,12 @@ function sampleWallThickness(geom, bvh, triAreas, triCentroid, triFNorm, diag, t
   const eps = diag * 1e-5;
   const random = makeRandom(seed != null ? seed : DEFAULT_SAMPLE_SEED);
 
-  /* The sphere estimate costs 33 rays where the ray estimate costs one, and
-     it only has to support a distribution-level comparison rather than the
-     percentiles the rules are judged on. Taking it on a strided subset keeps
-     the whole pass inside about a tenth of the run instead of a third. */
-  const sphereStride = Math.max(1, Math.ceil(samples / SPHERE_SAMPLE_BUDGET));
+  /* Which sampled points also get the sphere probe. Drawn on its own seeded
+     stream at the rate the budget implies, rather than by striding: a stride of
+     ceil(3000/2000) = 2 would take 1500 points and quietly make the budget mean
+     something other than it says. */
+  const sphereRandom = makeRandom(((seed != null ? seed : DEFAULT_SAMPLE_SEED) ^ 0x2545F491) >>> 0);
+  const sphereRate = Math.min(1, SPHERE_SAMPLE_BUDGET / Math.max(1, samples));
 
   for (let s = 0; s < samples; s++) {
     const u = (s + random()) / samples * totalArea;
@@ -391,7 +392,7 @@ function sampleWallThickness(geom, bvh, triAreas, triCentroid, triFNorm, diag, t
     const dist = castRay(bvh, geom, cx - nx * eps, cy - ny * eps, cz - nz * eps, -nx, -ny, -nz, eps, t);
     if (dist !== Infinity && dist < diag) {
       ray.push(dist);
-      if (s % sphereStride === 0) {
+      if (sphereRate >= 1 || sphereRandom() < sphereRate) {
         sphere.push(sphereThicknessAt(bvh, geom, t, cx, cy, cz, nx, ny, nz, eps, diag, dist));
       }
     }
@@ -399,8 +400,24 @@ function sampleWallThickness(geom, bvh, triAreas, triCentroid, triFNorm, diag, t
   return { ray, sphere };
 }
 
-/* How many of the sampled points also get the 33-ray sphere treatment. */
-const SPHERE_SAMPLE_BUDGET = 1000;
+/*
+ * How many of the sampled points also get the 33-ray sphere treatment.
+ *
+ * This is the figure the wall check now judges the part on, so it needs enough
+ * samples that the confidence interval it reports describes the part rather than
+ * the sampler — the check adds a "not pinned down" caveat above ±5%, and that
+ * caveat should fire because a wall genuinely varies, never because the estimate
+ * was taken cheaply. On a cylinder whose wall sweeps 1.0 to 4.0 mm, which is
+ * more variation than most real parts carry, the median's interval comes out at
+ * ±7.6% from 500 samples, ±5.6% from 1000, ±4.0% from 2000 and ±3.2% from 3000.
+ * Two thousand is the first that stays clear of the threshold, and it costs
+ * about a third less than sampling every point.
+ *
+ * The probe is 33 rays per sample, so this is the single biggest lever on run
+ * time — worth revisiting together with the ring count in CONE_RINGS_DEG if a
+ * part ever feels slow.
+ */
+const SPHERE_SAMPLE_BUDGET = 2000;
 
 /* Default jitter seed. Any fixed value does; this one is the golden-ratio
    constant, which is conventional and carries no other meaning. */
@@ -477,8 +494,12 @@ function sphereThicknessAt(bvh, geom, t, cx, cy, cz, nx, ny, nz, eps, diag, axia
     const dx = ix * cn + ux * cu + vx * cv;
     const dy = iy * cn + uy * cu + vy * cv;
     const dz = iz * cn + uz * cu + vz * cv;
-    const hit = castRay(bvh, geom, ox, oy, oz, dx, dy, dz, eps, t);
-    if (hit === Infinity || hit >= diag) continue; // escapes: constrains nothing
+    /* A hit only matters if it lowers the bound, and bound = hit / cos θ, so
+       nothing past best·cos θ can. Capping the ray there prunes most of the BVH
+       traversal — the probe is 33 rays per sampled point and this is what makes
+       running it on every sample affordable. */
+    const hit = castRay(bvh, geom, ox, oy, oz, dx, dy, dz, eps, t, best * cn);
+    if (hit === Infinity || hit >= diag) continue; // escapes, or too far to bind
     const bound = hit / cn;
     if (bound < best) best = bound;
   }
@@ -547,14 +568,75 @@ export function classifyUndercutFaces({
       cx + nx * eps * 10, cy + ny * eps * 10, cz + nz * eps * 10, nx, ny, nz, eps, t);
     const exitsToInfinity = outwardHit === Infinity || outwardHit > diag * 0.99;
 
-    if (pd < -0.7) {
-      /* An underbelly only counts if it is genuinely external. */
-      triUndercut[t] = exitsToInfinity ? 1 : 0;
+    if (pd < -0.7 && !exitsToInfinity) {
+      /* An underbelly facing into a fully enclosed void. The tool has nothing
+         useful to say about a cavity nothing can get into at all — that is a
+         lost-core problem, not a slide-or-lifter one. */
+      triUndercut[t] = 0;
     } else {
-      triUndercut[t] = exitsToInfinity ? 1 : 2;
+      triUndercut[t] = slideCanReachFace(
+        bvh, geom, t, cx, cy, cz, nx, ny, nz, pullDir, eps, diag) ? 1 : 2;
     }
   }
   return triUndercut;
+}
+
+/* Directions tried in the parting plane, and how many must get out before a
+   slide is judged able to reach the face. Two rather than one because a single
+   ray can escape along a grazing tangent and say nothing useful. */
+const SLIDE_PROBE_AZIMUTHS = 8;
+const SLIDE_PROBE_MIN_ESCAPES = 2;
+
+/*
+ * Could a side-action core reach this face from outside the part?
+ *
+ * This is what separates a slide from a lifter, and it was previously decided by
+ * whether a ray along the face's own normal escaped — which gets internal
+ * features exactly wrong. The underside of a snap ledge inside a housing points
+ * down into the open cavity, so that ray escapes straight out through the
+ * opening and the feature was reported as needing a slide. No slide can reach
+ * it: it is walled in on all four sides, and it has to be served from the core
+ * side by a lifter. On the housing fixture that misclassified 1,200 mm² across
+ * two regions, and because in a two-piece mould every candidate face points
+ * against the pull, the lifter branch was unreachable and the tool could not
+ * report a lifter at all.
+ *
+ * A slide travels in the parting plane, so the question is whether any path in
+ * that plane gets from the face out of the part. Rays are cast from just off the
+ * face, spread around the plane; if enough of them get out, a slide can come in
+ * the same way.
+ *
+ * Note what this does *not* decide: whether the face is an undercut in the first
+ * place. That still rests on the parting line being flat at the pull minimum,
+ * which is the assumption the rest of this function makes and the one worth
+ * revisiting — a stepped parting line resolves an overhang with no side action
+ * at all.
+ */
+function slideCanReachFace(bvh, geom, t, cx, cy, cz, nx, ny, nz, pullDir, eps, diag) {
+  const [pdx, pdy, pdz] = pullDir;
+
+  /* Two axes spanning the parting plane, via Gram-Schmidt off the pull axis. */
+  let ux = Math.abs(pdx) < 0.9 ? 1 : 0, uy = Math.abs(pdx) < 0.9 ? 0 : 1, uz = 0;
+  const d = ux * pdx + uy * pdy + uz * pdz;
+  ux -= d * pdx; uy -= d * pdy; uz -= d * pdz;
+  const uLen = Math.hypot(ux, uy, uz) || 1;
+  ux /= uLen; uy /= uLen; uz /= uLen;
+  const vx = pdy * uz - pdz * uy, vy = pdz * ux - pdx * uz, vz = pdx * uy - pdy * ux;
+
+  /* Start just clear of the surface, on the free side. */
+  const ox = cx + nx * eps * 10, oy = cy + ny * eps * 10, oz = cz + nz * eps * 10;
+
+  let escapes = 0;
+  for (let k = 0; k < SLIDE_PROBE_AZIMUTHS; k++) {
+    const a = (k / SLIDE_PROBE_AZIMUTHS) * Math.PI * 2;
+    const ca = Math.cos(a), sa = Math.sin(a);
+    const hit = castRay(bvh, geom, ox, oy, oz,
+      ux * ca + vx * sa, uy * ca + vy * sa, uz * ca + vz * sa, eps, t);
+    if (hit === Infinity || hit > diag * 0.99) {
+      if (++escapes >= SLIDE_PROBE_MIN_ESCAPES) return true;
+    }
+  }
+  return false;
 }
 
 /*

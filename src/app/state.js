@@ -30,7 +30,10 @@ export const DEFAULT_SETTINGS = {
   ribThk: 1.2,
   ribH: 5.0,
   ribRadius: 0.5,
-  bossOD: 6.0,
+  /* Ø4 boss, 1 mm wall, Ø2 hole. Chosen so the defaults satisfy both boss
+     guidelines at the default 2 mm wall: screw retention wants ≥1.00 mm and the
+     sink limit caps at 1.40 mm. The old Ø6 default could satisfy neither. */
+  bossOD: 4.0,
   bossWall: 1.0,
   hasUndercut: '0',
 

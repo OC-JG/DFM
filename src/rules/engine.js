@@ -12,10 +12,27 @@ import { scoreChecks, escalate, PART_GRADES } from './scoring.js';
  * DOM from inside two of these checks, which meant the rules could not be
  * exercised without a live page.
  */
+/*
+ * Which measured distribution the tool judges "the wall" on.
+ *
+ * The inscribed sphere when it is available: it is the thickness a moulder
+ * means, and it is the conservative of the two, where the ray cast overstates
+ * any wall whose opposite face is not parallel. Falls back to the ray figures
+ * on a mesh too small for the sphere pass to have run.
+ */
+function judgedWall(mesh) {
+  if (!mesh || !mesh.wallStats || !(mesh.wallStats.n > 10)) return null;
+  if (mesh.sphereStats && mesh.sphereStats.n > 10) {
+    return { stat: mesh.sphereStats, basis: 'inscribed sphere' };
+  }
+  return { stat: mesh.wallStats, basis: 'ray cast' };
+}
+
 export function runDFM(input) {
   const m = MATERIALS[input.material];
   const mesh = input.mesh;
   const checks = [];
+  const judged = judgedWall(mesh);
 
   // ══ WALL THICKNESS ══════════════════════════════════════════════════════
   if (input.runChecks.wall) {
@@ -23,14 +40,33 @@ export function runDFM(input) {
     let wMin = input.wallMin, wMax = input.wallMax;
     let p25 = wMin, p75 = wMax;
     let cv = null;
+    let stat = null;   // the distribution the verdict was taken from
 
-    if (mesh && mesh.wallStats.n > 10) {
-      nominal = mesh.wallStats.median;
-      wMin = mesh.wallStats.p5;
-      wMax = mesh.wallStats.p95;
-      p25 = mesh.wallStats.p25;
-      p75 = mesh.wallStats.p75;
-      cv = mesh.wallStats.cvRobust;
+    /* Judged on the inscribed-sphere thickness, not the ray cast.
+       
+       The ray measures the distance straight through to the far surface, which
+       is exact when that surface is parallel and overstates the wall when it is
+       not — a taper, an angled rib, mass gathering at a corner. Overstating is
+       the optimistic direction: it is what lets a section that will short-shot
+       or sink read as comfortably inside the material's band. The sphere is the
+       quantity a moulder means by "wall": the largest ball that fits inside the
+       solid at that point. Both are still reported; this is which one the
+       material limits are compared against.
+       
+       The sink check deliberately stays on the ray figure at both ends. It asks
+       how much mass sits behind a surface relative to the nominal, and mixing a
+       ray-derived local thickness against a sphere-derived nominal would
+       systematically over-report it. */
+    let wallBasis = 'declared';
+    if (judged) {
+      wallBasis = judged.basis;
+      stat = judged.stat;
+      nominal = stat.median;
+      wMin = stat.p5;
+      wMax = stat.p95;
+      p25 = stat.p25;
+      p75 = stat.p75;
+      cv = stat.cvRobust;
     }
 
     const matLo = m.wallLo, matHi = m.wallHi;
@@ -93,22 +129,20 @@ export function runDFM(input) {
     ];
     if (fpcFloor !== null) wallMetrics.splice(4, 0, ['FPC floor', `${fpcFloor.toFixed(2)} mm`]);
 
-    /* How well pinned down the nominal is, and whether the two independent
-       thickness methods agree about it. Both are reported, neither moves the
-       score: the deduction still follows the ray-derived nominal, so that the
-       verdict on a given part does not change meaning underneath anyone. */
-    if (mesh && mesh.wallStats.n > 10) {
-      const ws = mesh.wallStats;
-      wallMetrics.push(['Samples', `${ws.n}`]);
-      wallMetrics.push(['Median 95% CI', `${ws.medLo.toFixed(2)}–${ws.medHi.toFixed(2)} mm`]);
-      if (ws.medUncertainty > 0.05) {
-        detail += ` The nominal is pinned only to ±${(ws.medUncertainty * 100).toFixed(0)}% at 95% confidence (${ws.medLo.toFixed(2)}–${ws.medHi.toFixed(2)} mm): the wall varies enough across this part that one figure is a weak summary of it. Read the WALL heatmap rather than this number.`;
+    /* How well pinned down the nominal is, and how far the two independent
+       thickness measures are from agreeing about it. */
+    if (stat) {
+      wallMetrics.push(['Measured as', wallBasis]);
+      wallMetrics.push(['Samples', `${stat.n}`]);
+      wallMetrics.push(['Median 95% CI', `${stat.medLo.toFixed(2)}–${stat.medHi.toFixed(2)} mm`]);
+      if (stat.medUncertainty > 0.05) {
+        detail += ` The nominal is pinned only to ±${(stat.medUncertainty * 100).toFixed(0)}% at 95% confidence (${stat.medLo.toFixed(2)}–${stat.medHi.toFixed(2)} mm): the wall varies enough across this part that one figure is a weak summary of it. Read the WALL heatmap rather than this number.`;
       }
       const wm = mesh.wallMethod;
       if (wm) {
-        wallMetrics.push(['Ray / sphere', `${wm.rayMedian.toFixed(2)} / ${wm.sphereMedian.toFixed(2)} mm`]);
+        wallMetrics.push(['Sphere / ray', `${wm.sphereMedian.toFixed(2)} / ${wm.rayMedian.toFixed(2)} mm`]);
         if (wm.ratio < 0.85) {
-          detail += ` Inscribed-sphere thickness (${wm.sphereMedian.toFixed(2)} mm) runs ${((1 - wm.ratio) * 100).toFixed(0)}% below the ray-cast thickness (${wm.rayMedian.toFixed(2)} mm), so the walls are markedly non-parallel — taper, angled ribs, or mass piling up at corners. The checks above use the ray figure, which is the optimistic one; confirm the thin sections locally before cutting steel.`;
+          detail += ` The two thickness measures disagree by ${((1 - wm.ratio) * 100).toFixed(0)}%: ${wm.sphereMedian.toFixed(2)} mm by inscribed sphere against ${wm.rayMedian.toFixed(2)} mm by ray cast. That gap is itself the finding — the walls are markedly non-parallel, from taper, angled ribs or mass gathering at corners. This check is judged on the sphere figure, which is the one a moulder means and the conservative of the two.`;
         }
       }
     }
@@ -239,6 +273,46 @@ export function runDFM(input) {
       detail += ` Rib base radius ${radiusRatio.toFixed(2)}× wall — at the top of recommended 0.25–0.4× range; watch for sink.`;
     }
 
+    /*
+     * Boss geometry, and the tension inside it.
+     *
+     * `bossOD` has been collected, persisted and printed on the report since the
+     * rebuild with no rule reading it, which is worse than not asking for it:
+     * a field that changes nothing teaches people to distrust the ones that do.
+     *
+     * It has a use. The convention for a screw boss is an outer diameter about
+     * twice the hole it carries, which with the wall thickness already asked for
+     * here means bossWall ≥ bossOD / 4. Thinner than that and the boss splits
+     * around a self-tapping screw.
+     *
+     * But that pulls against the sink limit immediately below. Boss wall is
+     * capped at 0.7× the nominal wall or the boss base shows through the
+     * cosmetic face, and the two can only both be met when
+     *
+     *     bossOD / 4  ≤  0.7 × wall      i.e.   bossOD ≤ 2.8 × wall
+     *
+     * So a Ø6 mm boss on a 2 mm wall cannot satisfy both, and no amount of
+     * adjusting the boss wall will fix it. That is a real and common design
+     * bind with standard resolutions, and the useful thing a DFM tool can do is
+     * name it rather than report half of it. */
+    const holeId = input.bossOD - 2 * input.bossWall;
+    const wallForBoss = input.wallThk > 0 ? input.wallThk : null;
+    const screwMinWall = input.bossOD / 4;
+    const sinkMaxWall = wallForBoss !== null ? 0.7 * wallForBoss : null;
+    const bossConflict = sinkMaxWall !== null && screwMinWall > sinkMaxWall + 1e-9;
+
+    if (holeId <= 0) {
+      detail += ` Boss Ø${input.bossOD} mm with a ${input.bossWall} mm wall leaves no hole — treated as a solid post, so the screw-retention guideline does not apply.`;
+    } else if (bossConflict) {
+      severity = escalate(severity, 'major');
+      if (status !== 'fail') status = 'warn';
+      detail += ` A Ø${input.bossOD} mm boss cannot satisfy both boss guidelines on a ${wallForBoss} mm wall: retention around its Ø${holeId.toFixed(1)} mm hole wants at least ${screwMinWall.toFixed(2)} mm of boss wall (outer diameter about twice the hole), while the sink limit below caps it at ${sinkMaxWall.toFixed(2)} mm. Adjusting the boss wall cannot satisfy both — core the boss base, carry the load on gussets or a support rib into the side wall instead of thickening it, or bring the boss down to Ø${(2.8 * wallForBoss).toFixed(1)} mm or less.`;
+    } else if (input.bossWall < screwMinWall - 1e-9) {
+      severity = escalate(severity, 'major');
+      if (status !== 'fail') status = 'warn';
+      detail += ` Boss wall ${input.bossWall} mm is under the ${screwMinWall.toFixed(2)} mm a Ø${input.bossOD} mm boss wants around its Ø${holeId.toFixed(1)} mm hole — the convention is an outer diameter about twice the hole. Thin boss walls split around a self-tapping screw. There is room to thicken it: the sink limit here is ${sinkMaxWall.toFixed(2)} mm.`;
+    }
+
     /* Boss wall — too thick sinks, too thin cracks around inserts. */
     if (bossRatio > 0.7) {
       if (status !== 'fail') status = 'warn';
@@ -261,6 +335,12 @@ export function runDFM(input) {
         ['Rib h / t', `${hRatio.toFixed(2)}×`],
         ['Base R / wall', `${radiusRatio.toFixed(2)}×`],
         ['Boss wall / wall', `${bossRatio.toFixed(2)}×`],
+        ['Boss OD / hole', holeId > 0 ? `Ø${input.bossOD} / Ø${holeId.toFixed(1)} mm` : `Ø${input.bossOD} mm solid`],
+        ['Boss wall window', (holeId > 0 && sinkMaxWall !== null)
+          ? (bossConflict
+            ? `none — screw wants ≥${screwMinWall.toFixed(2)}, sink caps at ${sinkMaxWall.toFixed(2)} mm`
+            : `${screwMinWall.toFixed(2)}–${sinkMaxWall.toFixed(2)} mm`)
+          : '—'],
       ],
     });
   }
@@ -451,6 +531,10 @@ export function runDFM(input) {
       /* Thick-to-thin fill advisory: a component should fill from its thickest
          section outward, or the gate freezes off before packing completes. */
       let gateStr = '';
+      /* Both sides of this comparison stay on the ray cast. gateLocalThickness is
+         a single ray reading at the gate triangle, and holding it against a
+         sphere-derived median would compare two different measurements and call
+         the difference a thin gate. */
       if (mesh && mesh.wallStats.n > 10 && fa.gateLocalThickness) {
         const medWall = mesh.wallStats.median;
         if (fa.gateLocalThickness < medWall * 0.8) {
@@ -459,7 +543,7 @@ export function runDFM(input) {
       }
 
       /* Gate size from wall thickness (Table 4.3). */
-      const wallForGate = (mesh && mesh.wallStats.n > 10) ? mesh.wallStats.median : (input.wallThk || 2.0);
+      const wallForGate = judged ? judged.stat.median : (input.wallThk || 2.0);
       let gateSizeRec;
       if (wallForGate < 1.2)      gateSizeRec = '0.7–1.0 mm Ø, 0.8–1.0 mm L';
       else if (wallForGate < 3.0) gateSizeRec = '0.8–2.0 mm Ø, 0.8–1.0 mm L';
@@ -531,7 +615,7 @@ export function runDFM(input) {
   // Cannot be auto-detected: corner radii need B-rep topology, which STL does
   // not carry. Fires off the declared wall thickness as a reminder.
   if (input.runChecks.wall) {
-    const wallT = input.wallThk || (mesh && mesh.wallStats.median) || 2.0;
+    const wallT = input.wallThk || (judged && judged.stat.median) || 2.0;
     const internalMinR = (wallT * 0.5).toFixed(2);
     const externalMinR = (wallT * 1.5).toFixed(2);
     checks.push({
@@ -604,7 +688,7 @@ export function runDFM(input) {
 
     // 2. Wall vs FPC floor
     let nominalWall = input.wallThk;
-    if (mesh && mesh.wallStats.n > 10) nominalWall = mesh.wallStats.median;
+    if (judged) nominalWall = judged.stat.median;
     if (nominalWall < fpcFloor) {
       status = 'fail'; severity = escalate(severity, 'critical');
       notes.push(`Nominal wall ${nominalWall.toFixed(2)} mm < required ${fpcFloor.toFixed(2)} mm (FPC ${fpc.thickness.toFixed(2)} + 2×${fpc.cover.toFixed(2)} cover) — FPC will sit at or above the part surface in overmoulded regions.`);
