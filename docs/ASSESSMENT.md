@@ -768,6 +768,32 @@ which was +X on a part drafted for +Z.
 Costs 168 ms on a 96k-triangle part instead of 17 ms, once, on file load. Worth
 it for a recommendation that does not contradict the report beneath it.
 
+**Item 17 done — revision comparison.**
+
+The score answers whether the part is manufacturable. On every pass after the
+first the question is whether it got better, and the only way to answer that was
+to remember the last number. **Compare with JSON** reads a previous export and
+says what moved:
+
+```
+▲ 82 → 100   Score up 18 to 100. MINOR REWORK → PRODUCTION READY.
+             Resolved: Draft angles.
+
+Draft angles          better      critical → none
+Sidewall under draft  100.0 → 0.0 %        −100.0
+```
+
+It reads exported records rather than live analysis objects, so a comparison can
+be made against a file from weeks ago and an older schema — a missing field is
+reported as unavailable, never assumed to be zero. Changes that crossed a
+severity band come first, but a measurement improving inside its band is shown
+too, because that is what progress looks like before it reaches the score.
+
+It also refuses to let a comparison mislead. Switching material, switching mode,
+or running a different set of checks all make the score movement something other
+than a change in the part, and each raises a caveat above the diff. Comparing a
+run against itself says so rather than reporting a triumphant zero.
+
 ### Phase 4 — the offline build (item 20, in part)
 
 `node build.js --vendor` inlines three.js and jsPDF, producing a file that needs
@@ -810,8 +836,9 @@ ledges as slides), and whether the wall thresholds should move onto the
 sphere-fit figure rather than the ray one. None is a coding decision.
 
 **The rest of Phase 3**: corner radii from the STEP `faceGroups` the parser
-already extracts and discards, and revision comparison. Cycle time as soon as
-the `coolK` question is answered.
+already extracts and discards — which needs a STEP fixture, and therefore a
+decision about the OpenCascade module, before it can be written with any
+confidence. Cycle time as soon as the `coolK` question is answered.
 
 Also outstanding and small: `bossOD` is still collected, persisted and printed
 in the PDF without any rule reading it. The standard guideline — boss outer

@@ -71,6 +71,7 @@ export const runtime = {
   interface: null,             // two-shot interface measurement
   dfm: null,                   // { input, result }
   shot: null,                  // shot weight / clamp force estimate
+  comparison: null,            // diff against a previously exported run
   twoShot: null,               // two-shot check result
 
   gateLocation: null,          // [x, y, z] in mesh-local coordinates
@@ -160,6 +161,7 @@ export function resetRuntime() {
   runtime.interface = null;
   runtime.dfm = null;
   runtime.shot = null;
+  runtime.comparison = null;
   runtime.twoShot = null;
   runtime.gateLocation = null;
   runtime.gateSuggestion = null;

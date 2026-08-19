@@ -136,6 +136,77 @@ export function renderShot(shot) {
   replaceChildren($('shotBody'), nodes);
 }
 
+/*
+ * Revision comparison.
+ *
+ * The score answers whether the part is manufacturable; this answers whether it
+ * got better, which is the question on every pass after the first. Changes that
+ * crossed a severity band come first, because those are the ones that moved the
+ * number — but a measurement improving inside its band is shown too, since that
+ * is what progress looks like before it shows up in the score.
+ */
+const CHANGE_LABEL = {
+  worsened: 'worse', improved: 'better', added: 'new check',
+  removed: 'not run', unchanged: 'unchanged',
+};
+
+export function renderComparison(diff) {
+  const section = $('compareSection');
+  if (!diff) { section.style.display = 'none'; return; }
+  section.style.display = '';
+
+  const nodes = [];
+
+  const delta = diff.score.delta;
+  const arrow = delta === null ? '' : delta > 0 ? '▲' : delta < 0 ? '▼' : '=';
+  const tone = delta === null ? 'flat' : delta > 0 ? 'better' : delta < 0 ? 'worse' : 'flat';
+  nodes.push(el('div', { class: `cmp-head ${tone}` }, [
+    el('span', { class: 'cmp-arrow', 'aria-hidden': 'true', text: arrow }),
+    el('span', {
+      class: 'cmp-score',
+      text: delta === null ? '—' : `${diff.score.before} → ${diff.score.after}`,
+    }),
+    el('span', { class: 'cmp-headline', text: diff.headline }),
+  ]));
+
+  nodes.push(el('div', { class: 'cmp-runs', text: `was: ${diff.labels.before}   ·   now: ${diff.labels.after}` }));
+
+  for (const caveat of diff.caveats) {
+    nodes.push(el('div', { class: 'cmp-caveat', text: caveat }));
+  }
+
+  const moved = diff.checks.filter((c) => c.change !== 'unchanged');
+  if (moved.length) {
+    nodes.push(el('div', { class: 'cmp-list' }, moved.map((c) => el('div', { class: `cmp-row ${c.change}` }, [
+      el('span', { class: 'cmp-row-name', text: c.name }),
+      el('span', { class: 'cmp-row-change', text: CHANGE_LABEL[c.change] || c.change }),
+      el('span', {
+        class: 'cmp-row-detail',
+        text: (c.severityBefore && c.severityAfter)
+          ? `${c.severityBefore} → ${c.severityAfter}`
+          : (c.severityAfter || c.severityBefore || ''),
+      }),
+    ]))));
+  }
+
+  const movedMetrics = diff.measurements.filter((m) => m.direction !== 'flat' && m.delta !== null);
+  if (movedMetrics.length) {
+    nodes.push(el('div', { class: 'cmp-list' }, movedMetrics.map((m) => el('div', { class: `cmp-row ${m.direction}` }, [
+      el('span', { class: 'cmp-row-name', text: m.label }),
+      el('span', {
+        class: 'cmp-row-change',
+        text: `${m.before.toFixed(m.dp)} → ${m.after.toFixed(m.dp)} ${m.unit}`,
+      }),
+      el('span', {
+        class: 'cmp-row-detail',
+        text: `${m.delta > 0 ? '+' : ''}${m.delta.toFixed(m.dp)}`,
+      }),
+    ]))));
+  }
+
+  replaceChildren($('compareBody'), nodes);
+}
+
 export function renderResults(result, analysis) {
   $('resultsEmpty').style.display = 'none';
   $('resultsContent').style.display = '';
@@ -250,6 +321,7 @@ export function clearResults() {
   $('resultsEmpty').style.display = '';
   $('resultsContent').style.display = 'none';
   renderShot(null);
+  renderComparison(null);
   hideTwoShotResults();
   replaceChildren($('checksList'), []);
   replaceChildren($('scoreBars'), []);

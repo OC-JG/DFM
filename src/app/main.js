@@ -8,13 +8,14 @@ import { estimateShot } from '../analysis/shot.js';
 import { computeBounds } from '../geometry/weld.js';
 import { runDFM } from '../rules/engine.js';
 import { runTwoShotDFM } from '../rules/twoshot.js';
+import { compareRuns } from '../rules/compare.js';
 import { buildExportJSON, downloadJSON } from '../export/json.js';
 import { exportPDF } from '../export/pdf.js';
 import { runAnalysis, initWorker } from './analysis-runner.js';
 import { computeHeatColours, computeInterfaceColours, buildLegend, HEAT_MODES } from './heatmap.js';
 import * as viewer from './viewer.js';
 import * as panel from './panels-input.js';
-import { renderResults, renderShot, renderTwoShotResults, hideTwoShotResults, clearResults } from './panels-results.js';
+import { renderResults, renderShot, renderComparison, renderTwoShotResults, hideTwoShotResults, clearResults } from './panels-results.js';
 import { settings, runtime, loadSettings, resetSettings, resetRuntime, isTwoShot } from './state.js';
 import { $, $$, el, toast, nextFrame } from './dom.js';
 
@@ -491,6 +492,11 @@ async function doRunAnalysis() {
       : null;
     renderShot(runtime.shot);
 
+    /* The comparison on screen was against the previous run's numbers, which
+       these have just replaced. */
+    runtime.comparison = null;
+    renderComparison(null);
+
     panel.setFromMeshBadge(!!runtime.analysis);
     panel.updatePartSummary();
 
@@ -542,9 +548,9 @@ async function doRunAnalysis() {
 
 /* ══ exports ═════════════════════════════════════════════════════════════ */
 
-function doExportJSON() {
-  if (!runtime.dfm) return;
-  const data = buildExportJSON({
+function currentRecord() {
+  if (!runtime.dfm) return null;
+  return buildExportJSON({
     sessionId: runtime.sessionId,
     dfm: runtime.dfm,
     analysis: runtime.analysis,
@@ -554,7 +560,38 @@ function doExportJSON() {
     shot: runtime.shot,
     settings,
   });
+}
+
+function doExportJSON() {
+  const data = currentRecord();
+  if (!data) return;
   downloadJSON(data, `dfm_${runtime.sessionId}_${Date.now()}.json`);
+}
+
+/*
+ * Compare this run against a previously exported JSON.
+ *
+ * Reading a file rather than keeping history in the page: a revision comparison
+ * is usually against something from last week, on someone else's machine, and
+ * the export already carries everything the diff needs.
+ */
+async function doCompare(file) {
+  const current = currentRecord();
+  if (!current) { toast('Run an analysis first, then compare it against a previous export.', 'warn'); return; }
+  try {
+    const text = await file.text();
+    const previous = JSON.parse(text);
+    if (!previous || typeof previous.score !== 'number' || !Array.isArray(previous.checks)) {
+      throw new Error('that file does not look like a DFM JSON export');
+    }
+    runtime.comparison = compareRuns(previous, current);
+    renderComparison(runtime.comparison);
+    toast(runtime.comparison.headline, 'info', 8000);
+    setStatus('COMPARED');
+  } catch (err) {
+    console.error(err);
+    toast(`Could not compare: ${err.message}`, 'error');
+  }
 }
 
 async function doExportPDF() {
@@ -740,6 +777,11 @@ function boot() {
   $('runBtn').addEventListener('click', doRunAnalysis);
   $('resetBtn').addEventListener('click', startOver);
   $('jsonBtn').addEventListener('click', doExportJSON);
+  $('compareBtn').addEventListener('click', () => $('compareInput').click());
+  $('compareInput').addEventListener('change', (e) => {
+    if (e.target.files.length) doCompare(e.target.files[0]);
+    e.target.value = ''; // allow re-selecting the same file
+  });
   $('pdfBtn').addEventListener('click', doExportPDF);
 
   wireKeyboard();

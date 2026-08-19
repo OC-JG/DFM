@@ -216,6 +216,17 @@ async function main() {
     const pdfBytes = readFileSync(await pdfFile.path());
     check('PDF export produced a real PDF', pdfBytes.subarray(0, 5).toString() === '%PDF-', `${pdfBytes.length} bytes`);
 
+    // ── revision comparison ───────────────────────────────────────────────
+    // Fed the export from this same run, so every check should read unchanged
+    // and the panel should notice it is looking at one geometry twice.
+    await page.setInputFiles('#compareInput', jsonPath);
+    await page.waitForFunction(
+      () => document.getElementById('compareSection').style.display !== 'none', null, { timeout: 15000 });
+    const cmpText = await page.textContent('#compareSection');
+    check('comparison panel shown', await page.locator('#compareSection').isVisible());
+    check('comparing a run with itself moves nothing', /No check changed band/.test(cmpText), cmpText.slice(0, 200));
+    check('comparison warns it is the same geometry', /same geometry twice/.test(cmpText), cmpText.slice(0, 300));
+
     // ── persistence ───────────────────────────────────────────────────────
     await page.reload({ waitUntil: 'networkidle' });
     check('material persisted across reload', (await page.inputValue('#material')) === 'abs');

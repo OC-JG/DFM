@@ -371,9 +371,16 @@
         <div id="tsChecksList"></div>
       </div>
 
+      <div id="compareSection" style="display:none;">
+        <div class="section-subhead">Compared with a previous run</div>
+        <div id="compareBody"></div>
+      </div>
+
       <div class="actions">
         <button type="button" class="btn" id="pdfBtn">↓ Export PDF report</button>
         <button type="button" class="btn secondary" id="jsonBtn">↓ Export JSON</button>
+        <button type="button" class="btn secondary" id="compareBtn">⇄ Compare with JSON</button>
+        <input type="file" id="compareInput" accept=".json,application/json" class="visually-hidden">
       </div>
     </div>
   </aside>

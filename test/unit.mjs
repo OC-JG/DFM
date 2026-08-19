@@ -24,6 +24,7 @@ import {
   scoreChecks, escalate, PART_GRADES, INTERFACE_GRADES,
 } from '../src/rules/scoring.js';
 import { buildExportJSON } from '../src/export/json.js';
+import { compareRuns } from '../src/rules/compare.js';
 import { estimateShot, nextMachineSize, CAVITY_PRESSURE_MPA } from '../src/analysis/shot.js';
 import { searchGateCandidates, computeFlowLengths, buildAdjacency, geodesicFrom } from '../src/analysis/flow.js';
 import { effectiveMinDraft } from '../src/core/finishes.js';
@@ -1065,6 +1066,107 @@ describe('pull direction — the suggestion must agree with the report');
     const total = (s) => s.ranked.reduce((sum, r) => sum + r.undercutArea, 0);
     assert(total(one) >= total(two) - 1e-6,
       `single-pull (${total(one).toFixed(0)} mm²) should find at least as much as two-piece (${total(two).toFixed(0)} mm²)`);
+  });
+}
+
+
+describe('revision comparison');
+{
+  /* Two real runs of the same shell, one without draft and one with. Exported
+     through the same path the app uses, so the diff is tested against the
+     records it will actually be handed. */
+  const record = (soup, opts = {}) => {
+    const geom = weld(soup);
+    const mesh = analyse(geom, { finishKey: 'spi-a2', suggestGate: false });
+    const result = runDFM({ ...CLEAN_INPUT, ...opts, mesh });
+    return buildExportJSON({
+      sessionId: 'TEST', dfm: { input: { ...CLEAN_INPUT, ...opts }, result },
+      analysis: mesh, twoShot: null, interface: null,
+      validation: validateGeometry(geom), shot: null,
+      settings: { analysisMode: 'single', windowType: 'none' },
+    });
+  };
+
+  const undrafted = record(S.hollowBox([40, 30, 20], 2), { draftAngle: 0.2 });
+  const drafted = record(S.hollowFrustum(20, 30, 3, 2));
+
+  it('reports the score movement and the grade change', () => {
+    const d = compareRuns(undrafted, drafted);
+    assert(d, 'no diff produced');
+    eq(d.score.before, undrafted.score, 'before:');
+    eq(d.score.after, drafted.score, 'after:');
+    eq(d.score.delta, drafted.score - undrafted.score, 'delta:');
+    assert(d.score.delta > 0, `fixing draft should raise the score, got ${d.score.delta}`);
+    eq(d.grade.changed, undrafted.grade !== drafted.grade);
+  });
+
+  it('names the check that was resolved', () => {
+    const d = compareRuns(undrafted, drafted);
+    const draft = d.checks.find((c) => c.key === 'draft');
+    eq(draft.change, 'improved', `draft went ${draft.severityBefore} → ${draft.severityAfter}:`);
+    eq(draft.resolved, true, 'draft should read as resolved:');
+    assert(/Resolved:.*Draft/i.test(d.headline), `headline does not mention it: "${d.headline}"`);
+  });
+
+  it('reads the reverse comparison as a regression', () => {
+    const d = compareRuns(drafted, undrafted);
+    assert(d.score.delta < 0, 'score should fall');
+    const draft = d.checks.find((c) => c.key === 'draft');
+    eq(draft.change, 'worsened');
+    eq(draft.appeared, true, 'draft should read as newly appeared:');
+    assert(/New:.*Draft/i.test(d.headline), `headline: "${d.headline}"`);
+  });
+
+  it('says nothing moved when nothing did', () => {
+    const d = compareRuns(drafted, drafted);
+    eq(d.score.delta, 0);
+    eq(d.checks.every((c) => c.change === 'unchanged'), true,
+      d.checks.filter((c) => c.change !== 'unchanged').map((c) => `${c.key}:${c.change}`).join(', '));
+    assert(/No check changed band/.test(d.headline), d.headline);
+  });
+
+  it('tracks measurements that moved, with the right sense of better', () => {
+    const d = compareRuns(undrafted, drafted);
+    const draftArea = d.measurements.find((m) => m.label === 'Sidewall under draft');
+    assert(draftArea, 'sidewall draft area not tracked');
+    assert(draftArea.after < draftArea.before, 'under-draft area should fall');
+    eq(draftArea.direction, 'better', 'less under-draft area is an improvement:');
+  });
+
+  it('warns when the comparison is not like for like', () => {
+    /* A five-point gain from switching material is not a five-point gain in
+       the part, and the panel has to say so. */
+    const inAbs = record(S.hollowFrustum(20, 30, 3, 2));
+    const inPp = record(S.hollowFrustum(20, 30, 3, 2), { material: 'pp' });
+    const d = compareRuns(inAbs, inPp);
+    assert(d.caveats.some((c) => /Material changed/.test(c)), `caveats: ${d.caveats.join(' | ')}`);
+  });
+
+  it('notices when the same geometry is compared with itself', () => {
+    const d = compareRuns(drafted, drafted);
+    assert(d.caveats.some((c) => /same geometry twice/.test(c)), `caveats: ${d.caveats.join(' | ')}`);
+  });
+
+  it('survives an older record with fields missing', () => {
+    /* Comparisons are made against files from weeks ago. A missing field is
+       reported as unavailable, never assumed to be zero. */
+    const old = {
+      score: 70, grade: 'MINOR REWORK', material: 'ABS',
+      checks: [{ key: 'draft', name: 'Draft angles', severity: 'major', score_deduction: 9 }],
+    };
+    const d = compareRuns(old, drafted);
+    assert(d, 'no diff produced for a sparse record');
+    eq(d.score.delta, drafted.score - 70);
+    for (const m of d.measurements) {
+      if (m.before === null) eq(m.delta, null, `${m.label} delta must be null when a side is missing:`);
+    }
+    const added = d.checks.filter((c) => c.change === 'added');
+    assert(added.length > 0, 'checks absent from the old record should read as added');
+  });
+
+  it('refuses to invent a comparison from nothing', () => {
+    eq(compareRuns(null, drafted), null);
+    eq(compareRuns(drafted, null), null);
   });
 }
 

@@ -1138,3 +1138,48 @@ footer {
   margin-top: 8px;
   max-width: 62ch;
 }
+
+/* ── revision comparison ─────────────────────────────────────────────────
+   Answers "is it better than it was", which is the question on every pass
+   after the first. */
+.cmp-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  border: 1px solid var(--ink);
+  background: var(--paper-2);
+}
+.cmp-arrow { font-size: 13px; }
+.cmp-score { font-size: 16px; font-weight: 700; white-space: nowrap; }
+.cmp-head.better .cmp-arrow, .cmp-head.better .cmp-score { color: var(--ok); }
+.cmp-head.worse .cmp-arrow, .cmp-head.worse .cmp-score { color: var(--fail); }
+.cmp-headline { flex: 1 1 240px; font-size: 11px; line-height: 1.6; opacity: 0.85; }
+.cmp-runs { font-size: 10px; opacity: 0.55; margin: 6px 0 0; }
+.cmp-caveat {
+  font-size: 10.5px;
+  line-height: 1.6;
+  margin-top: 8px;
+  padding: 7px 10px;
+  border-left: 3px solid var(--warn);
+  background: rgba(217, 119, 6, 0.08);
+  max-width: 62ch;
+}
+.cmp-list { margin-top: 10px; border: 1px solid rgba(10, 14, 12, 0.12); }
+.cmp-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 6px 10px;
+  font-size: 11px;
+  border-left: 3px solid transparent;
+  border-top: 1px solid rgba(10, 14, 12, 0.08);
+}
+.cmp-row:first-child { border-top: 0; }
+.cmp-row.improved, .cmp-row.better { border-left-color: var(--ok); }
+.cmp-row.worsened, .cmp-row.worse { border-left-color: var(--fail); }
+.cmp-row.added, .cmp-row.removed, .cmp-row.changed { border-left-color: rgba(10, 14, 12, 0.3); }
+.cmp-row-name { flex: 1; font-weight: 700; }
+.cmp-row-change { opacity: 0.8; white-space: nowrap; }
+.cmp-row-detail { font-family: var(--mono); opacity: 0.6; white-space: nowrap; }

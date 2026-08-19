@@ -308,6 +308,18 @@ than a practical cooling time — the two readings differ by about 4× — and a
 cycle time is exactly the kind of number that gets quoted from. See
 `src/analysis/shot.js` for the detail.
 
+## Comparing revisions
+
+**Compare with JSON** reads a previous export and says what moved: the score, the
+grade, which checks changed band, and which measurements shifted and in which
+direction. Comparisons work against files from weeks ago and older schema
+versions — a field the old record does not have is reported as unavailable rather
+than treated as zero.
+
+It also declines to mislead. Changing material, changing mode or running a
+different set of checks all make score movement something other than a change in
+the part, and each raises a caveat above the diff.
+
 ## Known constraints
 
 - **three.js is pinned to r128**, the last version shipping a UMD build usable

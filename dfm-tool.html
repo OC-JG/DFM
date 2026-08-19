@@ -1155,6 +1155,51 @@ footer {
   max-width: 62ch;
 }
 
+/* ── revision comparison ─────────────────────────────────────────────────
+   Answers "is it better than it was", which is the question on every pass
+   after the first. */
+.cmp-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  border: 1px solid var(--ink);
+  background: var(--paper-2);
+}
+.cmp-arrow { font-size: 13px; }
+.cmp-score { font-size: 16px; font-weight: 700; white-space: nowrap; }
+.cmp-head.better .cmp-arrow, .cmp-head.better .cmp-score { color: var(--ok); }
+.cmp-head.worse .cmp-arrow, .cmp-head.worse .cmp-score { color: var(--fail); }
+.cmp-headline { flex: 1 1 240px; font-size: 11px; line-height: 1.6; opacity: 0.85; }
+.cmp-runs { font-size: 10px; opacity: 0.55; margin: 6px 0 0; }
+.cmp-caveat {
+  font-size: 10.5px;
+  line-height: 1.6;
+  margin-top: 8px;
+  padding: 7px 10px;
+  border-left: 3px solid var(--warn);
+  background: rgba(217, 119, 6, 0.08);
+  max-width: 62ch;
+}
+.cmp-list { margin-top: 10px; border: 1px solid rgba(10, 14, 12, 0.12); }
+.cmp-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 6px 10px;
+  font-size: 11px;
+  border-left: 3px solid transparent;
+  border-top: 1px solid rgba(10, 14, 12, 0.08);
+}
+.cmp-row:first-child { border-top: 0; }
+.cmp-row.improved, .cmp-row.better { border-left-color: var(--ok); }
+.cmp-row.worsened, .cmp-row.worse { border-left-color: var(--fail); }
+.cmp-row.added, .cmp-row.removed, .cmp-row.changed { border-left-color: rgba(10, 14, 12, 0.3); }
+.cmp-row-name { flex: 1; font-weight: 700; }
+.cmp-row-change { opacity: 0.8; white-space: nowrap; }
+.cmp-row-detail { font-family: var(--mono); opacity: 0.6; white-space: nowrap; }
+
 </style>
 </head>
 <body>
@@ -1511,9 +1556,16 @@ footer {
         <div id="tsChecksList"></div>
       </div>
 
+      <div id="compareSection" style="display:none;">
+        <div class="section-subhead">Compared with a previous run</div>
+        <div id="compareBody"></div>
+      </div>
+
       <div class="actions">
         <button type="button" class="btn" id="pdfBtn">↓ Export PDF report</button>
         <button type="button" class="btn secondary" id="jsonBtn">↓ Export JSON</button>
+        <button type="button" class="btn secondary" id="compareBtn">⇄ Compare with JSON</button>
+        <input type="file" id="compareInput" accept=".json,application/json" class="visually-hidden">
       </div>
     </div>
   </aside>
@@ -5567,6 +5619,181 @@ function runTwoShotDFM(input) {
   };
 }
 
+/* ==== rules/compare.js ============================================== */
+/*
+ * Compare two runs.
+ *
+ * A score on its own answers "is this part manufacturable". The question
+ * anyone actually asks on the second pass is "is it better than it was", and
+ * until now the only way to find out was to remember the last number. The JSON
+ * export already carries everything needed — per-check severity, the
+ * measurements, the moulding estimates — so this reads two of those records and
+ * says what moved.
+ *
+ * Pure, and deliberately tolerant: it takes exported records rather than live
+ * analysis objects, so a comparison can be made against a file from a month ago
+ * and an older schema. Anything missing is reported as unavailable rather than
+ * assumed to be zero.
+ */
+
+const SEVERITY_RANK = { none: 0, minor: 1, major: 2, critical: 3 };
+
+/* Fields whose movement is worth calling out, and which direction is good. */
+const TRACKED = [
+  { path: ['mesh_summary', 'wall_median_mm'], label: 'Median wall', unit: 'mm', better: null, dp: 2 },
+  { path: ['mesh_summary', 'wall_iqr_ratio'], label: 'Wall variation', unit: '×', better: 'lower', dp: 2 },
+  { path: ['mesh_summary', 'sidewall_area_under_min_draft_pct'], label: 'Sidewall under draft', unit: '%', better: 'lower', dp: 1 },
+  { path: ['mesh_summary', 'sink_severe_area_pct'], label: 'Severe sink area', unit: '%', better: 'lower', dp: 1 },
+  { path: ['mesh_summary', 'slide_area_mm2'], label: 'Slide undercut area', unit: 'mm²', better: 'lower', dp: 0 },
+  { path: ['mesh_summary', 'lifter_area_mm2'], label: 'Lifter undercut area', unit: 'mm²', better: 'lower', dp: 0 },
+  { path: ['mesh_summary', 'volume_mm3'], label: 'Volume', unit: 'mm³', better: null, dp: 0 },
+  { path: ['moulding', 'part_mass_g'], label: 'Part mass', unit: 'g', better: 'lower', dp: 1 },
+  { path: ['moulding', 'projected_area_cm2'], label: 'Projected area', unit: 'cm²', better: 'lower', dp: 1 },
+  { path: ['moulding', 'machine_clamp_tonnes'], label: 'Machine clamp', unit: 't', better: 'lower', dp: 0 },
+];
+
+function dig(obj, path) {
+  let node = obj;
+  for (const key of path) {
+    if (node == null || typeof node !== 'object') return null;
+    node = node[key];
+  }
+  return typeof node === 'number' && isFinite(node) ? node : null;
+}
+
+function compareRuns(before, after) {
+  if (!before || !after) return null;
+
+  const caveats = [];
+  /* A score comparison across a material change, a mode change or a different
+     set of enabled checks is not a comparison of the part. Say so rather than
+     letting someone read a five-point improvement that came from switching from
+     polypropylene to ABS. */
+  if (before.material && after.material && before.material !== after.material) {
+    caveats.push(`Material changed: ${before.material} → ${after.material}. Much of any score movement is the material, not the geometry.`);
+  }
+  if (before.mode && after.mode && before.mode !== after.mode) {
+    caveats.push(`Analysis mode changed: ${before.mode} → ${after.mode}.`);
+  }
+  const budgetBefore = before.scoring && before.scoring.budget;
+  const budgetAfter = after.scoring && after.scoring.budget;
+  if (budgetBefore && budgetAfter && budgetBefore !== budgetAfter) {
+    caveats.push(`A different set of checks ran (${budgetBefore}-point budget → ${budgetAfter}). Scores out of different budgets are not directly comparable.`);
+  }
+
+  const trisBefore = dig(before, ['mesh_summary', 'tris']);
+  const trisAfter = dig(after, ['mesh_summary', 'tris']);
+  if (trisBefore && trisAfter && trisBefore === trisAfter) {
+    caveats.push(`Both runs have ${trisAfter.toLocaleString()} triangles — this may be the same geometry twice rather than a revision.`);
+  }
+
+  // ── checks ──────────────────────────────────────────────────────────────
+  const byKey = (list) => new Map((list || []).map((c) => [c.key, c]));
+  const b = byKey(before.checks);
+  const a = byKey(after.checks);
+  const keys = [...new Set([...b.keys(), ...a.keys()])];
+
+  const checks = [];
+  for (const key of keys) {
+    const was = b.get(key);
+    const now = a.get(key);
+    const sevWas = was ? (was.severity || 'none') : null;
+    const sevNow = now ? (now.severity || 'none') : null;
+    const dedWas = was ? (was.score_deduction || 0) : null;
+    const dedNow = now ? (now.score_deduction || 0) : null;
+
+    let change;
+    if (!was) change = 'added';
+    else if (!now) change = 'removed';
+    else if (SEVERITY_RANK[sevNow] < SEVERITY_RANK[sevWas]) change = 'improved';
+    else if (SEVERITY_RANK[sevNow] > SEVERITY_RANK[sevWas]) change = 'worsened';
+    else change = 'unchanged';
+
+    /* Something can get better without changing band — a sink area halving
+       while staying a major finding is progress worth showing. */
+    if (change === 'unchanged' && dedWas !== null && dedNow !== null && dedWas !== dedNow) {
+      change = dedNow < dedWas ? 'improved' : 'worsened';
+    }
+
+    checks.push({
+      key,
+      name: (now && now.name) || (was && was.name) || key,
+      change,
+      severityBefore: sevWas,
+      severityAfter: sevNow,
+      deductionBefore: dedWas,
+      deductionAfter: dedNow,
+      resolved: change === 'improved' && sevNow === 'none',
+      appeared: change === 'worsened' && sevWas === 'none',
+    });
+  }
+
+  const order = { worsened: 0, improved: 1, added: 2, removed: 3, unchanged: 4 };
+  checks.sort((x, y) => (order[x.change] - order[y.change]) || x.name.localeCompare(y.name));
+
+  // ── measurements ────────────────────────────────────────────────────────
+  const measurements = [];
+  for (const field of TRACKED) {
+    const was = dig(before, field.path);
+    const now = dig(after, field.path);
+    if (was === null && now === null) continue;
+    const delta = (was !== null && now !== null) ? now - was : null;
+    let direction = 'flat';
+    if (delta !== null && Math.abs(delta) > Math.max(1e-9, Math.abs(was) * 0.005)) {
+      const rose = delta > 0;
+      if (field.better === 'lower') direction = rose ? 'worse' : 'better';
+      else if (field.better === 'higher') direction = rose ? 'better' : 'worse';
+      else direction = 'changed';
+    }
+    measurements.push({ ...field, before: was, after: now, delta, direction });
+  }
+
+  // ── headline ────────────────────────────────────────────────────────────
+  const scoreBefore = typeof before.score === 'number' ? before.score : null;
+  const scoreAfter = typeof after.score === 'number' ? after.score : null;
+  const scoreDelta = (scoreBefore !== null && scoreAfter !== null) ? scoreAfter - scoreBefore : null;
+
+  const resolved = checks.filter((c) => c.resolved).map((c) => c.name);
+  const appeared = checks.filter((c) => c.appeared).map((c) => c.name);
+  const worsened = checks.filter((c) => c.change === 'worsened' && !c.appeared).map((c) => c.name);
+
+  const parts = [];
+  if (scoreDelta === null) parts.push('Scores could not be compared.');
+  else if (scoreDelta > 0) parts.push(`Score up ${scoreDelta} to ${scoreAfter}.`);
+  else if (scoreDelta < 0) parts.push(`Score down ${-scoreDelta} to ${scoreAfter}.`);
+  else parts.push(`Score unchanged at ${scoreAfter}.`);
+
+  if (before.grade && after.grade && before.grade !== after.grade) {
+    parts.push(`${before.grade} → ${after.grade}.`);
+  }
+  if (resolved.length) parts.push(`Resolved: ${resolved.join(', ')}.`);
+  if (appeared.length) parts.push(`New: ${appeared.join(', ')}.`);
+  if (worsened.length) parts.push(`Worse: ${worsened.join(', ')}.`);
+  if (!resolved.length && !appeared.length && !worsened.length) {
+    parts.push('No check changed band.');
+  }
+
+  return {
+    score: { before: scoreBefore, after: scoreAfter, delta: scoreDelta },
+    grade: { before: before.grade || null, after: after.grade || null, changed: before.grade !== after.grade },
+    checks,
+    measurements,
+    caveats,
+    headline: parts.join(' '),
+    labels: {
+      before: describeRun(before),
+      after: describeRun(after),
+    },
+  };
+}
+
+function describeRun(run) {
+  const when = run.timestamp ? String(run.timestamp).slice(0, 16).replace('T', ' ') : 'unknown time';
+  const session = run.session ? ` · ${run.session}` : '';
+  const material = run.material ? ` · ${run.material}` : '';
+  return `${when}${session}${material}`;
+}
+
 /* ==== export/json.js ================================================ */
 /*
  * JSON export — the machine-readable counterpart to the PDF.
@@ -7356,6 +7583,7 @@ const runtime = {
   interface: null,             // two-shot interface measurement
   dfm: null,                   // { input, result }
   shot: null,                  // shot weight / clamp force estimate
+  comparison: null,            // diff against a previously exported run
   twoShot: null,               // two-shot check result
 
   gateLocation: null,          // [x, y, z] in mesh-local coordinates
@@ -7445,6 +7673,7 @@ function resetRuntime() {
   runtime.interface = null;
   runtime.dfm = null;
   runtime.shot = null;
+  runtime.comparison = null;
   runtime.twoShot = null;
   runtime.gateLocation = null;
   runtime.gateSuggestion = null;
@@ -8027,6 +8256,77 @@ function renderShot(shot) {
   replaceChildren($('shotBody'), nodes);
 }
 
+/*
+ * Revision comparison.
+ *
+ * The score answers whether the part is manufacturable; this answers whether it
+ * got better, which is the question on every pass after the first. Changes that
+ * crossed a severity band come first, because those are the ones that moved the
+ * number — but a measurement improving inside its band is shown too, since that
+ * is what progress looks like before it shows up in the score.
+ */
+const CHANGE_LABEL = {
+  worsened: 'worse', improved: 'better', added: 'new check',
+  removed: 'not run', unchanged: 'unchanged',
+};
+
+function renderComparison(diff) {
+  const section = $('compareSection');
+  if (!diff) { section.style.display = 'none'; return; }
+  section.style.display = '';
+
+  const nodes = [];
+
+  const delta = diff.score.delta;
+  const arrow = delta === null ? '' : delta > 0 ? '▲' : delta < 0 ? '▼' : '=';
+  const tone = delta === null ? 'flat' : delta > 0 ? 'better' : delta < 0 ? 'worse' : 'flat';
+  nodes.push(el('div', { class: `cmp-head ${tone}` }, [
+    el('span', { class: 'cmp-arrow', 'aria-hidden': 'true', text: arrow }),
+    el('span', {
+      class: 'cmp-score',
+      text: delta === null ? '—' : `${diff.score.before} → ${diff.score.after}`,
+    }),
+    el('span', { class: 'cmp-headline', text: diff.headline }),
+  ]));
+
+  nodes.push(el('div', { class: 'cmp-runs', text: `was: ${diff.labels.before}   ·   now: ${diff.labels.after}` }));
+
+  for (const caveat of diff.caveats) {
+    nodes.push(el('div', { class: 'cmp-caveat', text: caveat }));
+  }
+
+  const moved = diff.checks.filter((c) => c.change !== 'unchanged');
+  if (moved.length) {
+    nodes.push(el('div', { class: 'cmp-list' }, moved.map((c) => el('div', { class: `cmp-row ${c.change}` }, [
+      el('span', { class: 'cmp-row-name', text: c.name }),
+      el('span', { class: 'cmp-row-change', text: CHANGE_LABEL[c.change] || c.change }),
+      el('span', {
+        class: 'cmp-row-detail',
+        text: (c.severityBefore && c.severityAfter)
+          ? `${c.severityBefore} → ${c.severityAfter}`
+          : (c.severityAfter || c.severityBefore || ''),
+      }),
+    ]))));
+  }
+
+  const movedMetrics = diff.measurements.filter((m) => m.direction !== 'flat' && m.delta !== null);
+  if (movedMetrics.length) {
+    nodes.push(el('div', { class: 'cmp-list' }, movedMetrics.map((m) => el('div', { class: `cmp-row ${m.direction}` }, [
+      el('span', { class: 'cmp-row-name', text: m.label }),
+      el('span', {
+        class: 'cmp-row-change',
+        text: `${m.before.toFixed(m.dp)} → ${m.after.toFixed(m.dp)} ${m.unit}`,
+      }),
+      el('span', {
+        class: 'cmp-row-detail',
+        text: `${m.delta > 0 ? '+' : ''}${m.delta.toFixed(m.dp)}`,
+      }),
+    ]))));
+  }
+
+  replaceChildren($('compareBody'), nodes);
+}
+
 function renderResults(result, analysis) {
   $('resultsEmpty').style.display = 'none';
   $('resultsContent').style.display = '';
@@ -8141,6 +8441,7 @@ function clearResults() {
   $('resultsEmpty').style.display = '';
   $('resultsContent').style.display = 'none';
   renderShot(null);
+  renderComparison(null);
   hideTwoShotResults();
   replaceChildren($('checksList'), []);
   replaceChildren($('scoreBars'), []);
@@ -8623,6 +8924,11 @@ async function doRunAnalysis() {
       : null;
     renderShot(runtime.shot);
 
+    /* The comparison on screen was against the previous run's numbers, which
+       these have just replaced. */
+    runtime.comparison = null;
+    renderComparison(null);
+
     panel.setFromMeshBadge(!!runtime.analysis);
     panel.updatePartSummary();
 
@@ -8674,9 +8980,9 @@ async function doRunAnalysis() {
 
 /* ══ exports ═════════════════════════════════════════════════════════════ */
 
-function doExportJSON() {
-  if (!runtime.dfm) return;
-  const data = buildExportJSON({
+function currentRecord() {
+  if (!runtime.dfm) return null;
+  return buildExportJSON({
     sessionId: runtime.sessionId,
     dfm: runtime.dfm,
     analysis: runtime.analysis,
@@ -8686,7 +8992,38 @@ function doExportJSON() {
     shot: runtime.shot,
     settings,
   });
+}
+
+function doExportJSON() {
+  const data = currentRecord();
+  if (!data) return;
   downloadJSON(data, `dfm_${runtime.sessionId}_${Date.now()}.json`);
+}
+
+/*
+ * Compare this run against a previously exported JSON.
+ *
+ * Reading a file rather than keeping history in the page: a revision comparison
+ * is usually against something from last week, on someone else's machine, and
+ * the export already carries everything the diff needs.
+ */
+async function doCompare(file) {
+  const current = currentRecord();
+  if (!current) { toast('Run an analysis first, then compare it against a previous export.', 'warn'); return; }
+  try {
+    const text = await file.text();
+    const previous = JSON.parse(text);
+    if (!previous || typeof previous.score !== 'number' || !Array.isArray(previous.checks)) {
+      throw new Error('that file does not look like a DFM JSON export');
+    }
+    runtime.comparison = compareRuns(previous, current);
+    renderComparison(runtime.comparison);
+    toast(runtime.comparison.headline, 'info', 8000);
+    setStatus('COMPARED');
+  } catch (err) {
+    console.error(err);
+    toast(`Could not compare: ${err.message}`, 'error');
+  }
 }
 
 async function doExportPDF() {
@@ -8872,6 +9209,11 @@ function boot() {
   $('runBtn').addEventListener('click', doRunAnalysis);
   $('resetBtn').addEventListener('click', startOver);
   $('jsonBtn').addEventListener('click', doExportJSON);
+  $('compareBtn').addEventListener('click', () => $('compareInput').click());
+  $('compareInput').addEventListener('change', (e) => {
+    if (e.target.files.length) doCompare(e.target.files[0]);
+    e.target.value = ''; // allow re-selecting the same file
+  });
   $('pdfBtn').addEventListener('click', doExportPDF);
 
   wireKeyboard();
