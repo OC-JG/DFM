@@ -3,7 +3,7 @@ import { computeBounds } from '../geometry/weld.js';
 import { stats, resolvePullDir, makeRandom } from './stats.js';
 import { clusterUndercuts } from './undercuts.js';
 import { detectWallTransitions } from './transitions.js';
-import { computeFlowLengths } from './flow.js';
+import { computeFlowLengths, searchGateCandidates, buildAdjacency } from './flow.js';
 
 /*
  * Mesh analysis: per-triangle draft, wall thickness, sink risk, undercuts,
@@ -324,8 +324,25 @@ export function analyseMesh(geom, opts = {}) {
     : [];
 
   if (onProgress) onProgress(0.99, 'Computing flow lengths');
+  /* One adjacency graph, shared by the gate the user picked and by any search
+     for a better one. */
+  let flowGraph = null;
+  const graph = () => (flowGraph || (flowGraph = buildAdjacency(geom.indices, triCount, geom.vertCount)));
+
   const flowAnalysis = (gateLocation && Array.isArray(gateLocation))
-    ? computeFlowLengths(geom, gateLocation, triCentroid, triThickness, triCount, material.ltMax, triAreas)
+    ? computeFlowLengths(geom, gateLocation, triCentroid, triThickness, triCount, material.ltMax, triAreas, graph())
+    : null;
+
+  /* With no gate picked the flow check has nothing to say, which is a waste:
+     the solver is right here and the part is already measured. Searching a
+     spread of positions turns "pick a gate" into "here is where to put it". */
+  const gateSuggestion = (!flowAnalysis && opts.suggestGate !== false && wallStats.n > 10)
+    ? searchGateCandidates({
+      geom, triCentroid, triThickness, triAreas, triFaceSide, triCount,
+      ltMax: material.ltMax,
+      candidateCount: opts.gateCandidates || defaultGateCandidates(geom.vertCount),
+      adjacency: graph(),
+    })
     : null;
 
   return {
@@ -351,7 +368,7 @@ export function analyseMesh(geom, opts = {}) {
     sinkPctSevere: sinkDenom > 0 ? (sinkAreaSevere / sinkDenom) * 100 : 0,
 
     slideArea, lifterArea, undercutRegions,
-    wallTransitions, flowAnalysis,
+    wallTransitions, flowAnalysis, gateSuggestion,
 
     bvh,
     nominalWall,
@@ -498,6 +515,22 @@ function sphereThicknessAt(bvh, geom, t, cx, cy, cz, nx, ny, nz, eps, diag, axia
     if (bound < best) best = bound;
   }
   return best;
+}
+
+/*
+ * How many gate positions to try, given the size of the mesh.
+ *
+ * The search is one Dijkstra sweep per candidate, so its cost is linear in both
+ * the candidate count and the vertex count: twelve candidates on a 48k-vertex
+ * part costs about half a second. Holding that roughly flat as parts get larger
+ * means trying fewer positions on them, which is the right trade — a coarser
+ * search still answers the question that matters, which is whether gate
+ * position is worth thinking about on this part at all.
+ */
+function defaultGateCandidates(vertCount) {
+  if (vertCount > 250000) return 6;
+  if (vertCount > 100000) return 8;
+  return 12;
 }
 
 /* Grid resolution for the silhouette pass, per axis. 256² is 65k rays — the

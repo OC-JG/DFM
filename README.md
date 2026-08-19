@@ -257,6 +257,24 @@ The ray figure still drives the rules. Switching the thresholds onto the sphere
 figure would change the meaning of every historical score and is a decision for
 whoever owns the calibration.
 
+## Where to put the gate
+
+Flow length, and therefore the short-shot prediction, depends entirely on where
+the gate is. On a 200 × 20 × 2 mm bar two plausible gate positions differ by
+1.87× in worst-case L/T — the difference between "fills comfortably" and a
+warning — so leaving that to wherever someone happened to click made the most
+consequential input the least informed one.
+
+Run an analysis without a gate and the tool searches instead of asking. It tries
+a spread of positions across the part's outer surface — the inner faces of a
+cavity are not somewhere a sprue can reach — and ranks them by worst-case L/T,
+then by how much of the part sits over the limit. The flow check reports the best
+position and how much the choice matters, and **Use best** places it.
+
+Placing the suggestion reproduces the L/T the search promised; the tests assert
+that. The search only runs when there is no gate, so it costs nothing once one is
+set, and it tries fewer positions on very large meshes to keep the cost bounded.
+
 ## Moulding estimates
 
 Alongside the manufacturability checks the report carries what it takes to make

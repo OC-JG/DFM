@@ -382,13 +382,36 @@ export function runDFM(input) {
     const fa = mesh && mesh.flowAnalysis;
 
     if (!fa) {
+      /* Nothing has been measured, so nothing can be deducted: this used to
+         emit 'warn', which cost every part 4.5 points for a button the user had
+         not pressed yet. But the solver is sitting right here and the part is
+         already measured, so rather than only prompting, say where the gate
+         should go. */
+      const gs = mesh && mesh.gateSuggestion;
+      let detail = 'No gate location set, so flow length has not been computed. Nothing is deducted for this — the check simply has not run.';
+      const metrics = [['L/T limit', `${m.ltMax}`], ['Max L/T', '—'], ['Area over limit', '—']];
+
+      if (gs && gs.best) {
+        const b = gs.best, w = gs.worst;
+        const spread = b.maxLT > 0 ? w.maxLT / b.maxLT : 1;
+        detail += ` Of ${gs.considered} candidate positions tried across the part's outer surface, the best is (${b.point.map((v) => v.toFixed(1)).join(', ')}), giving a worst-case L/T of ${b.maxLT.toFixed(0)} against the ${m.ltMax} limit for ${m.name}`;
+        detail += b.maxLT > m.ltMax
+          ? ' — still over the limit, so this part needs a thicker wall or a second gate whatever the gate position.'
+          : '.';
+        if (spread > 1.15) {
+          detail += ` The worst candidate gives ${w.maxLT.toFixed(0)}, so gate position alone moves this by ${spread.toFixed(1)}×.`;
+        }
+        detail += ' Press "Use best" to place it, or pick your own.';
+        metrics.push(['Best candidate L/T', `${b.maxLT.toFixed(0)}`]);
+        metrics.push(['Best gate', `(${b.point.map((v) => v.toFixed(0)).join(', ')})`]);
+        metrics.push(['Positions tried', `${gs.considered}`]);
+      } else {
+        detail += ' Click "Pick gate" to place one.';
+      }
+
       checks.push({
-        /* Not a finding about the part. Nothing has been measured, so nothing
-           can be deducted: this used to emit 'warn', which cost every part
-           4.5 points for a button the user had not pressed yet. */
         key: 'flow', name: 'Flow length (L/T)', status: 'info', severity: 'none',
-        detail: 'No gate location set. Click "Pick gate on part" to enable flow-length analysis (predicts short-shot risk). Nothing is deducted for this — the check simply has not run.',
-        metrics: [['L/T limit', `${m.ltMax}`], ['Max L/T', '—'], ['Area over limit', '—']],
+        detail, metrics,
       });
     } else {
       /* Overmoulding an FPC forces lower injection pressure and velocity so

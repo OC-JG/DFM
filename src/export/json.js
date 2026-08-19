@@ -149,6 +149,25 @@ function meshSummary(a) {
       area_over_limit_pct: a.flowAnalysis.pctOverLT,
       weld_line_candidates: a.flowAnalysis.weldCandidates,
     } : null,
+    /* Where the gate should go, when none was picked. The flow figures above
+       are hostage to gate position, so a record without this is missing the
+       most consequential input to them. */
+    gate_search: a.gateSuggestion ? {
+      positions_tried: a.gateSuggestion.considered,
+      eligible_faces: a.gateSuggestion.eligible,
+      best: {
+        point: a.gateSuggestion.best.point,
+        max_lt: a.gateSuggestion.best.maxLT,
+        max_flow_mm: a.gateSuggestion.best.maxFlow,
+        area_over_limit_pct: a.gateSuggestion.best.pctOverLT,
+      },
+      candidates: a.gateSuggestion.candidates.map((c) => ({
+        point: c.point,
+        max_lt: c.maxLT,
+        max_flow_mm: c.maxFlow,
+        area_over_limit_pct: c.pctOverLT,
+      })),
+    } : null,
     wall_transitions: (a.wallTransitions || []).slice(0, 50),
     undercut_regions: (a.undercutRegions || []).filter((r) => r.area > 1).map((r) => ({
       type: r.type === 1 ? 'slide' : 'lifter',

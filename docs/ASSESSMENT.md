@@ -698,9 +698,48 @@ from. **This is the one question worth waking up to:** are those `coolK` values
 full-wall or half-wall? One sentence unlocks cycle time, and with it the cost
 model that makes the rest of Phase 3 worth building.
 
+**Item 15 done — the gate is searched for, not guessed at.**
+
+The flow check was only ever as good as the gate it was handed, and the gate came
+from wherever the user happened to click. On a 200 × 20 × 2 mm bar, two clicks
+can differ by **1.87× in worst-case L/T** — the difference between comfortable
+and a short-shot warning — and nothing in the tool indicated which was which. So
+the single most consequential input was also the least informed one.
+
+The solver now runs against a spread of candidate positions and ranks them by the
+same measure the check uses. On that bar it picks x = 100.7 of 0–200: the middle,
+which is the unarguable answer. Placing the suggestion reproduces the L/T the
+search promised, which the tests assert.
+
+Three details worth recording:
+
+- **Candidates come from outward-facing triangles only.** A gate has to be
+  reachable by a sprue, and the inner faces of a cavity are not — which
+  `triFaceSide` already knew, another thing the analysis computes and nothing
+  read.
+- **They are spread by farthest-point sampling**, not taken at random: a random
+  dozen points on a long part cluster and miss the ends, and the ends are where
+  gating decisions get made. Below-median-area faces are dropped first, because
+  sampling knows nothing about triangle size and half the candidates were landing
+  on the 2 mm sliver down the edge of the bar rather than on the broad faces.
+- **Not ranked on thickness at the gate**, tempting though it is. A part should
+  fill from its thickest section outward, but the ray reading at an arbitrary
+  face is not that thickness — on the side face of a 2 mm bar it reads the 20 mm
+  width. Ranking is worst-case L/T, then area over the limit, then flow length.
+
+The adjacency graph is built once and reused across candidates; rebuilding it per
+candidate would dominate. The search only runs when no gate was set, so it costs
+nothing once one is, and the candidate count scales down on very large meshes to
+hold the cost roughly flat.
+
+The check that used to be a dead prompt now reads: *"Of 12 candidate positions
+tried across the part's outer surface, the best is (40.0, 20.0, 6.7), giving a
+worst-case L/T of 24 against the 180 limit for ABS. The worst candidate gives 41,
+so gate position alone moves this by 1.7×."*
+
 ### Costs
 
-Everything above costs 30% of a run: 1103 ms to 1438 ms on a 96k-triangle part,
+Everything above costs about 30% of a run: 1103 ms to 1438 ms on a 96k-triangle part,
 measured against the original. Welding is ~20% slower on the common path, once,
 at load. The sphere-fit thickness pass, the projected-area raster and the
 randomised heat sampling account for the rest. All of it is inside the worker,
@@ -714,13 +753,9 @@ should be detectable in a two-piece tool, and the misclassification of internal
 ledges as slides), and whether the wall thresholds should move onto the
 sphere-fit figure rather than the ray one. None is a coding decision.
 
-**The rest of Phase 3**: the gate optimiser (the flow solver already exists and
-already runs fast, so ranking N candidate gate points by max L/T and by where
-the weld lines land is mostly wiring — and it removes the largest arbitrary
-input in the tool, since the flow verdict currently depends on where the user
-happened to click), corner radii from the STEP `faceGroups` the parser already
-extracts and discards, and revision comparison. Cycle time as soon as the
-`coolK` question is answered.
+**The rest of Phase 3**: corner radii from the STEP `faceGroups` the parser
+already extracts and discards, and revision comparison. Cycle time as soon as
+the `coolK` question is answered.
 
 Also outstanding and small: `bossOD` is still collected, persisted and printed
 in the PDF without any rule reading it, and `suggestPullDirection` still scores

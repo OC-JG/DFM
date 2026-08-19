@@ -74,6 +74,7 @@ export const runtime = {
   twoShot: null,               // two-shot check result
 
   gateLocation: null,          // [x, y, z] in mesh-local coordinates
+  gateSuggestion: null,        // best searched gate positions for this geometry
   pullDir: { mode: 'axis', value: '+z', vec: [0, 0, 1] },
   heatMode: 'flat',
   materialChosen: false,       // drives the onboarding stepper
@@ -161,6 +162,7 @@ export function resetRuntime() {
   runtime.shot = null;
   runtime.twoShot = null;
   runtime.gateLocation = null;
+  runtime.gateSuggestion = null;
   runtime.pullDir = { mode: 'axis', value: '+z', vec: [0, 0, 1] };
   runtime.heatMode = 'flat';
   runtime.materialChosen = false;

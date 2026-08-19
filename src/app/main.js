@@ -63,6 +63,8 @@ function installGeometry(geom, file) {
   runtime.geom1 = geom;
   runtime.validation = validateGeometry(geom);
   runtime.gateLocation = null;
+  /* Positions were searched on the old geometry and mean nothing on this one. */
+  runtime.gateSuggestion = null;
   viewer.clearGateMarker();
 
   runtime.bodies = viewer.loadGeometry(geom);
@@ -279,6 +281,7 @@ function onViewerPick(kind, data) {
     const [x, y, z] = data.local;
     $('gateInfo').innerHTML =
       `Gate set at <b>(${x.toFixed(1)}, ${y.toFixed(1)}, ${z.toFixed(1)})</b>. Re-run analysis to compute flow length.`;
+    refreshGateSuggestion();
   }
   viewer.setPickMode(null);
   refreshPickButtons();
@@ -289,6 +292,38 @@ function clearGate() {
   viewer.clearGateMarker();
   $('gateInfo').innerHTML =
     'Click <b>Pick gate</b>, then click any point on the 3D part. A red dot will mark the gate. Required for flow length (L/T) check.';
+  refreshGateSuggestion();
+}
+
+/*
+ * Offer the searched-for gate position, if there is one.
+ *
+ * The search only runs when no gate was set, so the button is live exactly
+ * when it is useful: after an analysis that had nothing to compute flow from.
+ */
+function refreshGateSuggestion() {
+  const btn = $('suggestGateBtn');
+  if (!btn) return;
+  const suggestion = runtime.gateSuggestion;
+  const available = !!(suggestion && suggestion.best && !runtime.gateLocation);
+  btn.disabled = !available;
+  btn.title = available
+    ? `Place the gate at the best of ${suggestion.considered} positions tried (worst-case L/T ${suggestion.best.maxLT.toFixed(0)})`
+    : 'Run an analysis without a gate to search for the best position';
+}
+
+function useSuggestedGate() {
+  const suggestion = runtime.gateSuggestion;
+  if (!suggestion || !suggestion.best) return;
+  const local = suggestion.best.point;
+  runtime.gateLocation = local;
+  const world = viewer.localToWorld(local);
+  if (world) viewer.setGateMarker(world, computeBounds(runtime.geom1.vertices).diag);
+  $('gateInfo').innerHTML =
+    `Gate placed at the best of ${suggestion.considered} searched positions: <b>(${local.map((v) => v.toFixed(1)).join(', ')})</b>, `
+    + `worst-case L/T <b>${suggestion.best.maxLT.toFixed(0)}</b>. Re-run analysis to score it.`;
+  refreshGateSuggestion();
+  setStatus('GATE PLACED');
 }
 
 /* ══ heat modes ══════════════════════════════════════════════════════════ */
@@ -470,6 +505,14 @@ async function doRunAnalysis() {
       hideTwoShotResults();
     }
 
+    /* The search only runs when there was no gate to compute flow from, so keep
+       the last one it produced: it stays valid for as long as the geometry does,
+       and clearing a gate should re-offer it rather than demand another run. */
+    if (runtime.analysis && runtime.analysis.gateSuggestion) {
+      runtime.gateSuggestion = runtime.analysis.gateSuggestion;
+    }
+    refreshGateSuggestion();
+
     /* Keep the current heat mode meaningful across re-runs. */
     refreshHeatAvailability();
     if (runtime.heatMode !== 'flat' && runtime.analysis) setHeatMode(runtime.heatMode);
@@ -551,6 +594,7 @@ function startOver() {
   refreshEverything();
   refreshPickButtons();
   clearGate();
+  refreshGateSuggestion();
   setHeatMode('flat');
   refreshHeatAvailability();
   $('viewerEmpty').style.display = '';
@@ -665,6 +709,7 @@ function boot() {
   $('pickFaceBtn').addEventListener('click', () => togglePick('face'));
   $('pickGateBtn').addEventListener('click', () => togglePick('gate'));
   $('clearGateBtn').addEventListener('click', clearGate);
+  $('suggestGateBtn').addEventListener('click', useSuggestedGate);
   $('autoPullBtn').addEventListener('click', () => {
     if (!runtime.geom1) { toast('Load a part first.', 'warn'); return; }
     autoSuggestPull();

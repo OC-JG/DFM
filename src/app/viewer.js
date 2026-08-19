@@ -293,6 +293,16 @@ export function setView(view) {
 
 // ── markers ────────────────────────────────────────────────────────────────
 
+/* Mesh-vertex coordinates to world space. The analysis works in vertex
+   coordinates; the scene has the part centred and scaled, so a point that came
+   out of the analyser needs converting before it can be drawn. */
+export function localToWorld(localPoint) {
+  if (!mesh) return null;
+  const v = new THREE.Vector3(localPoint[0], localPoint[1], localPoint[2]);
+  mesh.updateMatrixWorld();
+  return mesh.localToWorld(v);
+}
+
 export function clearGateMarker() {
   if (!scene) return;
 

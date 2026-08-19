@@ -25,6 +25,7 @@ import {
 } from '../src/rules/scoring.js';
 import { buildExportJSON } from '../src/export/json.js';
 import { estimateShot, nextMachineSize, CAVITY_PRESSURE_MPA } from '../src/analysis/shot.js';
+import { searchGateCandidates, computeFlowLengths, buildAdjacency, geodesicFrom } from '../src/analysis/flow.js';
 import { effectiveMinDraft } from '../src/core/finishes.js';
 import { MATERIALS } from '../src/core/materials.js';
 
@@ -888,6 +889,117 @@ describe('moulding estimates');
     within(e.volumeCm3, 13.116, 1, 'volume:');
     within(e.massG, 13.116 * MATERIALS.abs.density, 1, 'mass:');
     assert(e.machineTonnes > 0, 'no machine size');
+  });
+}
+
+
+describe('gate placement — searching instead of guessing');
+{
+  /* A 200 × 20 × 2 bar: gate position genuinely decides whether it fills, and
+     the right answer is unarguable — the middle, because flow length from the
+     gate to the far end is what sets L/T. */
+  function bar(len = 200, wide = 20, thick = 2, n = 100) {
+    const out = [];
+    const seg = len / n;
+    for (let i = 0; i < n; i++) {
+      const x0 = i * seg, x1 = (i + 1) * seg;
+      S.quad(out, [x0, 0, thick], [x1, 0, thick], [x1, wide, thick], [x0, wide, thick]);
+      S.quad(out, [x0, 0, 0], [x0, wide, 0], [x1, wide, 0], [x1, 0, 0]);
+      S.quad(out, [x0, 0, 0], [x1, 0, 0], [x1, 0, thick], [x0, 0, thick]);
+      S.quad(out, [x0, wide, 0], [x0, wide, thick], [x1, wide, thick], [x1, wide, 0]);
+    }
+    S.quad(out, [0, 0, 0], [0, 0, thick], [0, wide, thick], [0, wide, 0]);
+    S.quad(out, [len, 0, 0], [len, wide, 0], [len, wide, thick], [len, 0, thick]);
+    return S.toSoup(out);
+  }
+
+  const geom = weld(bar());
+  const m = analyse(geom);
+
+  it('runs when no gate was given, and not when one was', () => {
+    assert(m.gateSuggestion, 'no suggestion produced for a part with no gate');
+    assert(m.gateSuggestion.best, 'suggestion has no best candidate');
+    const withGate = analyse(geom, { gateLocation: [100, 10, 2] });
+    eq(withGate.gateSuggestion, null, 'searching is wasted once a gate is set:');
+    assert(withGate.flowAnalysis, 'a set gate should produce a flow analysis');
+  });
+
+  it('picks the middle of a bar', () => {
+    /* Anywhere in the middle third is a defensible answer; an end is not. */
+    const x = m.gateSuggestion.best.point[0];
+    assert(x > 66 && x < 134, `best gate at x=${x.toFixed(1)} is not in the middle third of a 0–200 bar`);
+  });
+
+  it('ranks every candidate above the one it beat', () => {
+    const c = m.gateSuggestion.candidates;
+    assert(c.length >= 8, `only ${c.length} candidates`);
+    for (let i = 1; i < c.length; i++) {
+      assert(c[i].maxLT >= c[i - 1].maxLT - 1e-9,
+        `candidate ${i} (L/T ${c[i].maxLT}) ranked below ${i - 1} (L/T ${c[i - 1].maxLT})`);
+    }
+    eq(c[0], m.gateSuggestion.best, 'best is not the first candidate');
+  });
+
+  it('shows that the choice matters', () => {
+    const { best, worst } = m.gateSuggestion;
+    assert(worst.maxLT / best.maxLT > 1.5,
+      `on a 200 mm bar the gate should matter a lot; got only ${(worst.maxLT / best.maxLT).toFixed(2)}×`);
+  });
+
+  it('agrees with the flow solver it will hand over to', () => {
+    /* The suggestion is only useful if actually placing the gate there
+       reproduces the L/T the search promised. */
+    const promised = m.gateSuggestion.best;
+    const actual = analyse(geom, { gateLocation: promised.point }).flowAnalysis;
+    within(actual.maxLT, promised.maxLT, 0.1, 'L/T at the suggested gate:');
+    within(actual.maxFlow, promised.maxFlow, 0.1, 'flow length at the suggested gate:');
+  });
+
+  it('only offers positions a sprue could reach', () => {
+    /* Candidates come from outward-facing triangles: the inside of a cavity is
+       not somewhere a gate can go. */
+    const shell = weld(S.hollowFrustum(20, 30, 3, 2));
+    const sm = analyse(shell);
+    assert(sm.gateSuggestion, 'no suggestion for the shell');
+    for (const c of sm.gateSuggestion.candidates) {
+      eq(sm.triFaceSide[c.triangle], 0, `candidate on triangle ${c.triangle} is an inner face:`);
+    }
+  });
+
+  it('is reproducible', () => {
+    const a = analyse(geom).gateSuggestion.best;
+    const b = analyse(geom).gateSuggestion.best;
+    eq(a.triangle, b.triangle, 'chosen triangle across runs:');
+    eq(a.maxLT, b.maxLT, 'L/T across runs:');
+  });
+
+  it('reuses one adjacency graph across candidates', () => {
+    /* Rebuilding the graph per candidate would dominate the cost, so the graph
+       is passed in. Verified by checking that a prebuilt graph gives the same
+       answer as letting each call build its own. */
+    const graph = buildAdjacency(geom.indices, geom.triCount, geom.vertCount);
+    const shared = searchGateCandidates({
+      geom, triCentroid: m.triCentroid, triThickness: m.triThickness, triAreas: m.triAreas,
+      triFaceSide: m.triFaceSide, triCount: m.triCount, ltMax: 180, adjacency: graph,
+    });
+    const own = searchGateCandidates({
+      geom, triCentroid: m.triCentroid, triThickness: m.triThickness, triAreas: m.triAreas,
+      triFaceSide: m.triFaceSide, triCount: m.triCount, ltMax: 180,
+    });
+    eq(shared.best.triangle, own.best.triangle);
+    within(shared.best.maxLT, own.best.maxLT, 0.001, 'L/T:');
+  });
+
+  it('geodesic distance is zero at the source and rises away from it', () => {
+    const graph = buildAdjacency(geom.indices, geom.triCount, geom.vertCount);
+    const dist = geodesicFrom(geom.vertices, geom.vertCount, graph, 0);
+    eq(dist[0], 0, 'distance to the source:');
+    let reached = 0, maxD = 0;
+    for (let v = 0; v < geom.vertCount; v++) {
+      if (isFinite(dist[v])) { reached++; maxD = Math.max(maxD, dist[v]); }
+    }
+    eq(reached, geom.vertCount, 'a closed mesh must be fully reachable:');
+    assert(maxD > 100, `a 200 mm bar should have paths over 100 mm, got ${maxD.toFixed(1)}`);
   });
 }
 

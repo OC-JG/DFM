@@ -131,6 +131,27 @@ async function main() {
     check('projected area reported', /12\.0\s*cm²/.test(shotText), shotText.slice(0, 200));
     check('machine size reported', /Machine size\s*\d+\s*t/.test(shotText), shotText.slice(0, 220));
 
+    // ── gate suggestion ───────────────────────────────────────────────────
+    // With no gate set the flow check has nothing to compute, so it searches
+    // for where the gate should go instead of only asking for one.
+    const flowInfo = await page.locator('#checksList .check', { hasText: 'Flow length' }).first().textContent();
+    check('flow check reports a searched gate position', /candidate positions tried/.test(flowInfo), flowInfo.slice(0, 200));
+    check('best-candidate L/T reported', /Best candidate L\/T/.test(flowInfo), flowInfo.slice(0, 260));
+    check('use-best button enabled', !(await page.locator('#suggestGateBtn').isDisabled()));
+
+    await page.click('#suggestGateBtn');
+    check('suggested gate placed', (await page.textContent('#gateInfo')).includes('best of'),
+      await page.textContent('#gateInfo'));
+    check('use-best button retires once a gate is set', await page.locator('#suggestGateBtn').isDisabled());
+
+    await page.click('#runBtn');
+    await page.waitForFunction(() => document.getElementById('resultStatus').textContent === 'complete', null, { timeout: 60000 });
+    const suggestedFlow = await page.locator('#checksList .check', { hasText: 'Flow length' }).first().textContent();
+    check('the suggested gate produces a real L/T', /Max L\/T = \d+/.test(suggestedFlow), suggestedFlow.slice(0, 160));
+
+    await page.click('#clearGateBtn');
+    check('clearing the gate re-offers the suggestion', !(await page.locator('#suggestGateBtn').isDisabled()));
+
     // ── heat modes ────────────────────────────────────────────────────────
     for (const mode of ['draft', 'thickness', 'sink', 'undercut']) {
       await page.click(`.heat-btn[data-heat="${mode}"]`);
