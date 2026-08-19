@@ -31,9 +31,17 @@ node build.js          # writes dfm-tool.html
 No dependencies, no install step. The bundler is ~150 lines in `build.js`.
 
 ```sh
-npm install            # only needed for the test
-npm test               # build + fixtures + browser smoke test
+npm install            # only needed for the tests
+npm test               # build + unit tests + fixtures + browser smoke test
+npm run test:unit      # just the unit tests: no browser, no network, sub-second
 ```
+
+`test/unit.mjs` asserts numbers. Every fixture it uses has a known answer —
+analytic where the geometry gives one (a 2 mm hollow cylinder measures 2 mm, a
+3° frustum reads 3.000°), and otherwise checked against an independent
+brute-force implementation in `test/lib/reference.mjs` written from the
+definition rather than from the code under test. It imports the pure modules
+straight into Node, which is what the one-way dependency direction below buys.
 
 The smoke test drives a real Chromium through the whole pipeline — load,
 analyse, heatmaps, gate picking, two-shot, both exports, persistence, reset,
@@ -49,13 +57,15 @@ src/
   index.html           markup, with slots the build fills
   styles/app.css
   core/                material, finish and adhesion data
-  geometry/            STL + STEP parsing, vertex welding, BVH
+  geometry/            STL + STEP parsing, vertex welding, validation, BVH
   analysis/            mesh measurement, flow, undercuts, transitions
   rules/               DFM rule engine, two-shot rules, FMEA scoring
   worker/              off-thread analysis entry point
   app/                 viewer, camera, panels, state, wiring
   export/              PDF and JSON
-test/                  fixture generator + smoke test
+test/                  fixture generator, unit tests, browser smoke test
+  lib/shapes.mjs       analytic fixtures with known answers
+  lib/reference.mjs    slow, independent reference implementations
 legacy/                the original single-file v1, kept for reference
 ```
 
@@ -177,6 +187,66 @@ space each block needs, replacing a repeated `if (y > 260)` with a different
 threshold at each call site.
 
 ---
+
+## How the score works
+
+Each check owns a **weight** — how much that kind of problem is worth at worst —
+and each rule returns a **severity**: `minor`, `major` or `critical`, spending a
+quarter, a half or all of that weight. Nothing else moves the number. The eight
+checks that run by default sum to 100, so a part with no findings scores exactly
+100, and the score is normalised over the checks that actually ran, so enabling
+the FPC or wall-transition checks widens the exposure rather than making 0
+unreachable.
+
+Two things the score deliberately will not do:
+
+- **Advisories cost nothing.** Not having picked a gate yet is not a defect in
+  the part. Neither is the corner-radius reminder, which has no way to measure a
+  radius from an STL. Both report as `info` and deduct zero.
+- **The grade cannot outrun the findings.** A single critical finding on a light
+  check leaves a score in the high eighties, and no part with a critical finding
+  is called PRODUCTION READY on the strength of where the arithmetic landed. The
+  band is the worse of what the score says and what the worst finding allows.
+
+The JSON export carries the severity, the weight and the deduction for every
+check, plus the total and the budget it came out of, so any figure on the page
+can be traced back to the rule that produced it.
+
+## Mesh health
+
+Everything downstream assumes a closed, consistently wound, millimetre-scale
+solid, so that gets checked when the file lands rather than assumed. An STL
+carries no units at all — an inch-authored part reads 25.4× small, and every
+threshold in this tool is in millimetres — and an open or inside-out mesh
+otherwise produces a full report with a confident number on the front of it.
+
+The panel under the drop zone reports unit plausibility, closure, manifold and
+winding consistency, inverted normals and degenerate triangles, and offers
+one-click rescale and normal-flip where those are the fix. Units are asked about
+rather than asserted: a part under 2 mm across is almost certainly mis-scaled,
+but one between 2 and 15 mm gets a question, because an 8 mm clip is a real
+thing. Only a surface with no interior is refused outright.
+
+Both exports carry the report, and the PDF puts it ahead of the measurements it
+qualifies.
+
+## Wall thickness, measured twice
+
+The wall is measured by casting a ray into the solid along the inward face
+normal. That is exact when the opposite face is parallel and overstates the wall
+when it is not — a wedge, a tapered boss, a rib meeting a wall at an angle — and
+overstating is the optimistic direction, which is the dangerous one for a sink
+or short-shot call.
+
+So a second estimate runs alongside it: the diameter of the largest sphere that
+fits inside the solid and touches the surface at that point, which is what a
+moulder means by "wall". Both medians are reported. They agree exactly on
+parallel walls; where they diverge by more than 15% the wall check says so,
+because that divergence is itself the finding.
+
+The ray figure still drives the rules. Switching the thresholds onto the sphere
+figure would change the meaning of every historical score and is a decision for
+whoever owns the calibration.
 
 ## Known constraints
 

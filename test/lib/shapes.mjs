@@ -211,3 +211,44 @@ export function boxWithFlippedFace(size = [40, 30, 20], face = 'pz') {
   }
   return toSoup(out);
 }
+
+/*
+ * Frustum shelled to a uniform wall: drafted side walls *and* a moulding-
+ * sensible wall thickness at the same time.
+ *
+ * The solid frustum is the natural draft fixture but it is 30 mm of solid
+ * plastic, so every wall-thickness rule fails on it. This is the shape needed
+ * to test that a part with nothing wrong with it scores full marks.
+ *
+ * The inner frustum keeps the same wall angle and steps in by `wall`, so the
+ * perpendicular wall is wall·cos(draft) — 0.14% under nominal at 3°, which is
+ * inside the tolerance any test here asserts to.
+ */
+export function hollowFrustum(baseHalf = 20, height = 30, draftDeg = 3, wall = 2) {
+  const t = Math.tan(draftDeg * Math.PI / 180);
+  const ring = (half, z) => [
+    [-half, -half, z], [half, -half, z], [half, half, z], [-half, half, z],
+  ];
+  const out = [];
+
+  const oB = ring(baseHalf, 0);
+  const oT = ring(baseHalf - t * height, height);
+  const iB = ring(baseHalf - wall, wall);
+  const iT = ring(baseHalf - wall - t * (height - 2 * wall), height - wall);
+
+  quad(out, oB[0], oB[3], oB[2], oB[1]);   // outer base, normal −Z
+  quad(out, oT[0], oT[1], oT[2], oT[3]);   // outer top, normal +Z
+  for (let i = 0; i < 4; i++) {
+    const j = (i + 1) % 4;
+    quad(out, oB[i], oB[j], oT[j], oT[i]); // outer walls
+  }
+
+  /* Cavity, wound so its normals face into the void. */
+  quad(out, iB[0], iB[1], iB[2], iB[3]);
+  quad(out, iT[0], iT[3], iT[2], iT[1]);
+  for (let i = 0; i < 4; i++) {
+    const j = (i + 1) % 4;
+    quad(out, iB[i], iT[i], iT[j], iB[j]);
+  }
+  return toSoup(out);
+}

@@ -197,7 +197,21 @@ export async function exportPDF({ sessionId, dfm, analysis, twoShot, validation,
   doc.setFontSize(9);
   doc.text(`Material: ${m.name}`, 70, cur.y + 25);
   doc.text(`Shrinkage: ${m.shrinkLo}–${m.shrinkHi}%   ·   Warp risk: ${m.warpRisk.toUpperCase()}`, 70, cur.y + 30);
-  cur.y += 44;
+  cur.y += 40;
+
+  /* State the arithmetic on the report itself. A bare index invites the reader
+     to treat it as a measurement; saying what it was out of, and how many
+     findings were critical, makes it a summary of the findings below. */
+  doc.setFontSize(7.5);
+  doc.setTextColor(90, 94, 92);
+  const criticals = r.criticalCount === 1 ? '1 critical finding' : `${r.criticalCount} critical findings`;
+  doc.text(
+    `${r.totalDeduction.toFixed(1)} points deducted from a ${r.budget}-point budget across ${r.checks.length} checks · `
+    + `${r.criticalCount ? criticals : 'no critical findings'} · a check spends a quarter of its weight on a minor `
+    + 'finding, half on a major, all of it on a critical',
+    MARGIN, cur.y);
+  doc.setTextColor(10, 14, 12);
+  cur.y += 8;
 
   // ── inputs ───────────────────────────────────────────────────────────────
   cur.heading('PART INPUTS');
@@ -325,6 +339,7 @@ export async function exportPDF({ sessionId, dfm, analysis, twoShot, validation,
     cur.heading('TWO-SHOT INTERFACE');
     cur.pairs([
       ['Interface score', `${twoShot.score} — ${twoShot.grade.label}`],
+      ['Interface basis', `−${twoShot.totalDeduction.toFixed(1)} of ${twoShot.budget} pts`],
       ['Shot 1 (substrate)', twoShot.mat1.name],
       ['Shot 2 (overmould)', twoShot.mat2.name],
       ['Window type', settings.windowType],

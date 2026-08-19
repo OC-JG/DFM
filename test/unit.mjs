@@ -17,6 +17,14 @@ import { castRay } from '../src/geometry/bvh.js';
 import { validateGeometry, rescaleGeometry, flipWinding } from '../src/geometry/validate.js';
 import { analyseMesh, CONE_RINGS_DEG, CONE_AZIMUTHS } from '../src/analysis/mesh.js';
 import { stats, medianCI95, makeRandom } from '../src/analysis/stats.js';
+import { runDFM } from '../src/rules/engine.js';
+import { runTwoShotDFM } from '../src/rules/twoshot.js';
+import {
+  CHECK_RISK_PROFILES, TWO_SHOT_RISK_PROFILES, SEVERITY_FACTOR,
+  scoreChecks, escalate, PART_GRADES, INTERFACE_GRADES,
+} from '../src/rules/scoring.js';
+import { buildExportJSON } from '../src/export/json.js';
+import { effectiveMinDraft } from '../src/core/finishes.js';
 import { MATERIALS } from '../src/core/materials.js';
 
 // ── harness ────────────────────────────────────────────────────────────────
@@ -403,6 +411,260 @@ describe('validation — units');
     eq(v.confidence, 'high');
     within(v.volume, validateGeometry(native).volume, 0.01, 'volume after rescale:');
     within(analyse(fixed).wallStats.median, 2, 1, 'wall thickness after rescale:');
+  });
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+
+/* A part with nothing wrong with it: 2 mm walls, 3° draft, ribs and bosses in
+   band, no undercuts, a material that does not warp, a finish it can hold. */
+const CLEAN_INPUT = {
+  wallThk: 2.0, wallMin: 1.6, wallMax: 2.4, draftAngle: 3.0,
+  ribThk: 0.9, ribH: 2.0, ribRadius: 0.5, bossOD: 6.0, bossWall: 1.0,
+  hasUndercut: '0', material: 'abs', surfaceFinish: 'spi-a2', moldType: 'two-piece',
+  fpc: { enabled: false, thickness: 0.2, cover: 0.5, anchors: 'holes' },
+  runChecks: {
+    wall: true, draft: true, ribs: true, undercut: true, sink: true,
+    warp: true, transitions: false, flow: true, fpc: true,
+  },
+  mesh: null,
+};
+
+function meshFor(soup, finishKey = 'spi-a2') {
+  const mat = MATERIALS.abs;
+  return analyseMesh(weld(soup), {
+    material: mat, finishKey, moldType: 'two-piece',
+    minDraft: effectiveMinDraft(mat, finishKey), manualWall: 2, pullAxis: '+z',
+  });
+}
+
+const DEFAULT_CHECK_KEYS = ['wall', 'draft', 'sink', 'flow', 'ribs', 'warp', 'undercut', 'finish_compat'];
+
+describe('scoring — the weight table');
+{
+  it('the checks that run by default sum to exactly 100', () => {
+    const total = DEFAULT_CHECK_KEYS.reduce((sum, k) => sum + CHECK_RISK_PROFILES[k].weight, 0);
+    eq(total, 100, 'default budget:');
+  });
+
+  it('the two-shot table sums to 100 as well', () => {
+    const total = Object.values(TWO_SHOT_RISK_PROFILES).reduce((sum, p) => sum + p.weight, 0);
+    eq(total, 100, 'two-shot budget:');
+  });
+
+  it('the corner advisory holds no budget it could never spend', () => {
+    eq(CHECK_RISK_PROFILES.corners.weight, 0);
+  });
+
+  it('every severity band deducts exactly its share of the weight', () => {
+    for (const [key, profile] of Object.entries(CHECK_RISK_PROFILES)) {
+      for (const [band, factor] of Object.entries(SEVERITY_FACTOR)) {
+        const checks = [{ key, status: 'fail', severity: band }];
+        const { totalDeduction } = scoreChecks(checks, PART_GRADES);
+        close(totalDeduction, profile.weight * factor, 1e-9, `${key} at ${band}:`);
+      }
+    }
+  });
+
+  it('escalate only ever raises a severity', () => {
+    eq(escalate('critical', 'minor'), 'critical');
+    eq(escalate('minor', 'major'), 'major');
+    eq(escalate('none', 'minor'), 'minor');
+    eq(escalate(undefined, 'major'), 'major');
+  });
+
+  it('the score is exactly 100 × (1 − deduction / budget)', () => {
+    const r = runDFM({ ...CLEAN_INPUT, mesh: meshFor(S.hollowBox([40, 30, 20], 2)) });
+    eq(r.score, Math.max(0, Math.round(100 * (1 - r.totalDeduction / r.budget))), 'reported score:');
+  });
+}
+
+describe('scoring — advisories are not defects');
+{
+  it('a part with no findings scores exactly 100', () => {
+    /* Before this, the same part scored 96: the flow check charged it 4.5
+       points for a gate the user had not picked yet, and the corner advisory
+       held 3 points of budget it could never spend. */
+    const r = runDFM({ ...CLEAN_INPUT, mesh: meshFor(S.hollowFrustum(20, 30, 3, 2)) });
+    eq(r.score, 100, `score (deductions: ${r.checks.filter((c) => c.scoreDeduction > 0).map((c) => `${c.key} −${c.scoreDeduction}`).join(', ') || 'none'})`);
+    eq(r.budget, 100, 'budget:');
+    eq(r.criticalCount, 0, 'critical findings:');
+    eq(r.grade.label, 'PRODUCTION READY');
+  });
+
+  it('not having picked a gate costs nothing', () => {
+    const r = runDFM({ ...CLEAN_INPUT, mesh: meshFor(S.hollowFrustum(20, 30, 3, 2)) });
+    const flow = r.checks.find((c) => c.key === 'flow');
+    eq(flow.status, 'info', 'status for an unrun check:');
+    eq(flow.scoreDeduction, 0, 'deduction:');
+    /* Still in the budget: the check is available and will deduct once it can
+       actually measure something. */
+    eq(CHECK_RISK_PROFILES.flow.weight > 0, true);
+  });
+
+  it('the corner advisory is marked as advice and costs nothing', () => {
+    const r = runDFM({ ...CLEAN_INPUT, mesh: meshFor(S.hollowFrustum(20, 30, 3, 2)) });
+    const corners = r.checks.find((c) => c.key === 'corners');
+    eq(corners.status, 'info');
+    eq(corners.scoreDeduction, 0);
+  });
+
+  it('surface finish reports even when it passes, so the budget is stable', () => {
+    /* Silence used to be the pass condition, which made the denominator depend
+       on whether this check happened to have anything to say. */
+    const r = runDFM({ ...CLEAN_INPUT, mesh: meshFor(S.hollowFrustum(20, 30, 3, 2)) });
+    const finish = r.checks.find((c) => c.key === 'finish_compat');
+    assert(finish, 'finish check missing on a compatible pairing');
+    eq(finish.status, 'ok');
+    eq(finish.scoreDeduction, 0);
+  });
+}
+
+describe('scoring — grade cannot outrun the findings');
+{
+  it('one critical finding rules out PRODUCTION READY even at a high score', () => {
+    /* A declared lifter is a critical finding on a 10-point check, so the
+       arithmetic alone leaves 90 — comfortably inside the production-ready
+       band, which would be an untraceable verdict. */
+    const r = runDFM({ ...CLEAN_INPUT, hasUndercut: '2' });
+    eq(r.criticalCount, 1, 'critical findings:');
+    assert(r.score >= 85, `score should be high for this test to mean anything, got ${r.score}`);
+    eq(r.grade.label, 'MINOR REWORK');
+  });
+
+  it('two criticals rule out MINOR REWORK', () => {
+    const checks = [
+      { key: 'wall', status: 'fail', severity: 'critical' },
+      { key: 'draft', status: 'fail', severity: 'critical' },
+    ];
+    const { grade } = scoreChecks(checks, PART_GRADES);
+    assert(['MAJOR REWORK', 'NOT MANUFACTURABLE'].includes(grade.label), `got ${grade.label}`);
+  });
+
+  it('the advisory checks cannot contribute a critical', () => {
+    const { criticalCount } = scoreChecks([{ key: 'corners', status: 'fail', severity: 'critical' }], PART_GRADES);
+    eq(criticalCount, 0, 'a zero-weight check must not gate the grade:');
+  });
+}
+
+describe('scoring — draft follows the surface finish');
+{
+  it('the required draft includes the texture allowance', () => {
+    const mat = MATERIALS.abs;
+    for (const [finish, expected] of [['spi-a2', 0.5], ['tex-med', 3.5], ['edm-heavy', 6.5]]) {
+      const r = runDFM({ ...CLEAN_INPUT, surfaceFinish: finish, mesh: meshFor(S.hollowFrustum(20, 30, 8, 2), finish) });
+      const draft = r.checks.find((c) => c.key === 'draft');
+      const required = draft.metrics.find(([k]) => k === 'Required');
+      assert(required, `no Required metric for ${finish}`);
+      close(parseFloat(required[1]), expected, 0.01, `${finish} required draft:`);
+      close(effectiveMinDraft(mat, finish), expected, 0.01, `${finish} effectiveMinDraft:`);
+    }
+  });
+
+  it('a stated draft that clears the material minimum can still fail on texture', () => {
+    /* The regression. This part has 8° walls, so the mesh is happy either way;
+       what changed is that a stated 3° is now judged against the 6.5° a
+       heavy-EDM cavity needs instead of the 0.5° ABS needs. It used to read
+       "comfortably exceeds ABS minimum (0.5°)" and score 96, PRODUCTION READY. */
+    const polished = runDFM({ ...CLEAN_INPUT, draftAngle: 3.0, surfaceFinish: 'spi-a2', mesh: meshFor(S.hollowFrustum(20, 30, 8, 2), 'spi-a2') });
+    const textured = runDFM({ ...CLEAN_INPUT, draftAngle: 3.0, surfaceFinish: 'edm-heavy', mesh: meshFor(S.hollowFrustum(20, 30, 8, 2), 'edm-heavy') });
+    eq(polished.checks.find((c) => c.key === 'draft').status, 'ok', 'polished:');
+    eq(textured.checks.find((c) => c.key === 'draft').status, 'fail', 'heavy-EDM:');
+    assert(textured.score < polished.score, `textured (${textured.score}) should score below polished (${polished.score})`);
+  });
+
+  it('the area figure is labelled with the threshold it was measured against', () => {
+    const r = runDFM({ ...CLEAN_INPUT, surfaceFinish: 'edm-heavy', mesh: meshFor(S.hollowBox([40, 30, 20], 2), 'edm-heavy') });
+    const draft = r.checks.find((c) => c.key === 'draft');
+    const areaRow = draft.metrics.find(([k]) => k.startsWith('Area <'));
+    assert(areaRow, 'no area metric');
+    assert(areaRow[0].includes('6.50'), `area metric is labelled "${areaRow[0]}" but was measured against 6.50°`);
+  });
+}
+
+describe('scoring — one source of truth');
+{
+  it('no check carries a penalty field any more', () => {
+    const r = runDFM({ ...CLEAN_INPUT, mesh: meshFor(S.hollowBox([40, 30, 20], 2)) });
+    for (const c of r.checks) {
+      eq(c.penalty, undefined, `${c.key} still has a penalty field:`);
+      assert(c.severity !== undefined, `${c.key} has no severity`);
+      assert(c.weight !== undefined, `${c.key} has no weight`);
+    }
+  });
+
+  it('the JSON export carries one deduction per check, not two', () => {
+    const r = runDFM({ ...CLEAN_INPUT, mesh: meshFor(S.hollowBox([40, 30, 20], 2)) });
+    const json = buildExportJSON({
+      sessionId: 'TEST', dfm: { input: CLEAN_INPUT, result: r },
+      analysis: null, twoShot: null, interface: null, validation: null,
+      settings: { analysisMode: 'single', windowType: 'none' },
+    });
+    const serialised = JSON.stringify(json);
+    assert(!serialised.includes('"penalty"'), 'the export still writes a penalty field');
+    for (const c of json.checks) {
+      assert(typeof c.score_deduction === 'number', `${c.key} has no score_deduction`);
+      assert(typeof c.weight === 'number', `${c.key} has no weight`);
+      assert(typeof c.severity === 'string', `${c.key} has no severity`);
+    }
+    eq(json.scoring.budget, r.budget, 'exported budget:');
+    close(json.scoring.deduction, r.totalDeduction, 0.05, 'exported deduction:');
+  });
+
+  it('two-shot scores through the same mechanism', () => {
+    const ts = runTwoShotDFM({ mat1: 'abs', mat2: 'pp', interface: null, opticalWindow: 'none' });
+    eq(typeof ts.budget, 'number', 'two-shot has no budget:');
+    eq(typeof ts.criticalCount, 'number', 'two-shot has no critical count:');
+    eq(ts.score, Math.max(0, Math.round(100 * (1 - ts.totalDeduction / ts.budget))), 'two-shot score:');
+    /* ABS and PP do not bond. That is a critical finding, and the grade must
+       reflect it rather than whatever the arithmetic happened to leave. */
+    const adhesion = ts.checks.find((c) => c.key === 'ts_adhesion');
+    eq(adhesion.severity, 'critical');
+    assert(ts.grade.label !== 'INTERFACE OK', `ABS+PP graded "${ts.grade.label}"`);
+  });
+
+  it('a check list with no findings scores 100', () => {
+    const clean = Object.keys(TWO_SHOT_RISK_PROFILES).map((key) => ({ key, status: 'ok', severity: 'none' }));
+    const { score, grade, budget } = scoreChecks(clean, INTERFACE_GRADES, TWO_SHOT_RISK_PROFILES);
+    eq(score, 100); eq(budget, 100); eq(grade.label, 'INTERFACE OK');
+  });
+
+  it('a fusion weld is not graded as substrate destruction', () => {
+    /* Two grades of the same polymer necessarily have shot 2's melt far above
+       shot 1's HDT, so the thermal rule condemned every fusion pair in the
+       compatibility table as a critical failure — while the adhesion check on
+       the same page called them the strongest bond available. The ASA-natural
+       window on a PC/ASA body, which is the reason those grades are in the
+       table at all, came out MAJOR REWORK. */
+    for (const [a, b] of [['pcasa', 'asa_n'], ['asa_n', 'pcasa'], ['asa', 'asa_n'], ['asa', 'asa']]) {
+      const ts = runTwoShotDFM({ mat1: a, mat2: b, interface: null, opticalWindow: 'none' });
+      const thermal = ts.checks.find((c) => c.key === 'ts_thermal');
+      eq(thermal.severity, 'minor', `${a}+${b} thermal:`);
+      eq(ts.criticalCount, 0, `${a}+${b} critical findings:`);
+      eq(ts.grade.label, 'INTERFACE OK', `${a}+${b} graded on score ${ts.score}:`);
+    }
+  });
+
+  it('a genuinely incompatible pair is still condemned', () => {
+    /* The counterweight to the test above: relaxing the fusion case must not
+       have relaxed the case the rule exists for. */
+    const ts = runTwoShotDFM({ mat1: 'abs', mat2: 'pp', interface: null, opticalWindow: 'none' });
+    eq(ts.checks.find((c) => c.key === 'ts_adhesion').severity, 'critical', 'ABS+PP adhesion:');
+    eq(ts.checks.find((c) => c.key === 'ts_thermal').severity, 'critical', 'ABS+PP thermal:');
+    eq(ts.grade.label, 'NOT COMPATIBLE');
+  });
+
+  it('the textbook overmould pair is not treated as a problem', () => {
+    /* ABS with a TPU grip. The adhesion table calls it "Excellent. Classic
+       over-mould pair", and TPU's 200 °C melt is above ABS's 98 °C HDT, as it
+       is for essentially every real overmould — so the thermal advisory has to
+       be a minor finding or the tool disagrees with itself. */
+    const ts = runTwoShotDFM({ mat1: 'abs', mat2: 'tpu', interface: null, opticalWindow: 'none' });
+    eq(ts.criticalCount, 0, 'critical findings on the classic pair:');
+    eq(ts.checks.find((c) => c.key === 'ts_adhesion').severity, 'none', 'adhesion:');
+    eq(ts.checks.find((c) => c.key === 'ts_thermal').severity, 'minor', 'thermal:');
+    eq(ts.grade.label, 'INTERFACE OK', `score ${ts.score}, deductions: ${ts.checks.filter((c) => c.scoreDeduction > 0).map((c) => `${c.key} −${c.scoreDeduction}`).join(', ')}`);
   });
 }
 

@@ -3,6 +3,12 @@
 Assessed at commit `67a9655`. Everything below was verified by running the code,
 not by reading it.
 
+> **Status — Phase 0 and Phase 1 are done.** The findings below are kept as
+> written, as the record of what was wrong and the evidence for it. What changed
+> since is summarised in [Delivered](#delivered) at the end, along with two
+> further defects the work uncovered and one calibration question that needs a
+> moulding engineer rather than a programmer.
+
 ---
 
 ## Verdict
@@ -431,3 +437,134 @@ npm install --no-save playwright && node test/smoke.mjs
 The scoring, draft-threshold and determinism figures in this document were
 produced by importing the pure modules directly into Node, as described in C2.
 Those probe scripts are throwaway; the durable versions are Phase 2 item 10.
+
+---
+
+## Delivered
+
+Two phases are complete. `npm test` runs 59 unit assertions and 48 browser
+checks; the committed `dfm-tool.html` is in sync with `src/`.
+
+### Phase 0 — the score is traceable to the rules
+
+`penalty` is gone. Each rule now returns a **severity band** — `minor`,
+`major`, `critical` — and the deduction is that fraction of the check's weight
+(a quarter, a half, all of it). One number, derived one way, and the JSON export
+carries `severity`, `weight` and `score_deduction` per check plus a `scoring`
+block giving the deduction and the budget it came out of.
+
+The bands were assigned by reading what each branch already said about the
+consequence. Where a rule described a finding as "moderate" and prescribed a
+mitigation, it became `minor`; where it said the part would not work, `critical`.
+
+- **A1 fixed.** No check carries a `penalty` field, and the export writes one
+  deduction per check instead of two disagreeing ones.
+- **A2 fixed.** The no-gate flow prompt and the corner-radii advisory emit
+  `'info'` — the status that was already plumbed through the renderer and
+  already styled in the CSS, and that no check had ever emitted. Neither costs
+  anything. **A part with nothing wrong with it now scores exactly 100; it
+  scored 96 before, because a gate the user had not yet picked cost 4.5 points.**
+- **A3 fixed.** `corners` holds zero budget. The eight checks that run by
+  default sum to exactly 100, and the score is normalised over the checks that
+  actually ran, so enabling the FPC or transition checks widens the exposure
+  instead of making 0 unreachable. `finish_compat` now reports when it passes
+  rather than staying silent, so the denominator does not depend on whether it
+  had anything to say.
+- **A4 fixed.** The draft check judges against `effectiveMinDraft` — material
+  minimum plus texture allowance — and labels every figure with the threshold it
+  was measured against. The measured effect, on one part with 8° walls and a
+  stated 3° draft:
+
+  ```
+  polished (SPI A-2)   before: 96 PRODUCTION READY   after:  100 PRODUCTION READY
+  heavy EDM texture    before: 96 PRODUCTION READY   after:   82 MINOR REWORK
+  ```
+
+  Before: *"Stated draft 3° comfortably exceeds ABS minimum (0.5°)."*
+  After: *"Stated draft 3° is below the 6.50° this part needs (0.5° for ABS plus
+  6.00° for EDM heavy). Ejection scuffing & tool drag likely."*
+
+Two further changes fall out of the same principle:
+
+- **The grade can no longer outrun the findings.** A single critical finding on
+  a light check leaves a score of 90, which the old bands called PRODUCTION
+  READY. The band is now the worse of what the score says and what the worst
+  finding allows.
+- **Two-shot scores through the same mechanism.** It previously summed raw
+  penalties to a maximum of 105, so an interface score of 70 and a part score of
+  70 were not the same statement.
+
+### Phase 1 — the geometry is checked before it is measured
+
+- **B1, B2 fixed.** `src/geometry/validate.js` runs at load: unit plausibility,
+  closure, manifoldness, winding consistency, inverted normals via signed
+  volume, degenerate triangles. It reports a confidence verdict and offers
+  one-click rescale and flip, and it is carried into both exports — in the PDF
+  ahead of the analysis it qualifies. Units are asked about rather than
+  asserted: under 2 mm across is called almost certainly mis-scaled, 2–15 mm
+  gets a question, because an 8 mm clip is a real thing. Only a surface with no
+  interior is refused outright.
+- **B3 fixed**, and the mechanism was not what this document originally guessed
+  — see the corrected B3 above. Ray casting was never affected; flow length and
+  transition detection were, badly.
+- **B4 fixed.** Seeded PRNG, so the same file gives the same answer. `stats()`
+  also returns a distribution-free 95% confidence interval for the median, and
+  the wall check says so when the nominal it is judging on is not pinned down.
+- **Item 9 done.** An inscribed-sphere thickness estimate runs alongside the ray
+  cast and is reported next to it; a disagreement over 15% is called out as
+  evidence of non-parallel walls, where the ray figure is the optimistic one.
+  Validated against a 2561-ray brute-force reference: median error under 1%.
+- **C2 partly addressed.** `test/unit.mjs` asserts numbers against analytic
+  fixtures and against independent reference implementations in
+  `test/lib/reference.mjs` — the edge census, signed volume and sphere thickness
+  are each written twice, from the definition, so the two can disagree. Wall
+  thickness is pinned to 1% against known geometry, draft to 0.01° against a
+  frustum. `npm test` runs it first.
+
+### Found while doing the work
+
+**F1 — every fusion weld was graded a critical thermal failure.** *(fixed)*
+
+The thermal check compares shot 2's melt against shot 1's HDT. Two grades of the
+same polymer necessarily have melt far above HDT, so the check condemned every
+same-polymer pair in the compatibility table — while the adhesion check on the
+same page called them the strongest bond available. ASA-natural on PC/ASA, which
+is the reason those grades are in the table at all and is the IR-window
+construction, came out **66, MAJOR REWORK**. Pairs that weld to themselves now
+carry `fusion: true` in `TWO_SHOT_COMPAT`, and the thermal check reads the heat
+as the bonding mechanism it is, with a minor process caveat about substrate
+dwell. That pairing now scores **92, INTERFACE OK**. ABS+PP is still 26 and NOT
+COMPATIBLE.
+
+**F2 — a wrong sentence in the material data.** *(fixed)*
+
+The `abs:tpu` note read *"TPU melts at 200°C, well below ABS HDT of 98°C."*
+200 °C is not below 98 °C. Reworded to say what is actually true and why the
+pair works anyway.
+
+**F3 — the 120 °C HDT margin condemns low-HDT substrates.** *(open — needs a
+moulding engineer, not a programmer)*
+
+`ts_thermal` calls it critical when shot 2's melt exceeds shot 1's HDT by more
+than 120 °C. Polypropylene's HDT at 0.45 MPa is 60 °C, so PP + TPU — a common
+overmould — scores 49, NOT COMPATIBLE, on the thermal check alone. The code's
+own comment concedes the metric is wrong: *"HDT is a sustained-load test; Vicat
+softening point is closer to what two-shot injection actually does to the
+substrate."* The fix is to carry Vicat figures in the material table and compare
+against those, but which margin is right is a question about OnlyCat's process
+window, and it should not be guessed at. Affected pairs, all currently critical
+on thermal: `pp+tpu`, `abs+pc`, `abs+pp`, `pp+pe`, `pom+pp`, `pa6+pp`.
+
+### Costs
+
+Welding is ~20% slower on the common path, once, at load — 248 ms for a
+320k-triangle mesh. The sphere-fit pass adds about 13% to a run. Both are inside
+the worker.
+
+### Still open, in priority order
+
+Phase 2 (tests you can trust) items 11–13 — playwright is still not in
+`devDependencies`, so `npm install && npm test` still fails on a clean checkout,
+and there is still no CI enforcing that `dfm-tool.html` matches `src/`. Then
+Phase 3, where the standout remains cycle time and shot weight from the `coolK`
+and `density` fields that are curated per material and still unused.

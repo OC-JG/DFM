@@ -1,7 +1,7 @@
 import { MATERIALS, fpcCompatibility } from '../core/materials.js';
-import { SURFACE_FINISHES, finishMaterialCheck } from '../core/finishes.js';
+import { SURFACE_FINISHES, finishMaterialCheck, effectiveMinDraft } from '../core/finishes.js';
 import { formatPullAxis } from '../analysis/stats.js';
-import { scoreChecks, PART_GRADES } from './scoring.js';
+import { scoreChecks, escalate, PART_GRADES } from './scoring.js';
 
 /*
  * DFM rule engine. Combines manually specified values with mesh-derived ones
@@ -46,21 +46,21 @@ export function runDFM(input) {
     }
 
     const TOL = 0.01; // display precision: don't call 2.00 "below" 2.00
-    let status = 'ok', detail = '', penalty = 0;
+    let status = 'ok', detail = '', severity = 'none';
 
     if (nominal < effectiveMinWall - TOL) {
       status = 'fail';
-      penalty = 25;
+      severity = 'critical';
       detail = (fpcFloor !== null && effectiveMinWall === fpcFloor)
         ? `Nominal wall ${nominal.toFixed(2)} mm is below the FPC-overmould floor of ${fpcFloor.toFixed(2)} mm (= ${input.fpc.thickness.toFixed(2)} FPC + 2×${input.fpc.cover.toFixed(2)} cover). The FPC will sit too close to the surface — risk of FPC bleed-through, weak overmould, or trace damage.`
         : `Nominal wall ${nominal.toFixed(2)} mm is below ${m.name} minimum (${matLo} mm). Risk of short shots & high pressure drop.`;
     } else if (nominal > matHi + TOL) {
       status = 'fail';
-      penalty = 22;
+      severity = 'critical';
       detail = `Nominal wall ${nominal.toFixed(2)} mm exceeds ${m.name} max (${matHi} mm). Sink, voids and long cycle inevitable. Core out thick sections.`;
     } else if (nominal < effectiveMinWall) {
       status = 'warn';
-      penalty = 4;
+      severity = 'minor';
       const limitLabel = (fpcFloor !== null && effectiveMinWall === fpcFloor) ? 'FPC-overmould floor' : `${m.name} minimum`;
       detail = `Nominal wall ${nominal.toFixed(2)} mm is at the ${limitLabel} (${effectiveMinWall.toFixed(2)} mm). No margin for variation — verify locally above FPC region.`;
     } else {
@@ -75,6 +75,7 @@ export function runDFM(input) {
     const iqrRatio = p75 / Math.max(0.01, p25);
     if (iqrRatio > 1.15 * 2) {
       if (status !== 'fail') status = 'warn';
+      severity = escalate(severity, 'major');
       detail += ` Wall variation (bulk p25–p75) of ${iqrRatio.toFixed(2)}× exceeds the 15% uniformity guideline — differential cooling will cause warp. Aim for <1.15×.`;
     } else if (iqrRatio > 1.15) {
       if (status === 'ok') detail += ` Bulk wall varies ${iqrRatio.toFixed(2)}× — approaching the 15% variation limit (Xometry). Monitor for warp.`;
@@ -112,27 +113,46 @@ export function runDFM(input) {
       }
     }
 
-    checks.push({ key: 'wall', name: 'Wall thickness', status, detail, penalty, metrics: wallMetrics });
+    checks.push({ key: 'wall', name: 'Wall thickness', status, detail, severity, metrics: wallMetrics });
   }
 
   // ══ DRAFT ═══════════════════════════════════════════════════════════════
   if (input.runChecks.draft) {
     const manualDraft = input.draftAngle;
     const pctUnderMin = mesh ? mesh.sidePctUnderMin : null;
-    const required = m.draftMin;
+
+    /* The requirement is the material minimum *plus the texture allowance*.
+       effectiveMinDraft has always computed that, the mesh statistic below has
+       always been measured against it, and the JSON export has always reported
+       it — but the verdict and every label here read the bare material minimum.
+       On a heavy-EDM finish that is the difference between 0.5° and 6.5°, so a
+       part drafted at 1° was told it "comfortably exceeds" a minimum it misses
+       by more than five degrees. */
+    const baseRequired = m.draftMin;
+    const finishKey = input.surfaceFinish || 'spi-a2';
+    const required = mesh && mesh.minDraft != null
+      ? mesh.minDraft
+      : effectiveMinDraft(m, finishKey);
+    const textureAllowance = required - baseRequired;
+    const finishName = SURFACE_FINISHES[finishKey] ? SURFACE_FINISHES[finishKey].name : finishKey;
+    const requiredStr = `${required.toFixed(2)}°`;
+    const because = textureAllowance > 0.005
+      ? ` (${baseRequired}° for ${m.name} plus ${textureAllowance.toFixed(2)}° for ${finishName})`
+      : '';
+
     const EPS = 1e-6;
-    let status = 'ok', detail = '', penalty = 0;
+    let status = 'ok', detail = '', severity = 'none';
 
     if (manualDraft < required - EPS) {
       status = 'fail';
-      penalty = 20;
-      detail = `Stated draft ${manualDraft}° is below recommended ${required}° for ${m.name}. Ejection scuffing & tool drag likely.`;
+      severity = 'critical';
+      detail = `Stated draft ${manualDraft}° is below the ${requiredStr} this part needs${because}. Ejection scuffing & tool drag likely.`;
     } else if (manualDraft < required + 0.5 - EPS) {
       status = 'warn';
-      penalty = 6;
-      detail = `Stated draft ${manualDraft}° meets minimum but offers no margin. Aim for ${required + 1}° on textured surfaces.`;
+      severity = 'minor';
+      detail = `Stated draft ${manualDraft}° meets the ${requiredStr} minimum${because} but offers no margin. Aim for ${(required + 1).toFixed(2)}°.`;
     } else {
-      detail = `Stated draft ${manualDraft}° comfortably exceeds ${m.name} minimum (${required}°).`;
+      detail = `Stated draft ${manualDraft}° comfortably exceeds the ${requiredStr} required${because}.`;
     }
 
     if (pctUnderMin !== null) {
@@ -140,23 +160,25 @@ export function runDFM(input) {
       const draftPhrase = input.moldType === 'single-pull' ? 'with proper draft direction' : '(either mould half)';
       if (pctUnderMin > 25) {
         status = 'fail';
-        penalty = Math.max(penalty, 25);
-        detail += ` Mesh shows ${pctUnderMin.toFixed(0)}% of side-wall area below ${required}° draft ${draftPhrase} — major rework needed.`;
+        severity = escalate(severity, 'critical');
+        detail += ` Mesh shows ${pctUnderMin.toFixed(0)}% of side-wall area below ${requiredStr} draft ${draftPhrase} — major rework needed.`;
       } else if (pctUnderMin > 8) {
         status = status === 'fail' ? 'fail' : 'warn';
-        penalty = Math.max(penalty, 12);
-        detail += ` Mesh shows ${pctUnderMin.toFixed(0)}% of side-wall area below ${required}° draft ${draftPhrase} — check vertical features.`;
+        severity = escalate(severity, 'major');
+        detail += ` Mesh shows ${pctUnderMin.toFixed(0)}% of side-wall area below ${requiredStr} draft ${draftPhrase} — check vertical features.`;
       } else {
         detail += ` Mesh confirms ${(100 - pctUnderMin).toFixed(0)}% of side-wall area has adequate draft assuming ${moldTypeStr} mould.`;
       }
     }
 
     checks.push({
-      key: 'draft', name: 'Draft angles', status, detail, penalty,
+      key: 'draft', name: 'Draft angles', status, detail, severity,
       metrics: [
         ['Manual draft', `${manualDraft}°`],
-        ['Material min', `${required}°`],
-        pctUnderMin !== null ? [`Area <${required}°`, `${pctUnderMin.toFixed(1)}%`] : null,
+        ['Material min', `${baseRequired}°`],
+        textureAllowance > 0.005 ? ['Texture allowance', `+${textureAllowance.toFixed(2)}° (${finishName})`] : null,
+        ['Required', requiredStr],
+        pctUnderMin !== null ? [`Area <${requiredStr}`, `${pctUnderMin.toFixed(1)}%`] : null,
         pctUnderMin !== null ? [`Area <${(required / 2).toFixed(2)}°`, `${mesh.sidePctUnderHalf.toFixed(1)}%`] : null,
       ].filter(Boolean),
     });
@@ -168,22 +190,22 @@ export function runDFM(input) {
     const hRatio = input.ribH / input.ribThk;
     const bossRatio = input.bossWall / input.wallThk;
     const radiusRatio = input.ribRadius / input.wallThk;
-    let status = 'ok', detail = '', penalty = 0;
+    let status = 'ok', detail = '', severity = 'none';
 
     /* Rib t/wall, Malloy §2.4.2: typically 40–80% of nominal wall.
        ≤0.5 cosmetic-safe, 0.5–0.6 functional with Class-A risk,
        0.6–0.8 structural acceptance, >0.8 guaranteed sink. */
     if (ratio > 0.8) {
-      status = 'fail'; penalty = 20;
+      status = 'fail'; severity = 'critical';
       detail = `Rib t/wall = ${ratio.toFixed(2)} exceeds the 0.8× ceiling — heavy sink and slower cycle guaranteed.`;
     } else if (ratio > 0.6) {
-      status = 'warn'; penalty = 10;
+      status = 'warn'; severity = 'major';
       detail = `Rib t/wall = ${ratio.toFixed(2)} is in the structural-only band (0.6–0.8). Sink visible on Class-A surfaces; specify texturing or relief.`;
     } else if (ratio > 0.5) {
-      status = 'warn'; penalty = 5;
+      status = 'warn'; severity = 'minor';
       detail = `Rib t/wall = ${ratio.toFixed(2)} is acceptable but sink possible on cosmetic surfaces. Target ≤0.5× for Class-A.`;
     } else if (ratio < 0.4) {
-      status = 'warn'; penalty = 6;
+      status = 'warn'; severity = 'major';
       detail = `Rib t/wall = ${ratio.toFixed(2)} is below 0.4× — rib will be hard to fill and may short-shot. Increase to ≥0.4× or reroute flow.`;
     } else {
       detail = `Rib t/wall ratio ${ratio.toFixed(2)} is in the recommended 0.4–0.5× band (Malloy §2.4.2).`;
@@ -192,9 +214,11 @@ export function runDFM(input) {
     /* Rib height/thickness — Fictiv caps at 2.5×, Rutland at 3×. */
     if (hRatio > 3.0) {
       status = status === 'fail' ? 'fail' : 'warn';
+      severity = escalate(severity, 'major');
       detail += ` Rib h/t = ${hRatio.toFixed(1)}× exceeds 3× — severe fill and ejection risk. Use multiple shorter ribs.`;
     } else if (hRatio > 2.5) {
       if (status === 'ok') status = 'warn';
+      severity = escalate(severity, 'minor');
       detail += ` Rib h/t = ${hRatio.toFixed(1)}× is between 2.5–3× — at the upper limit. Prefer multiple shorter ribs if height is flexible.`;
     }
 
@@ -202,14 +226,14 @@ export function runDFM(input) {
        riser, too large piles up mass and worsens sink. */
     if (radiusRatio < 0.10) {
       status = status === 'fail' ? 'fail' : 'warn';
-      penalty = Math.max(penalty, 6);
+      severity = escalate(severity, 'major');
       detail += ` Rib base radius ${input.ribRadius}mm = ${radiusRatio.toFixed(2)}× wall — stress concentration at rib root.`;
     } else if (radiusRatio < 0.25) {
-      penalty = Math.max(penalty, 3);
+      severity = escalate(severity, 'minor');
       detail += ` Rib base radius ${input.ribRadius}mm = ${radiusRatio.toFixed(2)}× wall — below 0.25× target; consider larger fillet to reduce stress.`;
     } else if (radiusRatio > 0.50) {
       status = status === 'fail' ? 'fail' : 'warn';
-      penalty = Math.max(penalty, 8);
+      severity = escalate(severity, 'major');
       detail += ` Rib base radius ${input.ribRadius}mm = ${radiusRatio.toFixed(2)}× wall exceeds 0.4× — mass pile-up at base will worsen sink.`;
     } else if (radiusRatio > 0.40) {
       detail += ` Rib base radius ${radiusRatio.toFixed(2)}× wall — at the top of recommended 0.25–0.4× range; watch for sink.`;
@@ -218,17 +242,20 @@ export function runDFM(input) {
     /* Boss wall — too thick sinks, too thin cracks around inserts. */
     if (bossRatio > 0.7) {
       if (status !== 'fail') status = 'warn';
+      severity = escalate(severity, 'major');
       detail += ` Boss wall ${input.bossWall} mm = ${bossRatio.toFixed(2)}× nominal wall exceeds 0.7× — sink marks likely at boss base.`;
     } else if (bossRatio > 0.6) {
       if (status === 'ok') status = 'warn';
+      severity = escalate(severity, 'minor');
       detail += ` Boss wall ${bossRatio.toFixed(2)}× is marginal — sink possible on Class-A surfaces.`;
     } else if (bossRatio < 0.5) {
       if (status !== 'fail') status = 'warn';
+      severity = escalate(severity, 'major');
       detail += ` Boss wall ${input.bossWall} mm = ${bossRatio.toFixed(2)}× nominal wall is below 0.5× — may crack around inserts under torsion. Attach boss to side wall with a support rib.`;
     }
 
     checks.push({
-      key: 'ribs', name: 'Ribs & bosses', status, detail, penalty,
+      key: 'ribs', name: 'Ribs & bosses', status, detail, severity,
       metrics: [
         ['Rib t / wall', `${ratio.toFixed(2)}×`],
         ['Rib h / t', `${hRatio.toFixed(2)}×`],
@@ -240,7 +267,7 @@ export function runDFM(input) {
 
   // ══ UNDERCUTS ═══════════════════════════════════════════════════════════
   if (input.runChecks.undercut) {
-    let status, detail, penalty;
+    let status, detail, severity;
     const meshRegions = mesh ? mesh.undercutRegions : null;
 
     if (meshRegions && meshRegions.length) {
@@ -249,11 +276,13 @@ export function runDFM(input) {
       const sigLifter = meshRegions.filter((r) => r.type === 2 && r.area > 1);
 
       if (sigSlide.length === 0 && sigLifter.length === 0) {
-        status = 'ok'; penalty = 0;
+        status = 'ok'; severity = 'none';
         detail = `Mesh check on pull axis ${formatPullAxis(mesh.pullAxis, mesh.pullDir)}: no significant undercut features detected. Straight-pull tool feasible — lowest tooling cost.`;
       } else if (sigLifter.length === 0) {
         status = 'warn';
-        penalty = 8 + Math.min(8, sigSlide.length * 2);
+        /* One slide is a known cost on a quotation; several start to shape the
+           tool. Neither is a defect in the part. */
+        severity = sigSlide.length > 1 ? 'major' : 'minor';
         /* Redesign hierarchy (Xometry/Fictiv): move the parting line, then
            shut-off cores, then bump-off for flexible materials, then a slide.
            Try the cheap options before committing to moving tooling. */
@@ -263,19 +292,19 @@ export function runDFM(input) {
         detail = `${sigSlide.length} external undercut region${sigSlide.length > 1 ? 's' : ''} detected. Before adding slides, consider: (1) repositioning parting line, (2) shut-off cores, (3) pass-through holes.${bumpOffNote} If slides are necessary: tool cost +15–30%.`;
       } else {
         status = 'fail';
-        penalty = 12 + Math.min(10, sigLifter.length * 3) + Math.min(6, sigSlide.length * 1.5);
+        severity = 'critical';
         detail = `${sigLifter.length} internal undercut${sigLifter.length > 1 ? 's' : ''} require lifter${sigLifter.length > 1 ? 's' : ''}`
           + (sigSlide.length ? `; ${sigSlide.length} external undercut${sigSlide.length > 1 ? 's' : ''} require slides.` : '.')
           + ' Consider redesigning to eliminate via shut-offs or parting line relocation before committing to moving tooling.';
       }
     } else if (input.hasUndercut === '0') {
-      status = 'ok'; penalty = 0;
+      status = 'ok'; severity = 'none';
       detail = 'No undercuts declared. Straight-pull tool feasible — lowest tooling cost.';
     } else if (input.hasUndercut === '1') {
-      status = 'warn'; penalty = 10;
+      status = 'warn'; severity = 'major';
       detail = 'Side-action slide declared. Adds tool cost (~15–30%) and parting-line constraints.';
     } else {
-      status = 'fail'; penalty = 18;
+      status = 'fail'; severity = 'critical';
       detail = 'Lifter declared for internal undercut. Significant tool cost and cycle-time impact.';
     }
 
@@ -285,20 +314,20 @@ export function runDFM(input) {
       metrics.push(['Lifter area', `${(mesh.lifterArea || 0).toFixed(1)} mm²`]);
       metrics.push(['Regions', `${meshRegions.length}`]);
     }
-    checks.push({ key: 'undercut', name: 'Undercuts / parting line', status, detail, penalty, metrics });
+    checks.push({ key: 'undercut', name: 'Undercuts / parting line', status, detail, severity, metrics });
   }
 
   // ══ SINK-MARK RISK ══════════════════════════════════════════════════════
   if (input.runChecks.sink !== false && mesh) {
     const sevPct = mesh.sinkPctSevere;
     const modPct = mesh.sinkPctModerate;
-    let status = 'ok', detail = '', penalty = 0;
+    let status = 'ok', detail = '', severity = 'none';
 
     if (sevPct > 5) {
-      status = 'fail'; penalty = 18;
+      status = 'fail'; severity = 'critical';
       detail = `${sevPct.toFixed(1)}% of surface area shows severe sink risk (local mass > 3× nominal wall). Core out thick sections or relocate gating.`;
     } else if (sevPct > 1 || modPct > 8) {
-      status = 'warn'; penalty = 9;
+      status = 'warn'; severity = 'major';
       detail = `${modPct.toFixed(1)}% of surface area shows moderate sink risk (local mass > 1.6× nominal wall). Likely at rib bases and boss roots — increase rib t/wall ratio or add cosmetic relief.`;
     } else {
       detail = `Sink risk is low — ${(100 - modPct).toFixed(1)}% of surface area has local thickness within safe ratio of nominal wall.`;
@@ -312,7 +341,7 @@ export function runDFM(input) {
     if (mesh.thicknessCoverage < 1) {
       metrics.push(['Sampled', `${(mesh.thicknessCoverage * 100).toFixed(0)}% of faces`]);
     }
-    checks.push({ key: 'sink', name: 'Sink-mark risk', status, detail, penalty, metrics });
+    checks.push({ key: 'sink', name: 'Sink-mark risk', status, detail, severity, metrics });
   }
 
   // ══ WALL TRANSITIONS (Malloy §2.4.2) ════════════════════════════════════
@@ -321,17 +350,17 @@ export function runDFM(input) {
   // thickness samples are unreliable at corners and rim edges.
   if (input.runChecks.transitions && mesh && mesh.wallTransitions) {
     const transitions = mesh.wallTransitions;
-    let status = 'ok', detail = '', penalty = 0;
+    let status = 'ok', detail = '', severity = 'none';
 
     if (transitions.length === 0) {
       detail = 'No abrupt wall thickness transitions detected. Walls appear uniform or tapered.';
     } else {
       const worst = transitions[0];
       if (worst.delta > 2.0 && transitions.length > 30) {
-        status = 'warn'; penalty = 8;
+        status = 'warn'; severity = 'major';
         detail = `${transitions.length} candidate transitions detected (advisory — mesh-based, may include corner artefacts). Worst candidate: ${worst.thicknessLow.toFixed(2)}→${worst.thicknessHigh.toFixed(2)}mm step over ${worst.currentLength.toFixed(1)}mm at (${worst.centroid.map((v) => v.toFixed(1)).join(', ')}) — needs ≥${worst.recommendedLength.toFixed(1)}mm taper if real. Visually verify in DRAFT or WALL heatmap.`;
       } else if (worst.delta > 1.0 || transitions.length > 10) {
-        status = 'warn'; penalty = 4;
+        status = 'warn'; severity = 'minor';
         detail = `${transitions.length} candidate transitions detected (advisory). Worst: ${worst.thicknessLow.toFixed(2)}→${worst.thicknessHigh.toFixed(2)}mm step. Verify visually before acting.`;
       } else {
         detail = `${transitions.length} minor transition${transitions.length === 1 ? '' : 's'} detected. Worst delta ${worst.delta.toFixed(2)}mm — review if cosmetic.`;
@@ -339,7 +368,7 @@ export function runDFM(input) {
     }
 
     checks.push({
-      key: 'transitions', name: 'Wall transitions', status, detail, penalty,
+      key: 'transitions', name: 'Wall transitions', status, detail, severity,
       metrics: [
         ['Candidates', String(transitions.length)],
         ['Worst Δ', transitions.length ? `${transitions[0].delta.toFixed(2)} mm` : '0'],
@@ -354,8 +383,11 @@ export function runDFM(input) {
 
     if (!fa) {
       checks.push({
-        key: 'flow', name: 'Flow length (L/T)', status: 'warn', penalty: 0,
-        detail: 'No gate location set. Click "Pick gate on part" to enable flow-length analysis (predicts short-shot risk).',
+        /* Not a finding about the part. Nothing has been measured, so nothing
+           can be deducted: this used to emit 'warn', which cost every part
+           4.5 points for a button the user had not pressed yet. */
+        key: 'flow', name: 'Flow length (L/T)', status: 'info', severity: 'none',
+        detail: 'No gate location set. Click "Pick gate on part" to enable flow-length analysis (predicts short-shot risk). Nothing is deducted for this — the check simply has not run.',
         metrics: [['L/T limit', `${m.ltMax}`], ['Max L/T', '—'], ['Area over limit', '—']],
       });
     } else {
@@ -367,16 +399,16 @@ export function runDFM(input) {
       const limitLabel = fpcOn ? `${ltLimit} (FPC-derated from ${fa.ltMax})` : `${ltLimit}`;
       const maxLT = fa.maxLT;
       const pct = fa.pctOverLT;
-      let status = 'ok', detail = '', penalty = 0;
+      let status = 'ok', detail = '', severity = 'none';
 
       if (maxLT > ltLimit * 1.5) {
-        status = 'fail'; penalty = 20;
+        status = 'fail'; severity = 'critical';
         detail = `Max L/T = ${maxLT.toFixed(0)} far exceeds ${limitLabel} for ${m.name}. Short shots expected — increase wall thickness, raise melt/mould temperature, or add a second gate.`;
       } else if (maxLT > ltLimit) {
-        status = 'warn'; penalty = 10;
+        status = 'warn'; severity = 'major';
         detail = `Max L/T = ${maxLT.toFixed(0)} exceeds limit (${limitLabel}). ${pct.toFixed(1)}% of part beyond limit — pack pressure may not reach extremities, weld lines weak.`;
       } else if (maxLT > ltLimit * 0.8) {
-        status = 'warn'; penalty = 4;
+        status = 'warn'; severity = 'minor';
         detail = `Max L/T = ${maxLT.toFixed(0)} approaching limit (${limitLabel}). Process window narrow — verify with mould-fill simulation.`;
       } else {
         detail = `Max L/T = ${maxLT.toFixed(0)} well within limit (${limitLabel}). Part fills comfortably from this gate.`;
@@ -414,7 +446,7 @@ export function runDFM(input) {
 
       checks.push({
         key: 'flow', name: 'Flow length (L/T)', status,
-        detail: detail + worstStr + gateStr + gateNote, penalty,
+        detail: detail + worstStr + gateStr + gateNote, severity,
         metrics: [
           ['L/T limit', limitLabel],
           ['Max L/T', `${maxLT.toFixed(0)}`],
@@ -437,12 +469,15 @@ export function runDFM(input) {
       ? ' Semi-crystalline: shrinkage is anisotropic (higher along flow direction) — warpage risk is structurally higher than amorphous materials with similar shrink range.'
       : ' Amorphous: shrinkage is more isotropic, lower inherent warp risk than semi-crystalline.';
 
-    let status = 'ok', detail = '', penalty = 0;
+    let status = 'ok', detail = '', severity = 'none';
     if (m.warpRisk === 'high') {
-      status = 'warn'; penalty = 12;
+      status = 'warn'; severity = 'major';
       detail = `${m.name} has high warp tendency (shrink ${m.shrinkLo}–${m.shrinkHi}%).${crystNote} Use uniform walls, balanced gating, mould cooling within ±3°C. Wall variation >15% of nominal will compound this significantly.`;
     } else if (m.warpRisk === 'medium') {
-      penalty = 4;
+      /* Shown as a warning rather than a pass: the old code set a penalty here
+         and a status of 'ok', so the concern was recorded and then silently
+         discarded by a scorer that only read the status. */
+      status = 'warn'; severity = 'minor';
       detail = `${m.name} has moderate warp tendency (shrink ${m.shrinkLo}–${m.shrinkHi}%).${crystNote} Standard precautions apply.`;
     } else {
       detail = `${m.name} is dimensionally stable (shrink ${m.shrinkLo}–${m.shrinkHi}%). Low warpage risk under normal conditions.`;
@@ -452,13 +487,13 @@ export function runDFM(input) {
       const longest = Math.max(...mesh.bbox.size);
       if (longest > 150 && m.warpRisk !== 'low') {
         status = 'fail';
-        penalty = Math.max(penalty, 18);
+        severity = escalate(severity, 'critical');
         detail += ` Longest dim ${longest.toFixed(0)} mm — large parts in this material need DOE on packing & cooling.`;
       }
     }
 
     checks.push({
-      key: 'warp', name: 'Shrinkage & warpage', status, detail, penalty,
+      key: 'warp', name: 'Shrinkage & warpage', status, detail, severity,
       metrics: [
         ['Shrink range', `${m.shrinkLo}–${m.shrinkHi}%`],
         ['Typical', `${shrinkMid.toFixed(2)}%`],
@@ -477,7 +512,10 @@ export function runDFM(input) {
     const internalMinR = (wallT * 0.5).toFixed(2);
     const externalMinR = (wallT * 1.5).toFixed(2);
     checks.push({
-      key: 'corners', name: 'Corner radii (advisory)', status: 'ok', penalty: 0,
+      /* Advisory, and honest about it: there is no way to measure a radius
+         from an STL, so this reports the guideline and nothing more. It holds
+         no score budget — see corners in CHECK_RISK_PROFILES. */
+      key: 'corners', name: 'Corner radii (advisory)', status: 'info', severity: 'none',
       detail: `Literature guidelines: internal corners ≥ ${internalMinR} mm (0.5× wall), external corners ≥ ${externalMinR} mm (1.5× wall). Sharp internal corners concentrate stress and require EDM tooling. Sharp external corners impede flow. Verify in CAD before tooling.`,
       metrics: [
         ['Wall', `${wallT.toFixed(2)} mm`],
@@ -492,20 +530,29 @@ export function runDFM(input) {
     const finishKey = input.surfaceFinish || 'spi-a2';
     const compat = finishMaterialCheck(finishKey, input.material);
     const finishName = SURFACE_FINISHES[finishKey] ? SURFACE_FINISHES[finishKey].name : finishKey;
+    /* Reported whether or not it fails. Silence used to be the pass condition,
+       which left no way to tell a compatible finish from an unchecked one —
+       and, once the score is normalised over the checks that ran, made the
+       budget quietly depend on whether this check had anything to say. */
     if (compat === 'no') {
       checks.push({
-        key: 'finish_compat', name: 'Surface finish compatibility', status: 'fail', penalty: 0,
+        key: 'finish_compat', name: 'Surface finish compatibility', status: 'fail', severity: 'critical',
         detail: `${finishName} is not achievable with ${m.name}. Semi-crystalline and elastomeric materials (PP, PE, TPU, PA) cannot be polished to A-grade mirror finishes. Select B or C grade, or switch material.`,
         metrics: [['Finish', finishName], ['Material', m.name], ['Result', 'NOT ACHIEVABLE']],
       });
     } else if (compat === 'caution') {
       checks.push({
-        key: 'finish_compat', name: 'Surface finish compatibility', status: 'warn', penalty: 0,
+        key: 'finish_compat', name: 'Surface finish compatibility', status: 'warn', severity: 'major',
         detail: `${finishName} is marginal with ${m.name} — achievable but requires careful processing. Confirm with your moulder and request sample approval.`,
         metrics: [['Finish', finishName], ['Material', m.name], ['Result', 'MARGINAL']],
       });
+    } else {
+      checks.push({
+        key: 'finish_compat', name: 'Surface finish compatibility', status: 'ok', severity: 'none',
+        detail: `${finishName} is achievable in ${m.name}.`,
+        metrics: [['Finish', finishName], ['Material', m.name], ['Result', 'ACHIEVABLE']],
+      });
     }
-    /* An achievable finish needs no entry — silence is the pass condition. */
   }
 
   // ══ FPC OVERMOULDING ════════════════════════════════════════════════════
@@ -515,18 +562,18 @@ export function runDFM(input) {
     const fpc = input.fpc;
     const compat = fpcCompatibility(m);
     const fpcFloor = fpc.thickness + 2 * fpc.cover;
-    let status = 'ok', penalty = 0;
+    let status = 'ok', severity = 'none';
     const notes = [];
 
     // 1. Melt temperature
     if (compat === 'unsafe') {
-      status = 'fail'; penalty += 30;
+      status = 'fail'; severity = escalate(severity, 'critical');
       notes.push(`${m.name} melts at ${m.meltC}°C, above the 270°C ceiling for FPC overmoulding. Standard Kapton/adhesive ratings will not survive the cycle. Switch to a lower-melt material — TPU, PE, PP, or low-temp PA grades.`);
     } else if (compat === 'risk') {
-      status = 'fail'; penalty += 20;
+      status = 'fail'; severity = escalate(severity, 'critical');
       notes.push(`${m.name} melts at ${m.meltC}°C — high risk for FPC delamination. Specialist tooling (low-pressure overmoulding, short contact time, pre-heated insert) required. Consider switching to a softer material.`);
     } else if (compat === 'caution') {
-      status = 'warn'; penalty += 8;
+      status = 'warn'; severity = escalate(severity, 'major');
       notes.push(`${m.name} melts at ${m.meltC}°C — borderline for FPC. Run barrel at the low end of the process window, verify FPC adhesive is rated ≥240°C, and keep contact time short.`);
     } else {
       notes.push(`${m.name} at ${m.meltC}°C is FPC-safe.`);
@@ -536,11 +583,11 @@ export function runDFM(input) {
     let nominalWall = input.wallThk;
     if (mesh && mesh.wallStats.n > 10) nominalWall = mesh.wallStats.median;
     if (nominalWall < fpcFloor) {
-      status = 'fail'; penalty += 18;
+      status = 'fail'; severity = escalate(severity, 'critical');
       notes.push(`Nominal wall ${nominalWall.toFixed(2)} mm < required ${fpcFloor.toFixed(2)} mm (FPC ${fpc.thickness.toFixed(2)} + 2×${fpc.cover.toFixed(2)} cover) — FPC will sit at or above the part surface in overmoulded regions.`);
     } else if (nominalWall < fpcFloor + 0.4) {
       if (status === 'ok') status = 'warn';
-      penalty += 4;
+      severity = escalate(severity, 'minor');
       notes.push(`Nominal wall ${nominalWall.toFixed(2)} mm has only ${(nominalWall - fpcFloor).toFixed(2)} mm margin above FPC floor — verify shrinkage doesn't bring polymer below FPC plane.`);
     } else {
       notes.push(`Wall margin above FPC: ${(nominalWall - fpcFloor).toFixed(2)} mm.`);
@@ -549,7 +596,7 @@ export function runDFM(input) {
     // 3. Anchor strategy
     if (fpc.anchors === 'none') {
       if (status === 'ok') status = 'warn';
-      penalty += 6;
+      severity = escalate(severity, 'major');
       notes.push('No mechanical anchors specified — pull-out strength relies entirely on polymer-FPC adhesion. Best to add through-holes (Ø ≥ 1 mm, on 5–10 mm pitch) or perimeter tabs to the FPC layout.');
     } else if (fpc.anchors === 'holes') {
       notes.push('Through-holes/cutouts in FPC give mechanical key — confirm hole diameter ≥1 mm so polymer flows through cleanly.');
@@ -562,7 +609,7 @@ export function runDFM(input) {
     // 4. Shrinkage differential against the (essentially static) polyimide
     if (m.warpRisk === 'high' || (m.shrinkHi - m.shrinkLo) > 1.5) {
       if (status === 'ok') status = 'warn';
-      penalty += 5;
+      severity = escalate(severity, 'minor');
       notes.push(`${m.name} shrinks ${m.shrinkLo}–${m.shrinkHi}%, much more than the FPC (Kapton ≈ 0.02%). Differential shrinkage will warp the part around the insert. Specify uniform cooling and consider symmetric FPC placement.`);
     } else {
       notes.push(`Shrinkage differential acceptable for FPC retention (${m.name} ${m.shrinkLo}–${m.shrinkHi}%).`);
@@ -574,7 +621,7 @@ export function runDFM(input) {
       : 'Pick a gate location and re-run to evaluate flow-front impingement on the FPC region.');
 
     checks.push({
-      key: 'fpc', name: 'FPC overmoulding', status, detail: notes.join(' '), penalty,
+      key: 'fpc', name: 'FPC overmoulding', status, detail: notes.join(' '), severity,
       metrics: [
         ['Compatibility', compat.toUpperCase()],
         ['Material melt', `${m.meltC}°C`],
@@ -586,6 +633,6 @@ export function runDFM(input) {
     });
   }
 
-  const { score, grade, totalDeduction } = scoreChecks(checks, PART_GRADES);
-  return { checks, score, grade, totalDeduction, material: m };
+  const { score, grade, totalDeduction, budget, criticalCount } = scoreChecks(checks, PART_GRADES);
+  return { checks, score, grade, totalDeduction, budget, criticalCount, material: m };
 }

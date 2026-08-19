@@ -7,12 +7,20 @@
  *   primer        can bond, but needs an adhesion primer or plasma treatment
  *   incompatible  will not bond; delamination likely
  *
+ * `fusion: true` marks a pair that welds to itself — the same polymer on both
+ * shots, or two grades sharing the phase that forms the bond. It matters
+ * beyond adhesion: the thermal check otherwise reads shot 2's melt sitting far
+ * above shot 1's heat-deflection temperature as the substrate being destroyed,
+ * when for these pairs remelting the interface is the entire point. Without
+ * the flag every fusion weld in this table — including the ASA-natural window
+ * on a PC/ASA body — was graded a critical thermal failure.
+ *
  * Keyed 'shot1:shot2'; getTwoShotCompat looks up both orderings.
  * Source: typical overmoulding practice, Dow / BASF / Covestro data sheets.
  */
 export const TWO_SHOT_COMPAT = {
   // ── ABS substrate ──────────────────────────────────────────────────────
-  'abs:tpu':   { adhesion:'chemical',     notes:'Excellent. Classic over-mould pair. TPU melts at 200°C, well below ABS HDT of 98°C.' },
+  'abs:tpu':   { adhesion:'chemical',     notes:'Excellent. Classic over-mould pair. TPU melt (200°C) is above the ABS HDT of 98°C, as it is for almost any real overmould — short contact time and a fast fill make it a process concern rather than a barrier.' },
   'abs:pc':    { adhesion:'chemical',     notes:'Good. PC/ABS alloys confirm compatibility. PC melt (300°C) is above ABS HDT — keep barrels at low end and minimise contact time.' },
   'abs:petg':  { adhesion:'chemical',     notes:'Good. Similar styrenic chemistry gives strong interface bond.' },
   'abs:pmma':  { adhesion:'mechanical',   notes:'Marginal chemical bond. Add undercut features to substrate for mechanical retention.' },
@@ -50,8 +58,8 @@ export const TWO_SHOT_COMPAT = {
   // ── PC/ASA substrate — amorphous PC/styrenic blend, mirrors PC/ABS ──────
   'pcasa:tpu':  { adhesion:'chemical',     notes:'Good. TPU bonds well to PC/ASA, same mechanism as PC/ABS. TPU melt (200°C) is above PC/ASA HDT (110°C) — use fast injection and short cycle.' },
   'pcasa:abs':  { adhesion:'chemical',     notes:'Good. Styrenic/PC chemistry.' },
-  'pcasa:asa':  { adhesion:'chemical',     notes:'Excellent. ASA phase in the substrate bonds directly to ASA overmould. Common in UV-stable colour-over-colour applications.' },
-  'pcasa:pcasa':{ adhesion:'chemical',     notes:'Same material — ideal bond. Good for two-tone structural parts.' },
+  'pcasa:asa':  { adhesion:'chemical',     fusion:true, notes:'Excellent. ASA phase in the substrate bonds directly to ASA overmould. Common in UV-stable colour-over-colour applications.' },
+  'pcasa:pcasa':{ adhesion:'chemical',     fusion:true, notes:'Same material — ideal bond. Good for two-tone structural parts.' },
   'pcasa:petg': { adhesion:'chemical',     notes:'Good chemical affinity via the styrenic phase.' },
   'pcasa:pmma': { adhesion:'mechanical',   notes:'Marginal bond. Add mechanical retention features.' },
   'pcasa:ps':   { adhesion:'chemical',     notes:'Good — styrenic compatibility.' },
@@ -59,10 +67,10 @@ export const TWO_SHOT_COMPAT = {
   'pcasa:pe':   { adhesion:'incompatible', notes:'No adhesion. Mechanical retention only.' },
 
   // ── ASA natural — same polymer as ASA, so a fusion weld ────────────────
-  'asa_n:asa':   { adhesion:'chemical',     notes:'Same-polymer fusion weld. Natural ASA window bonded to standard ASA substrate — the strongest possible bond, effectively no interface.' },
-  'asa_n:pcasa': { adhesion:'chemical',     notes:'Excellent. ASA natural bonds to PC/ASA via the ASA phase. Same-polymer fusion at the ASA-to-ASA interface. Standard combination for UV-stable IR/visible sensor windows.' },
+  'asa_n:asa':   { adhesion:'chemical',     fusion:true, notes:'Same-polymer fusion weld. Natural ASA window bonded to standard ASA substrate — the strongest possible bond, effectively no interface.' },
+  'asa_n:pcasa': { adhesion:'chemical',     fusion:true, notes:'Excellent. ASA natural bonds to PC/ASA via the ASA phase. Same-polymer fusion at the ASA-to-ASA interface. Standard combination for UV-stable IR/visible sensor windows.' },
   'asa_n:abs':   { adhesion:'chemical',     notes:'Good. Styrenic chemistry match.' },
-  'asa_n:asa_n': { adhesion:'chemical',     notes:'Same material — fusion weld. Use for natural/natural two-tone or window-in-window geometry.' },
+  'asa_n:asa_n': { adhesion:'chemical',     fusion:true, notes:'Same material — fusion weld. Use for natural/natural two-tone or window-in-window geometry.' },
   'asa_n:tpu':   { adhesion:'chemical',     notes:'Good. TPU bonds to natural ASA as with standard ASA.' },
   'asa_n:pp':    { adhesion:'incompatible', notes:'No adhesion. Polyolefin incompatible with ASA.' },
   'asa_n:pe':    { adhesion:'incompatible', notes:'No adhesion.' },
@@ -74,7 +82,7 @@ export const TWO_SHOT_COMPAT = {
   'asa:petg':  { adhesion:'chemical',     notes:'Good. Styrenic chemistry gives a strong interface bond.' },
   'asa:pmma':  { adhesion:'mechanical',   notes:'Marginal chemical bond. Add undercut features for mechanical retention.' },
   'asa:ps':    { adhesion:'chemical',     notes:'Good bond — both styrenic.' },
-  'asa:asa':   { adhesion:'chemical',     notes:'Excellent. Same material — ideal for colour-over-colour two-shot with full UV stability.' },
+  'asa:asa':   { adhesion:'chemical',     fusion:true, notes:'Excellent. Same material — ideal for colour-over-colour two-shot with full UV stability.' },
   'asa:pp':    { adhesion:'incompatible', notes:'PP will not bond to ASA. Requires full mechanical encapsulation or a tie-layer adhesive.' },
   'asa:pe':    { adhesion:'incompatible', notes:'No adhesion. Mechanical retention only.' },
   'asa:tpe':   { adhesion:'chemical',     notes:'Good — most TPE grades bond well to ASA.' },

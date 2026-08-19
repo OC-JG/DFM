@@ -22,14 +22,33 @@ function normaliseStatus(status) {
 }
 
 function deductionOf(check) {
-  return check.scoreDeduction !== undefined ? check.scoreDeduction : (check.penalty || 0);
+  return check.scoreDeduction || 0;
 }
+
+/* An advisory carries no verdict about the part, so it gets its own row style
+   rather than borrowing the one that means "passed". */
+function stripClass(check) {
+  if (check.status === 'fail') return 'fail';
+  if (check.status === 'warn') return 'warn';
+  if (check.status === 'info') return 'info';
+  return 'ok';
+}
+
+const SEVERITY_LABEL = {
+  minor: 'minor', major: 'major', critical: 'critical',
+};
 
 /* Compact status strip inside the score block. */
 function scoreStrip(check) {
-  const st = check.status === 'fail' ? 'fail' : check.status === 'warn' ? 'warn' : 'ok';
+  const st = stripClass(check);
   const deduct = deductionOf(check);
-  return el('div', { class: `score-strip ${st}` }, [
+  const sev = SEVERITY_LABEL[check.severity];
+  return el('div', {
+    class: `score-strip ${st}`,
+    title: deduct > 0
+      ? `${sev} finding: ${deduct.toFixed(1)} of this check's ${check.weight} point budget`
+      : (check.status === 'info' ? 'Advisory — carries no score' : 'No deduction'),
+  }, [
     el('span', { class: 's-dot', text: STATUS_DOT[st], 'aria-hidden': 'true' }),
     el('span', { class: 's-name', text: check.name }),
     el('span', { class: 's-pts', text: deduct > 0 ? `−${deduct.toFixed(1)}` : '0' }),
@@ -71,7 +90,7 @@ function blockerText(checks) {
   const fails = checks.filter((c) => c.status === 'fail').map((c) => c.name);
   const warns = checks.filter((c) => c.status === 'warn').map((c) => c.name);
   const total = checks.reduce((s, c) => s + deductionOf(c), 0);
-  const basis = total > 0 ? ` (−${total.toFixed(1)} pts FMEA)` : '';
+  const basis = total > 0 ? ` (−${total.toFixed(1)} pts)` : '';
   if (fails.length) return `Blocking: ${fails.join(', ')}${basis}`;
   if (warns.length) return `Warnings: ${warns.slice(0, 2).join(', ')}${warns.length > 2 ? ` +${warns.length - 2} more` : ''}${basis}`;
   return total > 0 ? `Minor deductions: ${total.toFixed(1)} pts` : '';
@@ -84,8 +103,10 @@ export function renderResults(result, analysis) {
   if (hint) hint.style.display = 'none';
 
   $('scoreValue').textContent = result.score;
-  $('scoreValue').title =
-    `Score = 100 − ${result.totalDeduction.toFixed(1)} pts. Each check deducts its FMEA weight on a fail, half on a warning.`;
+  $('scoreValue').title = result.budget
+    ? `${result.totalDeduction.toFixed(1)} points deducted from a ${result.budget}-point budget across the checks that ran. `
+      + 'Each check spends a share of its own weight — a quarter for a minor finding, half for a major, all of it for a critical.'
+    : 'No checks were enabled.';
 
   replaceChildren($('scoreGrade'), [
     el('span', { class: 'dot', style: `background:${result.grade.color}` }),

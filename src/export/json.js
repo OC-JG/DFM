@@ -14,6 +14,14 @@ export function buildExportJSON({ sessionId, dfm, analysis, twoShot, interface: 
     mode: settings.analysisMode,
     score: dfm.result.score,
     grade: dfm.result.grade.label,
+    /* How the score was arrived at. deduction/budget is the whole calculation:
+       each check spends a fraction of its weight according to how bad the
+       finding was, and the score is what is left of the budget that ran. */
+    scoring: {
+      deduction: Math.round(dfm.result.totalDeduction * 10) / 10,
+      budget: dfm.result.budget,
+      critical_findings: dfm.result.criticalCount,
+    },
     material: dfm.result.material.name,
     input: dfm.input,
     checks: dfm.result.checks.map((c) => ({
@@ -21,8 +29,9 @@ export function buildExportJSON({ sessionId, dfm, analysis, twoShot, interface: 
       name: c.name,
       status: c.status,
       detail: c.detail,
+      severity: c.severity,
+      weight: c.weight,
       score_deduction: c.scoreDeduction,
-      penalty: c.penalty,
       metrics: c.metrics,
     })),
     mesh_summary: analysis ? meshSummary(analysis) : null,
@@ -37,6 +46,11 @@ export function buildExportJSON({ sessionId, dfm, analysis, twoShot, interface: 
     out.two_shot = {
       score: twoShot.score,
       grade: twoShot.grade.label,
+      scoring: {
+        deduction: Math.round(twoShot.totalDeduction * 10) / 10,
+        budget: twoShot.budget,
+        critical_findings: twoShot.criticalCount,
+      },
       shot1_material: twoShot.mat1.name,
       shot2_material: twoShot.mat2.name,
       window_type: settings.windowType,
@@ -50,7 +64,8 @@ export function buildExportJSON({ sessionId, dfm, analysis, twoShot, interface: 
       } : null,
       checks: twoShot.checks.map((c) => ({
         key: c.key, name: c.name, status: c.status, detail: c.detail,
-        penalty: c.penalty, metrics: c.metrics,
+        severity: c.severity, weight: c.weight, score_deduction: c.scoreDeduction,
+        metrics: c.metrics,
       })),
     };
   }
