@@ -86,14 +86,27 @@ export const CHECK_RISK_PROFILES = {
  * Two-shot checks score through the same mechanism rather than a parallel one
  * of their own. They previously summed raw penalties to a maximum of 105,
  * which meant a two-shot 70 and a single-part 70 were not the same claim.
+ *
+ * Five checks score, summing to 100; `ts_thermal` is advisory at 0. Coverage
+ * and thickness only run when an interface mesh is loaded, so normalisation
+ * handles the two-mesh and one-mesh cases the same way it does for FPC.
  */
 export const TWO_SHOT_RISK_PROFILES = {
-  ts_thermal:   { S: 5, L: 3, D: 2, weight: 25 }, // substrate deforms during shot 2
-  ts_adhesion:  { S: 5, L: 3, D: 3, weight: 25 }, // delamination in service
-  ts_thickness: { S: 4, L: 3, D: 3, weight: 20 }, // short shot, or a window that will not transmit
-  ts_shrinkage: { S: 3, L: 3, D: 4, weight: 18 }, // interface stress on cooling
-  ts_coverage:  { S: 2, L: 2, D: 2, weight: 6  }, // usually a mesh alignment problem
-  ts_order:     { S: 2, L: 2, D: 2, weight: 6  }, // convention, not physics
+  ts_adhesion:  { S: 5, L: 3, D: 3, weight: 34 }, // delamination in service
+  ts_thickness: { S: 4, L: 3, D: 3, weight: 26 }, // short shot, or a window that will not transmit
+  ts_shrinkage: { S: 3, L: 3, D: 4, weight: 24 }, // interface stress on cooling
+  ts_coverage:  { S: 2, L: 2, D: 2, weight: 8  }, // usually a mesh alignment problem
+  ts_order:     { S: 2, L: 2, D: 2, weight: 8  }, // convention, not physics
+
+  /* Advisory, and the reason is worth stating here rather than only at the
+     rule. It held 25 points and decided the grade from melt temperature
+     against HDT, which is a sustained-load deflection property and not what
+     seconds of contact with a hot melt does to a cold substrate. Vicat
+     softening point would answer it; the material table does not carry Vicat.
+     The 25 points were redistributed across the five above in proportion to
+     what they already held, so the scored set still sums to 100 and no
+     surviving check changed rank. */
+  ts_thermal:   { S: 5, L: 3, D: 2, weight: 0  }, // needs Vicat, not HDT
 };
 
 /* Severity a check carries, falling back to its display status for any rule

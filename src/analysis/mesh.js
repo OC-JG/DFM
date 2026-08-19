@@ -524,6 +524,38 @@ function sphereThicknessAt(bvh, geom, t, cx, cy, cz, nx, ny, nz, eps, diag, axia
  * Slide vs lifter comes from the outward-normal ray: escaping to infinity
  * means external (slide), hitting more mesh means an internal pocket (lifter).
  *
+ * ── Assumption: the parting line is flat, at the pull minimum ──────────────
+ *
+ * Case (3) is where that assumption enters, and it is an assumption rather
+ * than a measurement: nothing here derives where a toolmaker would actually
+ * split the mould. The band is a fixed 8% of the part's extent along the pull
+ * axis, taken at the low end, so every face above it that points against the
+ * pull is a candidate undercut.
+ *
+ * This is accepted deliberately, not overlooked. Deciding a parting line
+ * properly means choosing a curve on the surface that maximises the area
+ * released by each half while staying manufacturable — a search over the mesh,
+ * not a threshold, and one whose answer depends on cosmetic requirements,
+ * gate position and flash tolerance that this tool is not given. Guessing at
+ * it would produce a confident line that a toolmaker then has to argue with.
+ *
+ * Consequence, and it is asymmetric. The assumed line sits as low as a parting
+ * line can go, so almost all the error is over-reporting: a stepped or
+ * contoured split can resolve an overhang with no side action at all, and a
+ * face reported here as needing a slide may need nothing but a different line.
+ * Over-reporting is the safe direction for a triage tool, and the undercut
+ * check says so in its own output so the count reads as "these need a
+ * decision", not "these need moving tooling" — repositioning the parting line
+ * is the first item in the redesign hierarchy it prints, for this reason.
+ *
+ * The one way it can under-report is the exclusion band itself. A face lying
+ * inside that bottom 8% is treated as cavity-formed; if the real split runs
+ * above it, it is a genuine undercut this pass will not name. That is a narrow
+ * window — 8% of the pull extent, at the end of the part furthest from the
+ * core — and it is the price of not flagging the part's own base as an
+ * undercut on every run. Worth knowing before trusting a clean result on a
+ * part whose real parting line is nowhere near its pull minimum.
+ *
  * Lifted out of analyseMesh so that suggestPullDirection can score candidate
  * axes with the same definition the report will use. It previously used its own
  * — a sidewall-lean test with a hardcoded 1° threshold and no mould-type
@@ -606,11 +638,10 @@ const SLIDE_PROBE_MIN_ESCAPES = 2;
  * face, spread around the plane; if enough of them get out, a slide can come in
  * the same way.
  *
- * Note what this does *not* decide: whether the face is an undercut in the first
- * place. That still rests on the parting line being flat at the pull minimum,
- * which is the assumption the rest of this function makes and the one worth
- * revisiting — a stepped parting line resolves an overhang with no side action
- * at all.
+ * Note what this does *not* decide: whether the face is an undercut in the
+ * first place. That rests on the flat-parting-line assumption documented on
+ * classifyUndercutFaces above. This function only sorts faces already judged
+ * to be undercuts into the two kinds of moving tooling that can serve them.
  */
 function slideCanReachFace(bvh, geom, t, cx, cy, cz, nx, ny, nz, pullDir, eps, diag) {
   const [pdx, pdy, pdz] = pullDir;

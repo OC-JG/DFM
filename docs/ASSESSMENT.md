@@ -525,16 +525,16 @@ Two further changes fall out of the same principle:
 
 **F1 — every fusion weld was graded a critical thermal failure.** *(fixed)*
 
-The thermal check compares shot 2's melt against shot 1's HDT. Two grades of the
+The thermal check compared shot 2's melt against shot 1's HDT. Two grades of the
 same polymer necessarily have melt far above HDT, so the check condemned every
 same-polymer pair in the compatibility table — while the adhesion check on the
 same page called them the strongest bond available. ASA-natural on PC/ASA, which
 is the reason those grades are in the table at all and is the IR-window
 construction, came out **66, MAJOR REWORK**. Pairs that weld to themselves now
-carry `fusion: true` in `TWO_SHOT_COMPAT`, and the thermal check reads the heat
-as the bonding mechanism it is, with a minor process caveat about substrate
-dwell. That pairing now scores **92, INTERFACE OK**. ABS+PP is still 26 and NOT
-COMPATIBLE.
+carry `fusion: true` in `TWO_SHOT_COMPAT`, and the advisory that replaced the
+thermal check reads the heat as the bonding mechanism it is, with a process
+caveat about substrate dwell. That pairing now scores **100, INTERFACE OK**.
+ABS+PP is still **39, NOT COMPATIBLE** — on adhesion, where the problem is.
 
 **F2 — a wrong sentence in the material data.** *(fixed)*
 
@@ -542,18 +542,46 @@ The `abs:tpu` note read *"TPU melts at 200°C, well below ABS HDT of 98°C."*
 200 °C is not below 98 °C. Reworded to say what is actually true and why the
 pair works anyway.
 
-**F3 — the 120 °C HDT margin condemns low-HDT substrates.** *(open — needs a
-moulding engineer, not a programmer)*
+**F3 — the 120 °C HDT margin condemned low-HDT substrates.** *(fixed — the
+check no longer scores)*
 
-`ts_thermal` calls it critical when shot 2's melt exceeds shot 1's HDT by more
+`ts_thermal` called it critical when shot 2's melt exceeded shot 1's HDT by more
 than 120 °C. Polypropylene's HDT at 0.45 MPa is 60 °C, so PP + TPU — a common
-overmould — scores 49, NOT COMPATIBLE, on the thermal check alone. The code's
-own comment concedes the metric is wrong: *"HDT is a sustained-load test; Vicat
-softening point is closer to what two-shot injection actually does to the
-substrate."* The fix is to carry Vicat figures in the material table and compare
-against those, but which margin is right is a question about OnlyCat's process
-window, and it should not be guessed at. Affected pairs, all currently critical
-on thermal: `pp+tpu`, `abs+pc`, `abs+pp`, `pp+pe`, `pom+pp`, `pa6+pp`.
+overmould — scored **49, NOT COMPATIBLE** on the thermal check alone, and every
+material in the table melts above PP's 180 °C threshold. The code's own comment
+conceded the metric was wrong: *"HDT is a sustained-load test; Vicat softening
+point is closer to what two-shot injection actually does to the substrate."*
+
+Two ways out: add Vicat figures to the material table and re-derive a margin, or
+stop scoring a question the available data cannot answer. The second is the one
+taken. Carrying HDT and calling it Vicat-shaped would have been the same guess
+with a better comment, and the margin that *is* right is a question about
+OnlyCat's process window rather than a coding decision.
+
+So `ts_thermal` is now an unscored advisory. It reports shot 2's melt, shot 1's
+HDT, the difference and the bond type; it says in the output that HDT cannot
+settle the question and why (sustained-load deflection versus seconds of contact
+against a cold mould); and it names Vicat as the property that would. The
+process advice survives — fast fill, cold mould, short cycle, measure the shot 1
+geometry on a short-shot trial — because that advice was never in dispute; only
+the verdict was.
+
+Its 25 points went to the surviving five checks in proportion to what they
+already held, so the interface score is still out of a full 100 and no check
+changed rank: adhesion 25→**34**, thickness 20→**26**, shrinkage 18→**24**,
+coverage and order 6→**8** each. What that changes:
+
+| pair | before | after | now driven by |
+|---|---|---|---|
+| `pp+tpu` | 49 NOT COMPATIBLE | **74 MINOR REWORK** | adhesion — needs a primer |
+| `abs+tpu` | 85 INTERFACE OK | **91 INTERFACE OK** | shrinkage, 0.95% differential |
+| `pcasa+asa_n` | 92 INTERFACE OK | **100 INTERFACE OK** | nothing |
+| `abs+pp` | 26 NOT COMPATIBLE | **39 NOT COMPATIBLE** | adhesion — they do not bond |
+
+The pair that should be condemned still is, and it is condemned for the reason
+that is actually true of it. `hdtC` stays in the material table, with a note
+beside it saying not to restore a melt-versus-HDT threshold without adding Vicat
+first.
 
 ### Phase 2 — tests that assert numbers, and CI
 
@@ -638,8 +666,8 @@ after:   Slide retracts perpendicular to pull along +X,
 Where the normal carries no in-plane information, the direction the feature is
 reachable from does: outward from the part's centre towards the region.
 
-**F6 — lifters cannot be detected in the default mould mode.** *(open — needs a
-moulding engineer)*
+**F6 — lifters cannot be detected in the default mould mode.** *(fixed —
+see "F6 partly closed" below, and the parting-line note under it)*
 
 In `analyseMesh`, a two-piece mould only admits candidates with
 `pd < -0.7` — faces pointing against the pull — and every such candidate is then
@@ -653,7 +681,10 @@ parting plane "simply belongs to the other half" in a two-piece tool, which is
 right. But an internal ledge inside a housing genuinely needs a lifter in a
 two-piece mould, and worse, such a ledge is currently classified as a *slide*,
 because a ray cast outward from it escapes through the part's opening. Deciding
-what should be reported here is a tooling question, not a coding one.
+what should be reported here is a tooling question, not a coding one — and it was
+decided both ways: the lifter half is fixed, the parting-line half is documented
+as an accepted assumption rather than modelled. Both are written up under Phase 4
+below.
 
 ### Phase 3 — shot weight and clamp force
 
@@ -794,7 +825,7 @@ or running a different set of checks all make the score movement something other
 than a change in the part, and each raises a caveat above the diff. Comparing a
 run against itself says so rather than reporting a triumphant zero.
 
-### Three of the open questions, answered
+### The open questions, answered
 
 **F6 partly closed — internal features are lifters now, not slides.**
 
@@ -829,14 +860,49 @@ Two things this does *not* fix, and they are the same thing:
   the core forms that ceiling and withdraws away from it, needing nothing. So
   there is a false-positive class here affecting most hollow parts. It was there
   before — reported as a *slide* — and is now at least labelled with the right
-  kind of tooling, but the fix is a parting-line model, not a patch.
+  kind of tooling.
 - Conversely the internal ledge is only caught because its *underside* faces
   against the pull. The face that actually blocks the core is the inner wall
   *above* the ledge, which is perpendicular to the pull and never a candidate. So
   a ledge whose underside is drafted away would be missed.
 
-Both need someone to decide what parting-line model the tool should assume. That
-is the remaining question, and it is a mould-design question.
+**The flat parting line is now a documented assumption, not an open item.**
+
+The judgement was that computing a parting line is the wrong thing to build.
+Deciding one properly means searching for a curve on the surface that maximises
+the area each half releases while staying manufacturable, and the answer depends
+on cosmetic requirements, gate position and flash tolerance the tool is never
+given. A computed line would be a confident guess that a toolmaker then has to
+argue with, which is worse than an honest simplification — and the simplification
+errs in the safe direction.
+
+It errs asymmetrically, and that is what makes it acceptable. The assumed line
+sits as low as a parting line can go, so almost all the error is over-reporting:
+a stepped or contoured split releases the overhang and no moving tooling is
+needed. That is why "reposition the parting line" leads the redesign hierarchy
+the undercut check prints. The one way it can under-report is the exclusion band
+itself — faces inside the bottom 8% of the pull extent are taken as
+cavity-formed and never tested, so on a part whose real split runs well above its
+base, that band wants checking by eye.
+
+Three places now say so, and it is deliberately said in all three because each
+reaches a different reader:
+
+- `classifyUndercutFaces` in `src/analysis/mesh.js` carries the full argument —
+  why the assumption is there, which direction it errs, and where the exclusion
+  band bites. For whoever next changes the classifier.
+- **The undercut check's own output** carries a one-sentence version, on every
+  branch including the clean one. Without it the region count reads as a slide
+  count, and it is not one: it is a count of features needing a decision. This
+  is the reader who matters most, because they are the one about to quote a tool.
+- **README "Known constraints"** carries it for whoever is deciding whether to
+  trust the tool before loading a part into it.
+
+The second item on the list above — a ledge drafted away on its underside — is a
+genuine detection gap rather than an assumption, and it stays open. Catching it
+needs the blocking face (the inner wall above the ledge, perpendicular to the
+pull) to become a candidate, which means reasoning about the core's withdrawal
+path rather than face normals alone.
 
 **Wall thickness is judged on the inscribed sphere.**
 
@@ -938,14 +1004,20 @@ comments beside them.
 
 ### Still open, in priority order
 
-**Two questions for a moulding engineer.** F3 — the 120 °C HDT margin, which
-condemns polypropylene as a substrate on the thermal check alone. And the
-parting-line model, which is what remains of F6: the tool assumes a flat parting
-line at the pull minimum, and that assumption is what makes the cavity ceiling of
-every hollow part read as an undercut. Neither is a coding decision.
+**One question for a moulding engineer**, and it is `coolK`: whether the
+cooling-time coefficient in the material table is written for half-wall or
+full-wall thickness. The two conventions differ by a factor of four in the
+resulting cycle time, so cycle time and the cost model that would sit on top of
+it both wait on the answer. Whichever number appears on screen will be quoted
+from, which is why no number appears yet.
 
-The other two are answered. Wall thickness is judged on the sphere figure, and
-internal features are classified as lifters.
+The four questions that were open here are closed. Wall thickness is judged on
+the sphere figure. Internal features are classified as lifters. The HDT margin is
+gone — the check reports and no longer scores, because HDT cannot answer what was
+being asked of it (F3 above). And the parting-line model was decided against
+rather than deferred: the flat-line assumption stays, documented in the
+classifier, in the check's own output and in the README, because it errs toward
+over-reporting and a computed line would err toward false confidence.
 
 **The rest of Phase 3**: corner radii from the STEP `faceGroups` the parser
 already extracts and discards — which needs a STEP fixture, and therefore a

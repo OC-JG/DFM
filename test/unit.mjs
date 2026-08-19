@@ -453,8 +453,12 @@ describe('scoring — the weight table');
   });
 
   it('the two-shot table sums to 100 as well', () => {
+    /* The thermal check gave up its 25 points when melt-versus-HDT stopped
+       being scored; they were redistributed across the surviving five in
+       proportion, so the interface score is still out of a full 100. */
     const total = Object.values(TWO_SHOT_RISK_PROFILES).reduce((sum, p) => sum + p.weight, 0);
     eq(total, 100, 'two-shot budget:');
+    eq(TWO_SHOT_RISK_PROFILES.ts_thermal.weight, 0, 'thermal advisory weight:');
   });
 
   it('the corner advisory holds no budget it could never spend', () => {
@@ -634,41 +638,71 @@ describe('scoring — one source of truth');
     eq(score, 100); eq(budget, 100); eq(grade.label, 'INTERFACE OK');
   });
 
-  it('a fusion weld is not graded as substrate destruction', () => {
-    /* Two grades of the same polymer necessarily have shot 2's melt far above
-       shot 1's HDT, so the thermal rule condemned every fusion pair in the
-       compatibility table as a critical failure — while the adhesion check on
-       the same page called them the strongest bond available. The ASA-natural
-       window on a PC/ASA body, which is the reason those grades are in the
-       table at all, came out MAJOR REWORK. */
-    for (const [a, b] of [['pcasa', 'asa_n'], ['asa_n', 'pcasa'], ['asa', 'asa_n'], ['asa', 'asa']]) {
+  it('substrate softening is an advisory, not a graded verdict', () => {
+    /* Melt-versus-HDT was 25 of the interface's 100 points, which condemned
+       every fusion pair in the compatibility table — two grades of the same
+       polymer necessarily have shot 2's melt far above shot 1's HDT — while
+       the adhesion check on the same page called them the strongest bond
+       available. The ASA-natural window on a PC/ASA body, the reason those
+       grades are in the table at all, came out MAJOR REWORK. HDT is a
+       sustained-load deflection property and cannot settle the question, so
+       the check now reports and does not score. */
+    const pairs = [['pcasa', 'asa_n'], ['asa_n', 'pcasa'], ['asa', 'asa_n'], ['asa', 'asa'],
+                   ['abs', 'tpu'], ['pp', 'tpu'], ['pc', 'tpu']];
+    for (const [a, b] of pairs) {
       const ts = runTwoShotDFM({ mat1: a, mat2: b, interface: null, opticalWindow: 'none' });
       const thermal = ts.checks.find((c) => c.key === 'ts_thermal');
-      eq(thermal.severity, 'minor', `${a}+${b} thermal:`);
+      eq(thermal.status, 'info', `${a}+${b} thermal status:`);
+      eq(thermal.severity, 'none', `${a}+${b} thermal severity:`);
+      eq(thermal.scoreDeduction, 0, `${a}+${b} thermal deduction:`);
+      eq(thermal.weight, 0, `${a}+${b} thermal weight:`);
+    }
+  });
+
+  it('the fusion pairs that HDT condemned now grade on adhesion', () => {
+    for (const [a, b] of [['pcasa', 'asa_n'], ['asa_n', 'pcasa'], ['asa', 'asa_n'], ['asa', 'asa']]) {
+      const ts = runTwoShotDFM({ mat1: a, mat2: b, interface: null, opticalWindow: 'none' });
       eq(ts.criticalCount, 0, `${a}+${b} critical findings:`);
       eq(ts.grade.label, 'INTERFACE OK', `${a}+${b} graded on score ${ts.score}:`);
     }
   });
+
 
   it('a genuinely incompatible pair is still condemned', () => {
     /* The counterweight to the test above: relaxing the fusion case must not
        have relaxed the case the rule exists for. */
     const ts = runTwoShotDFM({ mat1: 'abs', mat2: 'pp', interface: null, opticalWindow: 'none' });
     eq(ts.checks.find((c) => c.key === 'ts_adhesion').severity, 'critical', 'ABS+PP adhesion:');
-    eq(ts.checks.find((c) => c.key === 'ts_thermal').severity, 'critical', 'ABS+PP thermal:');
     eq(ts.grade.label, 'NOT COMPATIBLE');
   });
 
-  it('the textbook overmould pair is not treated as a problem', () => {
+  it('the textbook overmould pair is left with only its real finding', () => {
     /* ABS with a TPU grip. The adhesion table calls it "Excellent. Classic
-       over-mould pair", and TPU's 200 °C melt is above ABS's 98 °C HDT, as it
-       is for essentially every real overmould — so the thermal advisory has to
-       be a minor finding or the tool disagrees with itself. */
+       over-mould pair", so with melt-versus-HDT out of the score the only
+       deduction left is the one that survives inspection: ABS shrinks ~0.55%
+       and TPU ~1.5%, a 0.95% differential, which the shrinkage rule calls a
+       minor finding and prescribes balanced cooling for. That is a real
+       statement about the pair; the thermal 25 was not. */
     const ts = runTwoShotDFM({ mat1: 'abs', mat2: 'tpu', interface: null, opticalWindow: 'none' });
     eq(ts.criticalCount, 0, 'critical findings on the classic pair:');
     eq(ts.checks.find((c) => c.key === 'ts_adhesion').severity, 'none', 'adhesion:');
-    eq(ts.checks.find((c) => c.key === 'ts_thermal').severity, 'minor', 'thermal:');
-    eq(ts.grade.label, 'INTERFACE OK', `score ${ts.score}, deductions: ${ts.checks.filter((c) => c.scoreDeduction > 0).map((c) => `${c.key} −${c.scoreDeduction}`).join(', ')}`);
+    const deducting = ts.checks.filter((c) => c.scoreDeduction > 0).map((c) => c.key);
+    eq(deducting.join(','), 'ts_shrinkage', 'checks still deducting:');
+    eq(ts.checks.find((c) => c.key === 'ts_shrinkage').severity, 'minor', 'shrinkage:');
+    eq(ts.grade.label, 'INTERFACE OK', `score ${ts.score}:`);
+  });
+
+  it('polypropylene is no longer condemned as a substrate on temperature alone', () => {
+    /* PP's HDT is 60 °C, so the old 120 °C margin over HDT made any shot 2
+       above 180 °C a critical thermal failure — which is every material in the
+       table. PP + TPU scored 49, NOT COMPATIBLE, on a pair whose actual
+       problem is adhesion, and PP + TPU with a primer is a real product. The
+       adhesion check should be the one talking. */
+    const ts = runTwoShotDFM({ mat1: 'pp', mat2: 'tpu', interface: null, opticalWindow: 'none' });
+    const adhesion = ts.checks.find((c) => c.key === 'ts_adhesion');
+    eq(ts.checks.find((c) => c.key === 'ts_thermal').scoreDeduction, 0, 'thermal deduction:');
+    assert(adhesion.scoreDeduction > 0, `adhesion should carry the finding, deducted ${adhesion.scoreDeduction}`);
+    assert(ts.score > 49, `score should rise above the old thermal-driven 49, got ${ts.score}`);
   });
 }
 

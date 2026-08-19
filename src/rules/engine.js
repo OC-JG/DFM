@@ -355,9 +355,20 @@ export function runDFM(input) {
       const sigSlide = meshRegions.filter((r) => r.type === 1 && r.area > 1);
       const sigLifter = meshRegions.filter((r) => r.type === 2 && r.area > 1);
 
+      /* What "undercut" means here, stated in the output rather than left in
+         the source. The classifier assumes a flat parting line at the pull
+         minimum, because nothing in an STL says where a toolmaker would split
+         the mould — see classifyUndercutFaces. That assumption over-reports:
+         a stepped or contoured line can release an overhang with no moving
+         tooling at all, which is why "reposition the parting line" leads the
+         redesign hierarchy below. Without this sentence the region count reads
+         as a slide count, and it is not one. */
+      const partingNote = ' <i>Measured against a flat parting line at the pull minimum — the tool has no way to know where the mould is actually split. A different or stepped line may release some of these with no moving tooling, so treat the count as features needing a decision rather than a slide count.</i>';
+
       if (sigSlide.length === 0 && sigLifter.length === 0) {
         status = 'ok'; severity = 'none';
-        detail = `Mesh check on pull axis ${formatPullAxis(mesh.pullAxis, mesh.pullDir)}: no significant undercut features detected. Straight-pull tool feasible — lowest tooling cost.`;
+        detail = `Mesh check on pull axis ${formatPullAxis(mesh.pullAxis, mesh.pullDir)}: no significant undercut features detected. Straight-pull tool feasible — lowest tooling cost.`
+          + ' <i>Assumes a flat parting line at the pull minimum. Faces within the bottom 8% of the pull extent are taken as cavity-formed and not tested; if the real split runs well above the part\'s base, re-check that band by eye.</i>';
       } else if (sigLifter.length === 0) {
         status = 'warn';
         /* One slide is a known cost on a quotation; several start to shape the
@@ -369,13 +380,14 @@ export function runDFM(input) {
         const bumpOffNote = m.stripPct > 0
           ? ` Material ${m.name} has ${m.stripPct}% strip tolerance — small undercuts (< ${(m.stripPct / 100 * 20).toFixed(1)} mm on 20 mm OD) may be ejector-strippable without a slide.`
           : '';
-        detail = `${sigSlide.length} external undercut region${sigSlide.length > 1 ? 's' : ''} detected. Before adding slides, consider: (1) repositioning parting line, (2) shut-off cores, (3) pass-through holes.${bumpOffNote} If slides are necessary: tool cost +15–30%.`;
+        detail = `${sigSlide.length} external undercut region${sigSlide.length > 1 ? 's' : ''} detected. Before adding slides, consider: (1) repositioning parting line, (2) shut-off cores, (3) pass-through holes.${bumpOffNote} If slides are necessary: tool cost +15–30%.${partingNote}`;
       } else {
         status = 'fail';
         severity = 'critical';
         detail = `${sigLifter.length} internal undercut${sigLifter.length > 1 ? 's' : ''} require lifter${sigLifter.length > 1 ? 's' : ''}`
           + (sigSlide.length ? `; ${sigSlide.length} external undercut${sigSlide.length > 1 ? 's' : ''} require slides.` : '.')
-          + ' Consider redesigning to eliminate via shut-offs or parting line relocation before committing to moving tooling.';
+          + ' Consider redesigning to eliminate via shut-offs or parting line relocation before committing to moving tooling.'
+          + partingNote;
       }
     } else if (input.hasUndercut === '0') {
       status = 'ok'; severity = 'none';

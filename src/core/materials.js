@@ -7,9 +7,13 @@
  *   coolK     cooling-time coefficient k in tc = k × s²  (s = half-wall, mm)
  *   stripPct  max strippable undercut as % of part OD, for soft materials
  *   meltC     typical injection melt temperature (°C)
- *   hdtC      heat deflection temperature at 0.45 MPa (°C). Used by the
- *             two-shot check: shot 2 melt should stay below (hdtC − 20 °C)
- *             to avoid deforming the substrate.
+ *   hdtC      heat deflection temperature at 0.45 MPa (°C). Reported by the
+ *             two-shot substrate-softening advisory, and deliberately not
+ *             scored by it: HDT is a sustained-load deflection test, and a
+ *             few seconds of contact with a hot melt against a cold mould is
+ *             not that. Vicat softening point (ISO 306) is the property that
+ *             would carry a verdict; it is not in this table. Do not restore
+ *             a melt-versus-HDT threshold without adding Vicat first.
  *   density   g/cm³
  */
 
