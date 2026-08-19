@@ -32,9 +32,17 @@ No dependencies, no install step. The bundler is ~150 lines in `build.js`.
 
 ```sh
 npm install            # only needed for the tests
+npm run browser        # once: fetches the Chromium the smoke test drives
 npm test               # build + unit tests + fixtures + browser smoke test
+
 npm run test:unit      # just the unit tests: no browser, no network, sub-second
+npm run verify:build   # asserts the committed dfm-tool.html matches src/
 ```
+
+`npm install` brings in the Playwright library but not a browser binary, which
+is what `npm run browser` is for. If you already have a Chromium — a different
+Playwright install, a system one — point `DFM_CHROMIUM` at it and skip that
+step.
 
 `test/unit.mjs` asserts numbers. Every fixture it uses has a known answer —
 analytic where the geometry gives one (a 2 mm hollow cylinder measures 2 mm, a
@@ -66,6 +74,7 @@ src/
 test/                  fixture generator, unit tests, browser smoke test
   lib/shapes.mjs       analytic fixtures with known answers
   lib/reference.mjs    slow, independent reference implementations
+.github/workflows/     CI: unit tests, artifact-sync check, browser suite
 legacy/                the original single-file v1, kept for reference
 ```
 

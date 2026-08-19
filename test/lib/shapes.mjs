@@ -252,3 +252,84 @@ export function hollowFrustum(baseHalf = 20, height = 30, draftDeg = 3, wall = 2
   }
   return toSoup(out);
 }
+
+/*
+ * Overhanging step: an L-shaped profile extruded along Y.
+ *
+ *      z
+ *   20 +--------------+
+ *      |              |
+ *   10 +-------+      |
+ *      |       |      |     the underside of the overhang, z = 10 from
+ *    0 +-------+······+     x = 30 to 44, faces against a +Z pull and its
+ *      0      30      44 x  outward ray leaves the part: one external
+ *                          undercut, needing one slide.
+ *
+ * Built as an extruded profile rather than a barb stuck on a box face,
+ * because a barb leaves T-junctions: the box's side faces span the full
+ * height with a single edge, while the face the barb grows out of is split
+ * at the barb's top and bottom, so the two no longer share edges and the
+ * mesh is not closed. Every vertex here is on both the profile outline and
+ * the faces that meet it.
+ *
+ * Known answers: enclosed volume 22,200 mm³, and 420 mm² of slide undercut
+ * (14 mm of overhang × 30 mm of extrusion) on a +Z pull.
+ */
+export function overhangBlock(lower = 30, upper = 44, depth = 30, zStep = 10, zTop = 20) {
+  /* Profile outline, counter-clockwise in XZ. The two collinear vertices at
+     x = 0, z = zStep and x = lower, z = zTop are not corners of the shape —
+     they split outline edges so the cap quads below can share them. */
+  const P = [
+    [0, 0], [lower, 0], [lower, zStep], [upper, zStep],
+    [upper, zTop], [lower, zTop], [0, zTop], [0, zStep],
+  ];
+  const CAPS = [[0, 1, 2, 7], [7, 2, 5, 6], [2, 3, 4, 5]];
+
+  const at = (i, y) => [P[i][0], y, P[i][1]];
+  const out = [];
+
+  /* Front cap at y = 0, normal −Y; back cap at y = depth, normal +Y. */
+  for (const [a, b, c, d] of CAPS) {
+    quad(out, at(a, 0), at(b, 0), at(c, 0), at(d, 0));
+    quad(out, at(d, depth), at(c, depth), at(b, depth), at(a, depth));
+  }
+
+  /* One wall per outline segment, wound outward. */
+  for (let i = 0; i < P.length; i++) {
+    const j = (i + 1) % P.length;
+    quad(out, at(i, 0), at(i, depth), at(j, depth), at(j, 0));
+  }
+  return toSoup(out);
+}
+
+/*
+ * Split every triangle into four by its edge midpoints.
+ *
+ * For asserting that an answer depends on the geometry and not on how finely
+ * it was exported — the same shape, four and sixteen times the triangles, has
+ * to give the same undercut regions and the same wall thickness.
+ */
+export function subdivideSoup(soup, times = 1) {
+  let positions = soup.positions;
+  let triCount = soup.triCount;
+  for (let pass = 0; pass < times; pass++) {
+    const out = new Float32Array(triCount * 4 * 9);
+    let o = 0;
+    const mid = (p, a, b, k) => (p[a + k] + p[b + k]) / 2;
+    for (let t = 0; t < triCount; t++) {
+      const A = t * 9, B = t * 9 + 3, C = t * 9 + 6;
+      const ab = [mid(positions, A, B, 0), mid(positions, A, B, 1), mid(positions, A, B, 2)];
+      const bc = [mid(positions, B, C, 0), mid(positions, B, C, 1), mid(positions, B, C, 2)];
+      const ca = [mid(positions, C, A, 0), mid(positions, C, A, 1), mid(positions, C, A, 2)];
+      const a = [positions[A], positions[A + 1], positions[A + 2]];
+      const b = [positions[B], positions[B + 1], positions[B + 2]];
+      const c = [positions[C], positions[C + 1], positions[C + 2]];
+      for (const tri of [[a, ab, ca], [ab, b, bc], [ca, bc, c], [ab, bc, ca]]) {
+        for (const v of tri) { out[o++] = v[0]; out[o++] = v[1]; out[o++] = v[2]; }
+      }
+    }
+    positions = out;
+    triCount *= 4;
+  }
+  return { positions, triCount };
+}

@@ -668,6 +668,132 @@ describe('scoring — one source of truth');
   });
 }
 
+
+describe('undercuts — an overhang with a known answer');
+{
+  /* overhangBlock is a 14 mm overhang across a 30 mm extrusion: 420 mm² of
+     external undercut, needing one slide that withdraws 14 mm in +X. */
+  const EXPECT_AREA = 14 * 30;
+
+  it('finds one slide region of the right area', () => {
+    const m = analyse(weld(S.overhangBlock()));
+    const regions = m.undercutRegions.filter((r) => r.area > 1);
+    eq(regions.length, 1, 'region count:');
+    eq(regions[0].type, 1, 'type (1 = slide):');
+    within(regions[0].area, EXPECT_AREA, 1, 'undercut area:');
+    within(m.slideArea, EXPECT_AREA, 1, 'total slide area:');
+    eq(m.lifterArea, 0, 'lifter area:');
+  });
+
+  it('reports a usable retraction direction and stroke', () => {
+    /* The underside of an overhang points straight down the pull axis, so the
+       mean normal projected into the parting plane is the zero vector. The
+       tool used to report a direction of (0.00, 0.00, 0.00) and a stroke of
+       0.0 mm — for the most common undercut there is. */
+    const region = analyse(weld(S.overhangBlock())).undercutRegions[0];
+    const len = Math.hypot(...region.action);
+    close(len, 1, 1e-6, 'the action direction must be a unit vector:');
+    close(region.action[0], 1, 1e-6, 'a +X overhang retracts in +X:');
+    within(region.stroke, 14, 1, 'stroke must clear the 14 mm overhang:');
+  });
+
+  it('gives the same answer however finely the part is tessellated', () => {
+    /* Grid clustering made this depend on the export: the same overhang came
+       out as 2, 8, 27 and 7 regions at successive subdivision levels, which
+       the rule engine reads as the difference between a minor and a major
+       finding. */
+    const answers = [0, 1, 2].map((n) => {
+      const m = analyse(weld(S.subdivideSoup(S.overhangBlock(), n)));
+      const regions = m.undercutRegions.filter((r) => r.area > 1);
+      return { tris: m.triCount, count: regions.length, area: m.slideArea, stroke: regions[0].stroke };
+    });
+    for (const a of answers) {
+      eq(a.count, 1, `at ${a.tris} triangles, region count:`);
+      within(a.area, EXPECT_AREA, 1, `at ${a.tris} triangles, area:`);
+      within(a.stroke, 14, 1, `at ${a.tris} triangles, stroke:`);
+    }
+  });
+
+  it('a straight-pull part reports nothing', () => {
+    for (const [name, soup] of [
+      ['solid box', S.box()],
+      ['frustum', S.frustum(20, 30, 3)],
+      ['hollow frustum', S.hollowFrustum(20, 30, 3, 2)],
+      ['tube', S.tube(20, 2, 40, 64)],
+    ]) {
+      const m = analyse(weld(soup));
+      eq(m.undercutRegions.filter((r) => r.area > 1).length, 0, `${name}:`);
+      eq(m.slideArea, 0, `${name} slide area:`);
+    }
+  });
+}
+
+describe('large meshes — the subsampled thickness path');
+{
+  /* A tube whose wall steps from 2 mm to 6 mm halfway up, so there is real
+     sink area for the subsampled pass to find or miss. */
+  function steppedTube(seg = 400) {
+    const out = [];
+    const at = (r, a, z) => [r * Math.cos(a), r * Math.sin(a), z];
+    const R = 20, h = 40, hStep = 20;
+    const rIn = (z) => (z < hStep ? R - 2.0 : R - 6.0);
+    for (let i = 0; i < seg; i++) {
+      const a0 = (i / seg) * Math.PI * 2, a1 = ((i + 1) / seg) * Math.PI * 2;
+      S.quad(out, at(R, a0, 0), at(R, a1, 0), at(R, a1, h), at(R, a0, h));
+      for (const [z0, z1] of [[0, hStep], [hStep, h]]) {
+        const r = rIn(z0 + 0.001);
+        S.quad(out, at(r, a0, z0), at(r, a0, z1), at(r, a1, z1), at(r, a1, z0));
+      }
+      S.quad(out, at(rIn(0.001), a0, hStep), at(rIn(0.001), a1, hStep), at(rIn(hStep + 1), a1, hStep), at(rIn(hStep + 1), a0, hStep));
+      S.quad(out, at(R, a0, 0), at(rIn(0.001), a0, 0), at(rIn(0.001), a1, 0), at(R, a1, 0));
+      S.quad(out, at(R, a0, h), at(R, a1, h), at(rIn(h - 1), a1, h), at(rIn(h - 1), a0, h));
+    }
+    return S.toSoup(out);
+  }
+
+  const geom = weld(steppedTube());
+  const truth = analyse(geom);
+
+  it('sink risk survives subsampling', () => {
+    /* Sampling in index order aliased against the tessellation: triangles come
+       off a tessellator in a repeating per-segment order, and a stride sharing
+       a factor with that period samples one role on every segment and never
+       the others. The thick band vanished — 8.9% severe sink at full coverage,
+       3.3% at stride 3, 0.0% at stride 6. */
+    assert(truth.sinkPctSevere > 5, `fixture should have real sink area, got ${truth.sinkPctSevere}`);
+    for (const cap of [4000, 2000, 800, 400]) {
+      const m = analyse(geom, { thicknessFullCap: cap });
+      assert(m.thicknessCoverage < 1, `cap ${cap} did not subsample`);
+      within(m.sinkPctSevere, truth.sinkPctSevere, 25, `cap ${cap} severe sink area:`);
+      within(m.sinkPctModerate, truth.sinkPctModerate, 25, `cap ${cap} moderate sink area:`);
+    }
+  });
+
+  it('reports the coverage it actually achieved', () => {
+    for (const cap of [2000, 400]) {
+      const m = analyse(geom, { thicknessFullCap: cap });
+      const stride = Math.ceil(geom.triCount / cap);
+      within(m.thicknessCoverage, 1 / stride, 15, `cap ${cap} reported coverage:`);
+    }
+    eq(truth.thicknessCoverage, 1, 'full coverage below the cap:');
+  });
+
+  it('wall transitions stand down rather than under-report', () => {
+    /* They need both triangles of an edge pair to carry a reading, which a
+       partial pass almost never gives — so the check reports nothing found
+       instead of quietly finding a fraction of what is there. */
+    assert(truth.wallTransitions.length > 0, 'fixture should have transitions at full coverage');
+    eq(analyse(geom, { thicknessFullCap: 2000 }).wallTransitions.length, 0);
+  });
+
+  it('subsampling stays reproducible', () => {
+    const a = analyse(geom, { thicknessFullCap: 800 });
+    const b = analyse(geom, { thicknessFullCap: 800 });
+    eq(a.sinkPctSevere, b.sinkPctSevere, 'severe sink across runs:');
+    eq(a.thicknessCoverage, b.thicknessCoverage, 'coverage across runs:');
+  });
+}
+
 // ── report ─────────────────────────────────────────────────────────────────
 
 console.log('');

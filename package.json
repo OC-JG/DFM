@@ -7,14 +7,20 @@
   "scripts": {
     "build": "node build.js",
     "fixtures": "node test/make-fixtures.mjs",
+    "browser": "playwright install chromium",
     "test:unit": "node test/unit.mjs",
-    "test": "node build.js && node test/unit.mjs && node test/make-fixtures.mjs && node test/smoke.mjs"
+    "test:smoke": "node build.js && node test/make-fixtures.mjs && node test/smoke.mjs",
+    "test": "node build.js && node test/unit.mjs && node test/make-fixtures.mjs && node test/smoke.mjs",
+    "verify:build": "node build.js && git diff --exit-code -- dfm-tool.html"
   },
   "devDependencies": {
     "jspdf": "2.5.1",
+    "playwright": "1.62.1",
     "three": "0.128.0"
   },
   "comments": {
-    "devDependencies": "Only the smoke test uses these. The shipped dfm-tool.html loads three.js and jsPDF from a CDN at runtime; the test serves these local copies in their place so it never depends on the network."
+    "devDependencies": "None of these are shipped. dfm-tool.html loads three.js and jsPDF from a CDN at runtime; the smoke test serves these local copies in their place so it never touches the network. playwright drives the browser it runs in.",
+    "browser": "npm install fetches the playwright library but not the browser binary. Run `npm run browser` once after installing, or set DFM_CHROMIUM to a Chromium you already have.",
+    "verify:build": "dfm-tool.html is the deliverable and is committed. Rebuilds and fails if the result differs from the committed copy, which a source-only commit would otherwise leave stale. Assumes a clean working tree, so it is a CI check rather than a pre-commit one — with src/ edits in progress it will fail by design."
   }
 }

@@ -3,7 +3,7 @@
 Assessed at commit `67a9655`. Everything below was verified by running the code,
 not by reading it.
 
-> **Status — Phase 0 and Phase 1 are done.** The findings below are kept as
+> **Status — Phases 0, 1 and 2 are done.** The findings below are kept as
 > written, as the record of what was wrong and the evidence for it. What changed
 > since is summarised in [Delivered](#delivered) at the end, along with two
 > further defects the work uncovered and one calibration question that needs a
@@ -555,6 +555,106 @@ against those, but which margin is right is a question about OnlyCat's process
 window, and it should not be guessed at. Affected pairs, all currently critical
 on thermal: `pp+tpu`, `abs+pc`, `abs+pp`, `pp+pe`, `pom+pp`, `pa6+pp`.
 
+### Phase 2 — tests that assert numbers, and CI
+
+- **C1 fixed.** `playwright` is pinned in `devDependencies`, `npm run browser`
+  fetches the Chromium binary that `npm install` does not, and `DFM_CHROMIUM`
+  points the smoke test at a browser you already have. The README's documented
+  sequence now works from a clean clone.
+- **C3 fixed.** `.github/workflows/ci.yml` runs the unit tests first (no browser,
+  no network, fails fast), then asserts the committed `dfm-tool.html` matches a
+  fresh build, then installs Chromium and runs the browser suite. A source-only
+  commit can no longer ship a stale deliverable.
+- **Item 12 partly done.** Fixtures now cover a curved part, a drafted shell, an
+  overhang with a known undercut answer, a non-manifold mesh, a mesh with one
+  face wound backwards, an inch-authored file and an open one, plus a
+  subdivision helper for asserting tessellation independence. Still no STEP
+  fixture: the STEP path needs the OpenCascade WASM module, which is fetched
+  from a CDN, and vendoring 6 MB into the repository to test it is not obviously
+  the right trade. The STEP parser and its `faceGroups` extraction remain
+  untested.
+
+67 unit assertions, 48 browser checks.
+
+### Found while doing Phase 2
+
+Both of these were found by the first test ever written against undercut
+detection, on a fixture with a closed-form answer: a 14 mm overhang across a
+30 mm extrusion, so 420 mm² of undercut needing one slide that travels 14 mm.
+
+**F4 — the subsampled thickness pass aliased against tessellation.** *(fixed)*
+
+Above 200,000 triangles the per-triangle thickness pass samples a subset. It
+took every *n*th triangle in index order — and triangles come off a tessellator
+in a repeating per-segment order, so a stride sharing a factor with that period
+samples the same face role on every segment and never the others. On a tube
+whose wall steps from 2 mm to 6 mm:
+
+```
+coverage   severe sink area reported     true value 8.9%
+100%       8.86%
+50%        9.77%
+33%        3.33%
+17%        0.00%     ← the entire 6 mm band never sampled
+8%         0.00%
+```
+
+A part over 200k triangles — which any STEP file tessellated at fine deflection
+is — could report no sink risk at all on a part full of it. The failure is
+silent and in the optimistic direction. The subset is now drawn from the seeded
+generator instead of index order, which decorrelates it from the ordering while
+staying reproducible: the same fixture now reports 8.7–9.1% at every coverage
+level down to 8%.
+
+This is the same defect as B4 in a different place. Worth remembering that
+"take every nth" is never a safe way to sample a mesh.
+
+**F5 — undercut regions were counted by tessellation, and slides had no
+direction.** *(fixed)*
+
+Regions were formed by dropping triangle centroids into a grid of `diag/40` and
+unioning occupied neighbours. On the overhang fixture the same physical feature
+came out as **2, 8, 27 and 7 regions** at successive subdivision levels. The rule
+engine reads that count — one slide is a minor finding, two or more a major one —
+so the same part graded differently depending on how finely it had been
+exported. Regions are now formed by walking shared edges between undercut
+triangles, with a proximity pass to rejoin patches separated by a sliver of
+faces that fell just under the threshold. The fixture reports one region at
+every subdivision level.
+
+Separately, the slide's retraction direction was the patch's mean normal
+projected into the parting plane. For an underbelly — the flat underside of a
+lip or a snap-hook barb, which is the most common undercut there is — that normal
+points straight along the pull axis and the projection is the zero vector. The
+tooling panel read:
+
+```
+before:  Slide retracts perpendicular to pull along (0.00, 0.00, 0.00),
+         min stroke ≈ 0.0 mm (add ~3–5 mm clearance).
+after:   Slide retracts perpendicular to pull along +X,
+         min stroke ≈ 14.0 mm (add ~3–5 mm clearance).
+```
+
+Where the normal carries no in-plane information, the direction the feature is
+reachable from does: outward from the part's centre towards the region.
+
+**F6 — lifters cannot be detected in the default mould mode.** *(open — needs a
+moulding engineer)*
+
+In `analyseMesh`, a two-piece mould only admits candidates with
+`pd < -0.7` — faces pointing against the pull — and every such candidate is then
+classified slide-or-nothing. The lifter branch requires `|pd| < 0.7`, which is
+unreachable. So with the default `two-piece` setting the tool can never report a
+lifter, while the rule engine has a whole branch for them (`sigLifter.length` →
+critical) and the tooling panel renders lifter cards that never appear.
+
+That may be deliberate: the code argues that a sidewall leaning toward the
+parting plane "simply belongs to the other half" in a two-piece tool, which is
+right. But an internal ledge inside a housing genuinely needs a lifter in a
+two-piece mould, and worse, such a ledge is currently classified as a *slide*,
+because a ray cast outward from it escapes through the part's opening. Deciding
+what should be reported here is a tooling question, not a coding one.
+
 ### Costs
 
 Welding is ~20% slower on the common path, once, at load — 248 ms for a
@@ -563,8 +663,17 @@ the worker.
 
 ### Still open, in priority order
 
-Phase 2 (tests you can trust) items 11–13 — playwright is still not in
-`devDependencies`, so `npm install && npm test` still fails on a clean checkout,
-and there is still no CI enforcing that `dfm-tool.html` matches `src/`. Then
-Phase 3, where the standout remains cycle time and shot weight from the `coolK`
-and `density` fields that are curated per material and still unused.
+**Three questions for a moulding engineer**, all recorded above: F3 (the 120 °C
+HDT margin, which condemns polypropylene as a substrate), F6 (whether lifters
+should be detectable in a two-piece tool, and the misclassification of internal
+ledges as slides), and whether the wall thresholds should move onto the
+sphere-fit figure rather than the ray one. None is a coding decision.
+
+**Phase 3**, where the standout remains cycle time, shot weight and clamp
+tonnage from the `coolK` and `density` fields that are curated per material and
+still entirely unused — the cheapest way to turn a score into something a
+quotation can be built on. Then the gate optimiser, corner radii from the STEP
+`faceGroups` the parser already extracts and discards, and revision comparison.
+
+**A STEP fixture**, which needs a decision about vendoring the OpenCascade WASM
+module. The whole STEP path is currently untested.
