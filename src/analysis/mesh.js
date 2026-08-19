@@ -248,6 +248,9 @@ export function analyseMesh(geom, opts = {}) {
   }
   const sinkDenom = measuredArea > 0 ? measuredArea : area;
 
+  if (onProgress) onProgress(0.82, 'Measuring projected area');
+  const projectedArea = measureProjectedArea(geom, bvh, bbox, [pdx, pdy, pdz], diag);
+
   if (onProgress) onProgress(0.85, 'Detecting undercuts');
 
   // ── Undercut detection ───────────────────────────────────────────────────
@@ -327,6 +330,7 @@ export function analyseMesh(geom, opts = {}) {
 
   return {
     bbox, area, volume, triCount, diag,
+    projectedArea,
 
     triAreas, triDraft, triFNorm, triCentroid, triThickness,
     triPullDot, triUndercut, triSinkRisk, triFaceSide,
@@ -494,6 +498,74 @@ function sphereThicknessAt(bvh, geom, t, cx, cy, cz, nx, ny, nz, eps, diag, axia
     if (bound < best) best = bound;
   }
   return best;
+}
+
+/* Grid resolution for the silhouette pass, per axis. 256² is 65k rays — the
+   same order as the per-triangle thickness pass — and puts the discretisation
+   error at well under a percent for any part this tool handles. */
+const PROJECTION_GRID = 256;
+
+/*
+ * Area of the part's shadow along the pull axis.
+ *
+ * This is what clamp tonnage is calculated from: melt pressure acting over the
+ * projected area of the cavity is the force trying to push the mould halves
+ * apart.
+ *
+ * Measured by casting a grid of rays down the pull axis and counting the ones
+ * that hit, rather than by summing ½·Σ|n̂·p̂|·A over the triangles. That sum is
+ * exact only for a convex part and overstates everything else, because a fold
+ * in the silhouette gets counted once per surface it passes through. Ray
+ * casting also gets through-holes right for free: a hole running along the pull
+ * axis is formed by a core pin shutting off against the opposite half, so no
+ * melt bears on it and it must not count towards clamp force.
+ */
+function measureProjectedArea(geom, bvh, bbox, pullDir, diag) {
+  const [pdx, pdy, pdz] = pullDir;
+
+  /* Two axes spanning the parting plane. */
+  let ux = Math.abs(pdx) < 0.9 ? 1 : 0, uy = Math.abs(pdx) < 0.9 ? 0 : 1, uz = 0;
+  const d = ux * pdx + uy * pdy + uz * pdz;
+  ux -= d * pdx; uy -= d * pdy; uz -= d * pdz;
+  const uLen = Math.hypot(ux, uy, uz) || 1;
+  ux /= uLen; uy /= uLen; uz /= uLen;
+  const vx = pdy * uz - pdz * uy, vy = pdz * ux - pdx * uz, vz = pdx * uy - pdy * ux;
+
+  /* Extent of the part in those two axes, over the bounding box corners. */
+  const extent = (ax, ay, az) => {
+    let lo = Infinity, hi = -Infinity;
+    for (let i = 0; i < 8; i++) {
+      const bx = (i & 1) ? bbox.max[0] : bbox.min[0];
+      const by = (i & 2) ? bbox.max[1] : bbox.min[1];
+      const bz = (i & 4) ? bbox.max[2] : bbox.min[2];
+      const p = bx * ax + by * ay + bz * az;
+      if (p < lo) lo = p;
+      if (p > hi) hi = p;
+    }
+    return { lo, hi, span: hi - lo };
+  };
+  const eu = extent(ux, uy, uz);
+  const ev = extent(vx, vy, vz);
+  if (!(eu.span > 0) || !(ev.span > 0)) return 0;
+
+  /* Launch from a plane clear of the part, pointing along the pull axis. */
+  const startOffset = extent(pdx, pdy, pdz).lo - diag * 0.05;
+  const eps = diag * 1e-6;
+  const cellU = eu.span / PROJECTION_GRID;
+  const cellV = ev.span / PROJECTION_GRID;
+  let hits = 0;
+
+  for (let i = 0; i < PROJECTION_GRID; i++) {
+    const su = eu.lo + (i + 0.5) * cellU;
+    for (let j = 0; j < PROJECTION_GRID; j++) {
+      const sv = ev.lo + (j + 0.5) * cellV;
+      const ox = ux * su + vx * sv + pdx * startOffset;
+      const oy = uy * su + vy * sv + pdy * startOffset;
+      const oz = uz * su + vz * sv + pdz * startOffset;
+      if (castRay(bvh, geom, ox, oy, oz, pdx, pdy, pdz, eps, -1) !== Infinity) hits++;
+    }
+  }
+  return hits * cellU * cellV;
 }
 
 /*

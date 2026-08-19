@@ -4,6 +4,7 @@ import { parseSTL } from '../geometry/stl.js';
 import { parseSTEP } from '../geometry/step.js';
 import { validateGeometry, rescaleGeometry, flipWinding } from '../geometry/validate.js';
 import { suggestPullDirection } from '../analysis/mesh.js';
+import { estimateShot } from '../analysis/shot.js';
 import { computeBounds } from '../geometry/weld.js';
 import { runDFM } from '../rules/engine.js';
 import { runTwoShotDFM } from '../rules/twoshot.js';
@@ -13,7 +14,7 @@ import { runAnalysis, initWorker } from './analysis-runner.js';
 import { computeHeatColours, computeInterfaceColours, buildLegend, HEAT_MODES } from './heatmap.js';
 import * as viewer from './viewer.js';
 import * as panel from './panels-input.js';
-import { renderResults, renderTwoShotResults, hideTwoShotResults, clearResults } from './panels-results.js';
+import { renderResults, renderShot, renderTwoShotResults, hideTwoShotResults, clearResults } from './panels-results.js';
 import { settings, runtime, loadSettings, resetSettings, resetRuntime, isTwoShot } from './state.js';
 import { $, $$, el, toast, nextFrame } from './dom.js';
 
@@ -434,6 +435,21 @@ async function doRunAnalysis() {
     runtime.dfm = { input, result };
 
     renderResults(result, runtime.analysis);
+
+    /* Shot weight and clamp force. Volume is only passed through when the
+       validator judged the surface closed — an enclosed volume is undefined
+       otherwise, and a shot weight derived from one would be invented. */
+    runtime.shot = runtime.analysis
+      ? estimateShot({
+        material: MATERIALS[settings.material],
+        volume: (runtime.validation && runtime.validation.volume != null)
+          ? runtime.validation.volume
+          : null,
+        projectedArea: runtime.analysis.projectedArea,
+      })
+      : null;
+    renderShot(runtime.shot);
+
     panel.setFromMeshBadge(!!runtime.analysis);
     panel.updatePartSummary();
 
@@ -486,6 +502,7 @@ function doExportJSON() {
     twoShot: runtime.twoShot,
     interface: runtime.interface,
     validation: runtime.validation,
+    shot: runtime.shot,
     settings,
   });
   downloadJSON(data, `dfm_${runtime.sessionId}_${Date.now()}.json`);
@@ -504,6 +521,7 @@ async function doExportPDF() {
       analysis: runtime.analysis,
       twoShot: runtime.twoShot,
       validation: runtime.validation,
+      shot: runtime.shot,
       settings,
     });
   } catch (err) {

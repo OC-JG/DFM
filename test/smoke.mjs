@@ -122,6 +122,15 @@ async function main() {
     check('wall check reports a plausible nominal', /2\.\d\d mm/.test(wallText), wallText.slice(0, 120));
     void medianWall;
 
+    // ── moulding estimates ────────────────────────────────────────────────
+    // Not scored checks: what it costs to make the part rather than whether it
+    // can be made. The fixture is a 40×30×20 shell with 2 mm walls.
+    check('moulding estimates shown', await page.locator('#shotSection').isVisible());
+    const shotText = await page.textContent('#shotSection');
+    check('part mass reported', /\d+\.\d\s*g/.test(shotText), shotText.slice(0, 160));
+    check('projected area reported', /12\.0\s*cm²/.test(shotText), shotText.slice(0, 200));
+    check('machine size reported', /Machine size\s*\d+\s*t/.test(shotText), shotText.slice(0, 220));
+
     // ── heat modes ────────────────────────────────────────────────────────
     for (const mode of ['draft', 'thickness', 'sink', 'undercut']) {
       await page.click(`.heat-btn[data-heat="${mode}"]`);
@@ -175,6 +184,10 @@ async function main() {
     /* Regression: the original never wrote the two-shot result to the export. */
     check('JSON export includes two-shot block', !!exported.two_shot && Array.isArray(exported.two_shot.checks));
     check('JSON export includes flow data', !!exported.mesh_summary.flow);
+    check('JSON export includes moulding estimates',
+      !!exported.moulding && typeof exported.moulding.part_mass_g === 'number'
+      && typeof exported.moulding.machine_clamp_tonnes === 'number',
+      JSON.stringify(exported.moulding).slice(0, 160));
 
     const pdfDownload = page.waitForEvent('download', { timeout: 40000 });
     await page.click('#pdfBtn');

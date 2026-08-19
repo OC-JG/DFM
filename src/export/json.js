@@ -6,7 +6,7 @@ import { formatPullAxis } from '../analysis/stats.js';
  * Includes the two-shot block, which the original omitted: running an
  * overmould analysis and then exporting produced a file with no trace of it.
  */
-export function buildExportJSON({ sessionId, dfm, analysis, twoShot, interface: iface, validation, settings }) {
+export function buildExportJSON({ sessionId, dfm, analysis, twoShot, interface: iface, validation, shot, settings }) {
   const out = {
     tool: 'OnlyCat DFM',
     session: sessionId,
@@ -40,6 +40,20 @@ export function buildExportJSON({ sessionId, dfm, analysis, twoShot, interface: 
        derived from an inch-scaled or open mesh is arithmetic, not a
        manufacturability judgement. */
     mesh_health: validation ? meshHealth(validation) : null,
+    /* What it takes to mould the part, as distinct from whether it can be:
+       arithmetic on measured geometry and tabulated material data, with the
+       one process assumption stated. */
+    moulding: shot ? {
+      part_volume_cm3: shot.volumeCm3,
+      part_mass_g: shot.massG,
+      runner_allowance_pct: shot.runnerPct,
+      shot_mass_g: shot.shotMassG,
+      projected_area_cm2: shot.projectedAreaCm2,
+      cavity_pressure_mpa: shot.cavityPressureMPa,
+      clamp_force_tonnes: shot.clampTonnes,
+      machine_clamp_tonnes: shot.machineTonnes,
+      assumptions: shot.notes,
+    } : null,
   };
 
   if (twoShot) {
@@ -102,6 +116,7 @@ function meshSummary(a) {
     bbox_mm: a.bbox.size,
     surface_area_mm2: a.area,
     volume_mm3: a.volume,
+    projected_area_mm2: a.projectedArea,
     pull_direction: a.pullDir,
     pull_axis_label: formatPullAxis(a.pullAxis, a.pullDir),
     mould_type: a.moldType,

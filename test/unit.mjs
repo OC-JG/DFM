@@ -24,6 +24,7 @@ import {
   scoreChecks, escalate, PART_GRADES, INTERFACE_GRADES,
 } from '../src/rules/scoring.js';
 import { buildExportJSON } from '../src/export/json.js';
+import { estimateShot, nextMachineSize, CAVITY_PRESSURE_MPA } from '../src/analysis/shot.js';
 import { effectiveMinDraft } from '../src/core/finishes.js';
 import { MATERIALS } from '../src/core/materials.js';
 
@@ -791,6 +792,102 @@ describe('large meshes — the subsampled thickness path');
     const b = analyse(geom, { thicknessFullCap: 800 });
     eq(a.sinkPctSevere, b.sinkPctSevere, 'severe sink across runs:');
     eq(a.thicknessCoverage, b.thicknessCoverage, 'coverage across runs:');
+  });
+}
+
+
+describe('projected area — the part\u2019s shadow along the pull axis');
+{
+  it('is exact on flat-sided shapes', () => {
+    for (const [name, soup, axis, exact] of [
+      ['box on +Z', S.box([40, 30, 20]), '+z', 40 * 30],
+      ['box on +X', S.box([40, 30, 20]), '+x', 30 * 20],
+      ['box on +Y', S.box([40, 30, 20]), '+y', 40 * 20],
+      ['frustum on +Z', S.frustum(20, 30, 3), '+z', 40 * 40],
+      ['overhang on +Z', S.overhangBlock(), '+z', 44 * 30],
+    ]) {
+      within(analyse(weld(soup), { pullAxis: axis }).projectedArea, exact, 0.5, `${name}:`);
+    }
+  });
+
+  it('excludes a hole running along the pull axis', () => {
+    /* A through-hole is formed by a core pin shutting off against the opposite
+       half, so no melt bears on it and it must not count towards clamp force.
+       Summing ½·Σ|n̂·p̂|·A over the triangles would give the full 1257 mm² disc;
+       the answer is the 239 mm² annulus. */
+    const m = analyse(weld(S.tube(20, 2, 40, 256)), { pullAxis: '+z' });
+    const annulus = Math.PI * (20 * 20 - 18 * 18);
+    within(m.projectedArea, annulus, 1, 'tube projected area:');
+    assert(m.projectedArea < Math.PI * 400 * 0.25, 'the bore was counted as solid');
+  });
+
+  it('follows the pull direction', () => {
+    const soup = S.box([40, 30, 20]);
+    const z = analyse(weld(soup), { pullAxis: '+z' }).projectedArea;
+    const x = analyse(weld(soup), { pullAxis: '+x' }).projectedArea;
+    assert(z > x, `+Z (${z}) should project larger than +X (${x}) on this box`);
+    within(analyse(weld(soup), { pullAxis: '-z' }).projectedArea, z, 0.5, 'pull sign must not matter:');
+  });
+}
+
+describe('moulding estimates');
+{
+  it('mass is volume times density', () => {
+    for (const key of ['abs', 'pp', 'pc', 'pa66gf']) {
+      const material = MATERIALS[key];
+      const e = estimateShot({ material, volume: 100000, projectedArea: 4000 });
+      within(e.massG, 100 * material.density, 0.01, `${material.name} mass:`);
+    }
+  });
+
+  it('clamp force is cavity pressure over projected area', () => {
+    const e = estimateShot({ material: MATERIALS.abs, volume: 100000, projectedArea: 40000 });
+    const band = CAVITY_PRESSURE_MPA[MATERIALS.abs.flow];
+    within(e.clampTonnes.lo, 40000 * band.lo / 9806.65, 0.01, 'lower bound:');
+    within(e.clampTonnes.hi, 40000 * band.hi / 9806.65, 0.01, 'upper bound:');
+  });
+
+  it('a stiffer-flowing material needs more clamp for the same part', () => {
+    const shape = { volume: 100000, projectedArea: 40000 };
+    const pp = estimateShot({ material: MATERIALS.pp, ...shape });
+    const pc = estimateShot({ material: MATERIALS.pc, ...shape });
+    assert(pc.clampTonnes.hi > pp.clampTonnes.hi,
+      `PC (${pc.clampTonnes.hi.toFixed(0)} t) should need more clamp than PP (${pp.clampTonnes.hi.toFixed(0)} t)`);
+  });
+
+  it('machine size is the next standard clamp up, with margin', () => {
+    const e = estimateShot({ material: MATERIALS.abs, volume: 180000, projectedArea: 40000 });
+    assert(e.machineTonnes >= e.clampTonnes.hi * 1.15,
+      `${e.machineTonnes} t does not cover ${e.clampTonnes.hi.toFixed(0)} t plus margin`);
+    eq(nextMachineSize(0), 20, 'smallest standard size:');
+    eq(nextMachineSize(121), 150);
+    eq(nextMachineSize(1e9), null, 'past the largest machine:');
+  });
+
+  it('a runner allowance lands on the shot, not the part', () => {
+    const e = estimateShot({ material: MATERIALS.abs, volume: 100000, projectedArea: 4000, runnerPct: 20 });
+    within(e.shotMassG, e.massG * 1.2, 0.01, 'shot mass:');
+    within(e.massG, 100 * MATERIALS.abs.density, 0.01, 'part mass is unchanged:');
+  });
+
+  it('refuses to invent a mass for a mesh with no enclosed volume', () => {
+    /* The validator withholds volume on an open surface; this must not quietly
+       substitute a zero or a bounding-box guess. */
+    const e = estimateShot({ material: MATERIALS.abs, volume: null, projectedArea: 4000 });
+    eq(e.massG, null);
+    eq(e.shotMassG, null);
+    assert(e.notes.some((n) => n.includes('enclosed volume')), 'no explanation offered');
+    assert(e.clampTonnes !== null, 'clamp force does not need a volume and should still be given');
+  });
+
+  it('end to end, on a measured part', () => {
+    const geom = weld(S.hollowFrustum(20, 30, 3, 2));
+    const m = analyse(geom);
+    const v = validateGeometry(geom);
+    const e = estimateShot({ material: MATERIALS.abs, volume: v.volume, projectedArea: m.projectedArea });
+    within(e.volumeCm3, 13.116, 1, 'volume:');
+    within(e.massG, 13.116 * MATERIALS.abs.density, 1, 'mass:');
+    assert(e.machineTonnes > 0, 'no machine size');
   });
 }
 

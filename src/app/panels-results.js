@@ -96,6 +96,46 @@ function blockerText(checks) {
   return total > 0 ? `Minor deductions: ${total.toFixed(1)} pts` : '';
 }
 
+/*
+ * Moulding estimates.
+ *
+ * Deliberately outside the scored checks: shot weight and clamp force are not
+ * pass-or-fail properties of the part, they are what it costs to make it. A
+ * score of 77 does not tell anyone whether to commit to the tool; 189 g on a
+ * 220-tonne machine starts to.
+ */
+export function renderShot(shot) {
+  const section = $('shotSection');
+  if (!shot) { section.style.display = 'none'; return; }
+  section.style.display = '';
+
+  const rows = [];
+  const add = (label, value, hint) => rows.push(el('div', { class: 'shot-row', title: hint || '' }, [
+    el('span', { class: 'shot-label', text: label }),
+    el('span', { class: 'shot-value', text: value }),
+  ]));
+
+  add('Part volume', shot.volumeCm3 != null ? `${shot.volumeCm3.toFixed(2)} cm³` : '—');
+  add('Part mass', shot.massG != null ? `${shot.massG.toFixed(1)} g` : '—',
+    'Enclosed volume × material density.');
+  add('Projected area', shot.projectedAreaCm2 != null ? `${shot.projectedAreaCm2.toFixed(1)} cm²` : '—',
+    'The part\u2019s shadow along the pull axis, measured by ray casting, so holes through the pull axis are excluded.');
+  add('Cavity pressure', shot.cavityPressureMPa
+    ? `${shot.cavityPressureMPa.lo}–${shot.cavityPressureMPa.hi} MPa`
+    : '—', shot.cavityPressureMPa ? `Assumed from ${shot.cavityPressureMPa.basis}.` : '');
+  add('Clamp force', shot.clampTonnes
+    ? `${shot.clampTonnes.lo.toFixed(0)}–${shot.clampTonnes.hi.toFixed(0)} t`
+    : '—', 'Cavity pressure over the projected area.');
+  add('Machine size', shot.machineTonnes ? `${shot.machineTonnes} t` : '—',
+    'Smallest standard clamp size covering the top of the range plus 15%.');
+
+  const nodes = [el('div', { class: 'shot-grid' }, rows)];
+  for (const note of shot.notes) {
+    nodes.push(el('div', { class: 'shot-note', text: note }));
+  }
+  replaceChildren($('shotBody'), nodes);
+}
+
 export function renderResults(result, analysis) {
   $('resultsEmpty').style.display = 'none';
   $('resultsContent').style.display = '';
@@ -209,6 +249,7 @@ function renderToolingActions(analysis) {
 export function clearResults() {
   $('resultsEmpty').style.display = '';
   $('resultsContent').style.display = 'none';
+  renderShot(null);
   hideTwoShotResults();
   replaceChildren($('checksList'), []);
   replaceChildren($('scoreBars'), []);

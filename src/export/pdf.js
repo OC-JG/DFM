@@ -155,7 +155,7 @@ function stripMarkup(text) {
   return String(text).replace(/<[^>]+>/g, '');
 }
 
-export async function exportPDF({ sessionId, dfm, analysis, twoShot, validation, settings }) {
+export async function exportPDF({ sessionId, dfm, analysis, twoShot, validation, shot, settings }) {
   const jsPDF = await loadJsPDF();
   const doc = new jsPDF({ unit: 'mm', format: 'a4' });
   const r = dfm.result;
@@ -280,6 +280,20 @@ export async function exportPDF({ sessionId, dfm, analysis, twoShot, validation,
       ['Slide undercut area', `${analysis.slideArea.toFixed(1)} mm²`],
       ['Lifter undercut area', `${analysis.lifterArea.toFixed(1)} mm²`],
     ], 50);
+  }
+
+  // ── moulding estimates ───────────────────────────────────────────────────
+  if (shot) {
+    cur.heading('MOULDING ESTIMATES');
+    cur.pairs([
+      ['Part volume', shot.volumeCm3 != null ? `${shot.volumeCm3.toFixed(2)} cm³` : '—'],
+      ['Part mass', shot.massG != null ? `${shot.massG.toFixed(1)} g` : '—'],
+      ['Projected area', shot.projectedAreaCm2 != null ? `${shot.projectedAreaCm2.toFixed(1)} cm²` : '—'],
+      ['Cavity pressure', shot.cavityPressureMPa ? `${shot.cavityPressureMPa.lo}–${shot.cavityPressureMPa.hi} MPa` : '—'],
+      ['Clamp force', shot.clampTonnes ? `${shot.clampTonnes.lo.toFixed(0)}–${shot.clampTonnes.hi.toFixed(0)} tonnes` : '—'],
+      ['Machine clamp', shot.machineTonnes ? `${shot.machineTonnes} tonnes` : '—'],
+    ], 50);
+    for (const note of shot.notes) cur.paragraph(note);
   }
 
   // ── tooling actions ──────────────────────────────────────────────────────

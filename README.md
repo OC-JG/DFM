@@ -257,6 +257,30 @@ The ray figure still drives the rules. Switching the thresholds onto the sphere
 figure would change the meaning of every historical score and is a decision for
 whoever owns the calibration.
 
+## Moulding estimates
+
+Alongside the manufacturability checks the report carries what it takes to make
+the part: volume, mass, projected area, the clamp force that implies and the
+smallest standard machine that covers it. These are not scored — they are not
+pass-or-fail properties of the part — but they are usually the numbers someone
+wants first.
+
+Projected area is measured by casting a grid of rays along the pull axis rather
+than by summing the triangles' contributions, which matters for holes: a bore
+running along the pull axis is formed by a core pin shutting off against the
+opposite half, so no melt bears on it and it must not count towards clamp force.
+On a 2 mm-wall tube the triangle sum gives the full disc; this gives the annulus.
+
+Cavity pressure is the one assumption in the chain, and it is printed next to the
+result. Mass is withheld when the mesh is not a closed solid rather than
+estimated from the bounding box.
+
+Cycle time is not included. The material table carries a cooling coefficient per
+grade, but its documented convention gives the theoretical cooling floor rather
+than a practical cooling time — the two readings differ by about 4× — and a
+cycle time is exactly the kind of number that gets quoted from. See
+`src/analysis/shot.js` for the detail.
+
 ## Known constraints
 
 - **three.js is pinned to r128**, the last version shipping a UMD build usable

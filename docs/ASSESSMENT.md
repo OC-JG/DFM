@@ -3,7 +3,7 @@
 Assessed at commit `67a9655`. Everything below was verified by running the code,
 not by reading it.
 
-> **Status — Phases 0, 1 and 2 are done.** The findings below are kept as
+> **Status — Phases 0, 1 and 2 are done, and Phase 3 has started.** The findings below are kept as
 > written, as the record of what was wrong and the evidence for it. What changed
 > since is summarised in [Delivered](#delivered) at the end, along with two
 > further defects the work uncovered and one calibration question that needs a
@@ -655,11 +655,56 @@ two-piece mould, and worse, such a ledge is currently classified as a *slide*,
 because a ray cast outward from it escapes through the part's opening. Deciding
 what should be reported here is a tooling question, not a coding one.
 
+### Phase 3 — shot weight and clamp force
+
+**Item 14, in part.** `density` is read at last. Volume is already measured, and
+the part's projected area along the pull axis is now measured too, so the report
+carries what a quotation actually needs:
+
+```
+Part volume  9.02 cm³    Cavity pressure  30–45 MPa
+Part mass    9.5 g       Clamp force      4–6 t
+Projected    12.0 cm²    Machine size     20 t
+```
+
+Projected area is measured by casting a grid of rays down the pull axis and
+counting hits, not by summing ½·Σ|n̂·p̂|·A over the triangles. That sum is exact
+only for a convex part and overstates everything else, and — more importantly —
+ray casting gets holes right: a bore running along the pull axis is formed by a
+core pin shutting off against the opposite half, so no melt bears on it and it
+must not count towards clamp force. On a 2 mm-wall tube the sum gives the full
+1257 mm² disc; the answer is the 239 mm² annulus, which is what this reports, to
+within 0.2%.
+
+Cavity pressure is the one process assumption, and it is stated on the page
+rather than buried: a band by the material's flow class, which is another field
+that had been sitting in the table unread. Mass is withheld entirely when the
+validator judged the surface open, because an enclosed volume is undefined then
+and a shot weight derived from one would be invented.
+
+**Cycle time is deliberately not shipped.** `coolK` is documented as the
+coefficient in tc = k·s² with s the half-wall, and under that reading a 2 mm ABS
+wall cools in 1.7 s — the theoretical floor, roughly what the one-dimensional
+conduction solution gives for the centreline reaching ejection temperature, and
+not a number any moulder would quote. Read as a full-wall coefficient the same
+table gives 6.8 s for ABS, 4.0 s for PP and 8.8 s for PC, which sit inside the
+practical bands and reproduce the right ordering — where the analytical reading
+does not, since with real diffusivities PC comes out cooling *faster* than ABS
+while the table has it 30% slower. So the coefficients look empirical and
+full-wall, and the comment describing them looks wrong.
+
+The two readings differ by 4×, and whichever number appeared would be quoted
+from. **This is the one question worth waking up to:** are those `coolK` values
+full-wall or half-wall? One sentence unlocks cycle time, and with it the cost
+model that makes the rest of Phase 3 worth building.
+
 ### Costs
 
-Welding is ~20% slower on the common path, once, at load — 248 ms for a
-320k-triangle mesh. The sphere-fit pass adds about 13% to a run. Both are inside
-the worker.
+Everything above costs 30% of a run: 1103 ms to 1438 ms on a 96k-triangle part,
+measured against the original. Welding is ~20% slower on the common path, once,
+at load. The sphere-fit thickness pass, the projected-area raster and the
+randomised heat sampling account for the rest. All of it is inside the worker,
+and none of it touches the page's responsiveness.
 
 ### Still open, in priority order
 
@@ -669,11 +714,19 @@ should be detectable in a two-piece tool, and the misclassification of internal
 ledges as slides), and whether the wall thresholds should move onto the
 sphere-fit figure rather than the ray one. None is a coding decision.
 
-**Phase 3**, where the standout remains cycle time, shot weight and clamp
-tonnage from the `coolK` and `density` fields that are curated per material and
-still entirely unused — the cheapest way to turn a score into something a
-quotation can be built on. Then the gate optimiser, corner radii from the STEP
-`faceGroups` the parser already extracts and discards, and revision comparison.
+**The rest of Phase 3**: the gate optimiser (the flow solver already exists and
+already runs fast, so ranking N candidate gate points by max L/T and by where
+the weld lines land is mostly wiring — and it removes the largest arbitrary
+input in the tool, since the flow verdict currently depends on where the user
+happened to click), corner radii from the STEP `faceGroups` the parser already
+extracts and discards, and revision comparison. Cycle time as soon as the
+`coolK` question is answered.
+
+Also outstanding and small: `bossOD` is still collected, persisted and printed
+in the PDF without any rule reading it, and `suggestPullDirection` still scores
+axes with a hardcoded 1° threshold and a normal-sign proxy rather than the
+classifier the undercut check actually uses, so the axis it recommends can be
+one the tool then reports undercuts on.
 
 **A STEP fixture**, which needs a decision about vendoring the OpenCascade WASM
 module. The whole STEP path is currently untested.

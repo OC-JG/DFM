@@ -70,6 +70,7 @@ export const runtime = {
   analysis2: null,             // shot 2 mesh analysis
   interface: null,             // two-shot interface measurement
   dfm: null,                   // { input, result }
+  shot: null,                  // shot weight / clamp force estimate
   twoShot: null,               // two-shot check result
 
   gateLocation: null,          // [x, y, z] in mesh-local coordinates
@@ -157,6 +158,7 @@ export function resetRuntime() {
   runtime.analysis2 = null;
   runtime.interface = null;
   runtime.dfm = null;
+  runtime.shot = null;
   runtime.twoShot = null;
   runtime.gateLocation = null;
   runtime.pullDir = { mode: 'axis', value: '+z', vec: [0, 0, 1] };
