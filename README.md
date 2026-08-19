@@ -322,6 +322,19 @@ It also declines to mislead. Changing material, changing mode or running a
 different set of checks all make score movement something other than a change in
 the part, and each raises a caveat above the diff.
 
+## Licence
+
+MIT — see `LICENSE`. The built `dfm-tool.html` carries the notice in a comment at
+the top of the file, because the file gets handed to people on its own and a
+recipient should be able to find out what they may do with it by opening it.
+
+three.js, jsPDF and the OpenCascade STEP reader are all MIT too. The default
+build fetches them at runtime, so they are not part of the file; `--vendor`
+embeds three.js and jsPDF, and their own copyright headers are embedded verbatim
+with them, which is what MIT asks of a redistribution. `NOTICE` records all of
+this in one place and `npm run test:offline` asserts the notices survive the
+build.
+
 ## Known constraints
 
 - **three.js is pinned to r128**, the last version shipping a UMD build usable

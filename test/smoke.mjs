@@ -43,6 +43,18 @@ async function main() {
   const { chromium } = require('playwright');
 
   const html = readFileSync(BUILT);
+
+  /* The deliverable travels on its own, so it has to say what it is and what
+     may be done with it. Checked before the browser starts, since this is a
+     property of the file rather than of the running page. */
+  const source = html.toString('utf8');
+  check('built file carries the MIT notice',
+    /Released under the MIT License/.test(source));
+  check('licence banner follows the doctype, not preceding it',
+    /^\s*<!DOCTYPE html>\s*<!--/i.test(source),
+    'a comment before the doctype puts browsers into quirks mode');
+  check('built file names the runtime dependencies it does not contain',
+    /fetched from a CDN/.test(source) && /NOTICE/.test(source));
   const server = createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(html);

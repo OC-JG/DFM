@@ -42,6 +42,18 @@ async function main() {
   check('no preconnect hints remain', !/rel="preconnect"/i.test(html));
   check('jsPDF is marked as built in', /const VENDORED = true;/.test(html));
 
+  /* MIT requires the copyright notice to travel with a redistribution, and this
+     build redistributes both libraries inside the artifact. Their own @license
+     headers are what satisfy that, so they must survive the bundling. */
+  check('embeds the three.js copyright notice',
+    /Copyright 2010-2021 Three\.js Authors/.test(html));
+  check('embeds the jsPDF copyright notice',
+    /Copyright \(c\) 2010-2021 James Hall/.test(html));
+  check('banner declares the embedded libraries',
+    /embeds two third-party libraries/.test(html) && /three\.js 0\.128\.0/.test(html));
+  check('banner still carries the tool\u2019s own licence',
+    /Released under the MIT License/.test(html));
+
   if (!existsSync(join(FIXTURES, 'part.stl'))) throw new Error('fixtures missing — run `node test/make-fixtures.mjs`');
 
   const { chromium } = require('playwright');

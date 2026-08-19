@@ -952,20 +952,27 @@ already extracts and discards — which needs a STEP fixture, and therefore a
 decision about the OpenCascade module, before it can be written with any
 confidence. Cycle time as soon as the `coolK` question is answered.
 
-**A LICENSE.** Not housekeeping: without one, default copyright applies and
-nobody has permission to copy, modify or redistribute the tool. That matters here
-more than in most repositories, because the deliverable is a single file designed
-to be *handed to people* — moulders, suppliers, colleagues — and a file with no
-licence leaves the recipient's right to use it undefined, which a supplier's legal
-team may simply refuse. It also leaves contributions in limbo: with no inbound
-licence, an outside patch has murky ownership.
+**Licensed MIT.** *(done)* Without a licence, default copyright applied and
+nobody had permission to copy, modify or redistribute the tool. That mattered
+here more than in most repositories, because the deliverable is a single file
+designed to be *handed to people* — moulders, suppliers, colleagues — and a file
+with no licence leaves the recipient's right to use it undefined, which a
+supplier's legal team may simply refuse. It also left contributions in limbo:
+with no inbound licence, an outside patch has murky ownership.
 
-The vendored build makes this concrete rather than theoretical. `--vendor`
-redistributes three.js and jsPDF inside the artifact, and both are MIT, which
-requires the copyright notice to travel with the distribution. That obligation is
-already met — both minified builds carry their `@license` headers and those
-survive into the output, which is checked — but it is an obligation the project
-now has, and it sits alongside a deliverable whose own terms are unstated.
+`LICENSE` carries the MIT text, `package.json` declares it, and the built
+`dfm-tool.html` states it in a comment immediately after the doctype — after,
+never before, since a comment ahead of the doctype puts some browsers into quirks
+mode. The banner is in the output rather than in `src/index.html` because the
+artifact arrives on its own, with no repository around it: someone should be able
+to find out what they may do with the file by opening the file.
+
+`NOTICE` records the third-party components in one place. All three are MIT.
+The default build fetches them at runtime so they are not part of the artifact;
+`--vendor` embeds three.js and jsPDF, which is a redistribution and so requires
+their copyright notices to travel along. Both minified builds carry their own
+`@license` headers and those are embedded verbatim, and the offline suite now
+asserts it — along with asserting that the banner names what it embedded.
 
 **A STEP fixture**, which needs a decision about vendoring the OpenCascade WASM
 module. The whole STEP path is currently untested.
@@ -973,4 +980,4 @@ module. The whole STEP path is currently untested.
 **SRI hashes** for the CDN tags, computed from the bytes those hosts actually
 serve — see Phase 4 above for why they were not added blind.
 
-**A LICENSE**, which is a decision rather than a task.
+**Nothing on the licence front** — MIT, recorded above.
