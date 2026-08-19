@@ -341,13 +341,22 @@ build.
   from a plain `<script>` tag. Moving to a modern release means either an
   import map or a real bundler for the vendor code, which would cost the
   single-file property. Not worth it for what the viewer does here.
-- **Undercut candidacy assumes a flat parting line** at the pull minimum. Which
-  faces are undercuts is judged against a single tool pulling one way, so the
-  cavity ceiling of a hollow part reads as an undercut even though a real
-  two-piece tool's core forms it and withdraws away from it. Whether a face needs
-  a slide or a lifter *is* decided properly — by whether a side-action core could
-  physically reach it — but the question of which faces are undercuts at all
-  needs a parting-line model.
+- **Undercut candidacy assumes a flat parting line** at the pull minimum, and
+  this one is an accepted simplification rather than a gap to be closed. Nothing
+  in an STL says where a toolmaker would split the mould, and deciding it
+  properly is a search for a curve on the surface that depends on cosmetic
+  requirements, gate position and flash tolerance the tool is never given — so
+  a computed parting line would be a confident guess a toolmaker then has to
+  argue with. The consequence is asymmetric and mostly benign: the assumed line
+  sits as low as a parting line can go, so the error is over-reporting. A
+  stepped or contoured split can release an overhang with no moving tooling, and
+  the undercut check says so in its own output for that reason — read the region
+  count as features needing a decision, not as a slide count. It can
+  under-report in one narrow window: faces inside the bottom 8% of the pull
+  extent are taken as cavity-formed and not tested, so on a part whose real
+  split runs well above its base, check that band by eye. Whether a face that
+  *is* an undercut needs a slide or a lifter is decided properly, by whether a
+  side-action core could physically reach it.
 - **Corner radii cannot be detected**, only advised on. That needs B-rep face
   topology; STL does not carry it, and the STEP path does not yet plumb
   through the face groups the parser already extracts. Those groups are

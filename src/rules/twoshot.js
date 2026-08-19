@@ -17,55 +17,57 @@ export function runTwoShotDFM(input) {
   const iface = input.interface;
   const checks = [];
 
-  // ── 1. Melt temperature vs substrate HDT ────────────────────────────────
+  // ── 1. Substrate softening (advisory, unscored) ──────────────────────────
   {
-    /* HDT is a sustained-load test; Vicat softening point is closer to what
-       two-shot injection actually does to the substrate, given the short
-       contact time. The 120 °C warn margin is a conservative heuristic that
-       stands in for that difference. */
-    const safetyMargin = 20;  // °C below HDT counts as safe
-    const warnMargin = 120;   // °C above HDT before it is a serious risk
-    const maxSafeShot2Melt = m1.hdtC - safetyMargin;
-    let status = 'ok', detail = '', severity = 'none';
+    /*
+     * This check used to carry 25 of the interface's 100 points and decide the
+     * grade on melt-vs-HDT alone. It no longer scores anything, because HDT is
+     * not the property the question needs.
+     *
+     * HDT (ISO 75 / ASTM D648) is measured by holding a bar under a constant
+     * 0.45 MPa bending load and raising the temperature until it deflects
+     * 0.25 mm. Two-shot injection does something different to the substrate:
+     * a few seconds of contact with a hot melt, under injection pressure
+     * rather than a fixed bending stress, against a cold mould wall drawing
+     * heat out of the other face. The substrate's bulk never reaches the
+     * melt's temperature, and whether the interface skin softens depends on
+     * contact time, wall thickness and mould temperature — none of which are
+     * in HDT.
+     *
+     * Vicat softening point (ISO 306) is the closer stand-in: it measures the
+     * temperature at which a loaded needle penetrates 1 mm, which is nearer to
+     * what a hot melt front does to a cold substrate surface. The material
+     * table does not carry Vicat, so this check cannot reach a verdict, and
+     * the previous 120 °C fudge margin over HDT was a guess dressed as a
+     * threshold. Its consequences were real: shot 2 melt exceeds shot 1 HDT in
+     * essentially every genuine overmould (TPU's 200 °C melt is above ABS's
+     * 98 °C HDT), so the rule fired on the industry-standard pairs, and the
+     * 120 °C margin condemned polypropylene as a substrate outright.
+     *
+     * So: report the numbers, name what they do and do not tell you, and let
+     * the moulder decide. An advisory that says "we cannot judge this" is
+     * worth more than a graded verdict computed from the wrong property.
+     */
+    const delta = m2.meltC - m1.hdtC;
+    const heading = delta > 0
+      ? `Shot 2 (${m2.name}) melts at ${m2.meltC}°C, which is ${delta}°C above shot 1's HDT (${m1.name}, ${m1.hdtC}°C at 0.45 MPa).`
+      : `Shot 2 (${m2.name}) melts at ${m2.meltC}°C, below shot 1's HDT (${m1.name}, ${m1.hdtC}°C at 0.45 MPa).`;
 
-    if (compat.fusion && m2.meltC > m1.hdtC) {
-      /* A fusion weld is supposed to remelt the interface, so shot 2's melt
-         being far above shot 1's HDT is the mechanism rather than the failure.
-         Two grades of the same polymer necessarily sit in this band, which
-         meant every fusion pair in the table — the ASA-natural window on a
-         PC/ASA body among them — came out a critical thermal failure while the
-         adhesion check on the same page called it the strongest bond
-         available. The heat is still real: it distorts the substrate if the
-         cycle is slow, which is a process concern, not a redesign. */
-      status = 'warn'; severity = 'minor';
-      detail = `Shot 2 (${m2.name}, melt ${m2.meltC}°C) is above shot 1's HDT (${m1.name}, ${m1.hdtC}°C), which is expected for a fusion weld — remelting the interface is what produces the bond. Control the substrate's dwell at temperature: fast fill, cold mould, short cycle. Check first-article dimensions on the shot 1 geometry rather than the interface.`;
-    } else if (m2.meltC > m1.hdtC + warnMargin) {
-      status = 'fail'; severity = 'critical';
-      detail = `Shot 2 (${m2.name}, melt ${m2.meltC}°C) is ${m2.meltC - m1.hdtC}°C above shot 1 substrate HDT (${m1.name}, HDT ${m1.hdtC}°C). Substrate will deform during injection. Choose a lower-melt shot 2 material or switch shot order.`;
-    } else if (m2.meltC > m1.hdtC) {
-      /* Minor, not major. Almost every real overmould lands in this band —
-         ABS with a TPU grip is the textbook pair and sits here, because a
-         200 °C melt is above ABS's 98 °C HDT — and the branch's own advice is
-         that it is acceptable with a fast fill. Scoring it as a major finding
-         put the industry-standard combination 25 points down and contradicted
-         the adhesion check, which calls the same pair excellent. */
-      status = 'warn'; severity = 'minor';
-      detail = `Shot 2 melt (${m2.meltC}°C) exceeds shot 1 HDT (${m1.hdtC}°C) by ${m2.meltC - m1.hdtC}°C. Acceptable in practice if injection is fast (short contact time), but validate with process trials. Run high injection speed, cold mould, and short cycle.`;
-    } else if (m2.meltC > maxSafeShot2Melt) {
-      status = 'warn'; severity = 'minor';
-      detail = `Shot 2 melt (${m2.meltC}°C) is within ${m2.meltC - maxSafeShot2Melt}°C of the safe threshold (HDT ${m1.hdtC}°C − ${safetyMargin}°C margin). Run shot 2 barrel at the low end of the process window.`;
-    } else {
-      detail = `Shot 2 melt (${m2.meltC}°C) is safely below shot 1 HDT (${m1.hdtC}°C). No substrate deformation expected.`;
-    }
+    /* The one thing that can be said with confidence, and it differs by bond
+       type: for a fusion weld the heat is the mechanism, not the hazard. */
+    const mechanism = compat.fusion
+      ? `These are fusion-welding grades, so remelting the substrate skin is how the bond forms — heat at the interface is the mechanism, not the failure. The risk it carries is dimensional: a slow cycle lets that heat soak into the shot 1 geometry.`
+      : `The bond here is an interface bond rather than a fusion weld, so substrate softening buys no adhesion. What it can cost is dimensional accuracy and surface finish on the shot 1 geometry.`;
 
     checks.push({
-      key: 'ts_thermal', name: 'Thermal compatibility', status, detail, severity,
+      key: 'ts_thermal', name: 'Substrate softening', status: 'info', severity: 'none',
+      detail: `${heading} ${mechanism} <b>This is not scored, and the comparison above cannot settle it.</b> HDT is a sustained-load deflection test; two-shot injection gives the substrate seconds of contact against a cold mould, so its bulk never reaches the melt temperature. Vicat softening point (ISO 306) is the property that would answer this, and it is not in the material table. Ask the moulder to confirm on a short-shot trial: measure the shot 1 geometry after overmoulding, and run fast fill, cold mould, short cycle to keep dwell at temperature down.`,
       metrics: [
         ['Shot 1 HDT (0.45MPa)', `${m1.hdtC}°C`],
         ['Shot 2 melt', `${m2.meltC}°C`],
+        ['Difference', `${delta > 0 ? '+' : ''}${delta}°C`],
         ['Bond type', compat.fusion ? 'Fusion weld' : 'Interface bond'],
-        ['Warn threshold', `${m1.hdtC + warnMargin}°C`],
-        ['Safe limit', `${maxSafeShot2Melt}°C`],
+        ['Verdict', 'Advisory — needs a process trial'],
       ],
     });
   }
