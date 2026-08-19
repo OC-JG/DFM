@@ -768,6 +768,31 @@ which was +X on a part drafted for +Z.
 Costs 168 ms on a 96k-triangle part instead of 17 ms, once, on file load. Worth
 it for a recommendation that does not contradict the report beneath it.
 
+### Phase 4 — the offline build (item 20, in part)
+
+`node build.js --vendor` inlines three.js and jsPDF, producing a file that needs
+no network at all: about 1.4 MB instead of 500 kB. Off by default, so the
+committed deliverable is unchanged.
+
+`npm run test:offline` proves it, and proves it properly — every off-origin
+request is **refused** rather than answered from `node_modules` as the smoke test
+does, so a surviving dependency cannot hide behind a helpful stub. Ten checks:
+no CDN tags survive the build, three.js and jsPDF are present, an STL loads, the
+analysis runs, a PDF exports, and nothing was requested off-origin at all. CI
+runs it and then restores the normal build.
+
+The OpenCascade reader is not vendored: 6 MB, only needed for STEP, already
+lazy. STEP import stays network-dependent and says so.
+
+**SRI hashes were considered and not added.** They are the smaller fix for the
+same exposure — three third-party scripts running with access to the user's CAD
+geometry — but a wrong `integrity` attribute does not degrade the page, it kills
+it, and the value has to be the hash of the exact bytes the CDN serves. This
+environment cannot reach those hosts to compute them, and deriving them from the
+`node_modules` copies would be a guess that the npm tarball and the cdnjs build
+are byte-identical. Guessing wrong takes the viewer out entirely. Whoever adds
+them should fetch the real files and check the tool still boots afterwards.
+
 ### Costs
 
 Everything above costs about 30% of a run: 1103 ms to 1438 ms on a 96k-triangle part,
@@ -799,3 +824,8 @@ approve.
 
 **A STEP fixture**, which needs a decision about vendoring the OpenCascade WASM
 module. The whole STEP path is currently untested.
+
+**SRI hashes** for the CDN tags, computed from the bytes those hosts actually
+serve — see Phase 4 above for why they were not added blind.
+
+**A LICENSE**, which is a decision rather than a task.

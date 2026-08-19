@@ -25,10 +25,18 @@ JSON export are entirely local.
 ## Building
 
 ```sh
-node build.js          # writes dfm-tool.html
+node build.js            # writes dfm-tool.html
+node build.js --vendor   # ... with three.js and jsPDF built in, so it needs no network
 ```
 
 No dependencies, no install step. The bundler is ~150 lines in `build.js`.
+
+The committed `dfm-tool.html` is the CDN-loading one. `--vendor` inlines three.js
+and jsPDF instead — about 1.4 MB rather than 500 kB, and nothing to fetch, which
+is what you want if the file is going to a machine with no internet. `npm run
+test:offline` proves that build works with every off-origin request refused, then
+puts the normal one back. STEP import is not covered: the OpenCascade reader is
+6 MB, it is already loaded lazily, and it stays network-dependent.
 
 ```sh
 npm install            # only needed for the tests
@@ -36,6 +44,7 @@ npm run browser        # once: fetches the Chromium the smoke test drives
 npm test               # build + unit tests + fixtures + browser smoke test
 
 npm run test:unit      # just the unit tests: no browser, no network, sub-second
+npm run test:offline   # proves the --vendor build runs with no network at all
 npm run verify:build   # asserts the committed dfm-tool.html matches src/
 ```
 

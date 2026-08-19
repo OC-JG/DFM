@@ -14,6 +14,10 @@ import { formatPullAxis } from '../analysis/stats.js';
 
 const JSPDF_CDN = 'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js';
 
+/* The whole initialiser is the placeholder, so a --vendor build swaps it for
+   `true` rather than prefixing it and leaving two expressions behind. */
+const VENDORED = /*@VENDORED@*/false;
+
 const PAGE_W = 210;
 const MARGIN = 14;
 const FOOTER_Y = 290;
@@ -25,6 +29,12 @@ function loadJsPDF() {
   if (jsPdfPromise) return jsPdfPromise;
   jsPdfPromise = new Promise((resolve, reject) => {
     if (window.jspdf && window.jspdf.jsPDF) { resolve(window.jspdf.jsPDF); return; }
+    /* A vendored build already has it on the page, so there is nothing to fetch
+       and no reason to fail if the network is absent. */
+    if (VENDORED) {
+      reject(new Error('The PDF library was expected to be built in but is not present. Rebuild with `node build.js --vendor`.'));
+      return;
+    }
     const s = document.createElement('script');
     s.src = JSPDF_CDN;
     s.onload = () => {

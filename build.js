@@ -22,6 +22,26 @@ const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const SRC = path.join(ROOT, 'src');
 const OUT = path.join(ROOT, 'dfm-tool.html');
 
+/*
+ * `node build.js --vendor` inlines three.js and jsPDF instead of fetching them
+ * from a CDN, producing a file that needs no network at all.
+ *
+ * Off by default, so the committed deliverable is unchanged. The argument for
+ * turning it on is that the whole point of this tool is a file you double-click
+ * from a Downloads folder, and a file that silently loses its 3D viewer on a
+ * shop-floor machine with no internet is not that. The argument against is
+ * about a megabyte of vendor code in the output.
+ *
+ * The OpenCascade WASM reader is not vendored either way: it is 6 MB, it is only
+ * needed for STEP files, and it is already loaded lazily. STEP import stays
+ * network-dependent and says so.
+ */
+const VENDOR = process.argv.includes('--vendor');
+const VENDOR_FILES = {
+  three: path.join(ROOT, 'node_modules/three/build/three.min.js'),
+  jspdf: path.join(ROOT, 'node_modules/jspdf/dist/jspdf.umd.min.js'),
+};
+
 /* ---------------------------------------------------------------- helpers */
 
 const read = (p) => fs.readFileSync(p, 'utf8');
@@ -162,10 +182,30 @@ const appCode = bundle(path.join(SRC, 'app/main.js'), 'app');
 
 let html = read(path.join(SRC, 'index.html'));
 
+/*
+ * Vendor code goes in as its own <script> before the app, replacing the CDN
+ * tags. Read from node_modules at the versions package.json pins — the same
+ * files the smoke test already serves in place of the CDN, so the built output
+ * runs against exactly what the tests exercise.
+ */
+let vendorScripts = '';
+if (VENDOR) {
+  for (const [name, file] of Object.entries(VENDOR_FILES)) {
+    if (!fs.existsSync(file)) {
+      fail(`--vendor needs ${path.relative(ROOT, file)}; run npm install first`);
+    }
+    const code = read(file);
+    /* A closing script tag anywhere in the payload would end the block early. */
+    vendorScripts += `<script>/* vendored: ${name} */\n${code.replace(/<\/script/gi, '<\\/script')}\n</script>\n`;
+    console.log(`  vendored ${name}: ${(Buffer.byteLength(code) / 1024).toFixed(0)} kB`);
+  }
+}
+
 const slots = {
   '/*@CSS@*/': css,
   '/*@APP@*/': appCode,
   '@LOGO@': logo,
+  '<!--@VENDOR@-->': vendorScripts,
 };
 for (const [token, value] of Object.entries(slots)) {
   if (!html.includes(token)) fail(`slot ${token} not found in src/index.html`);
@@ -177,7 +217,25 @@ for (const [token, value] of Object.entries(slots)) {
 if (!html.includes('/*@WORKER_SRC@*/')) fail('slot /*@WORKER_SRC@*/ not found');
 html = html.replace('/*@WORKER_SRC@*/', () => JSON.stringify(workerCode));
 
+/* With the libraries inlined, the CDN tags must go — otherwise the page still
+   reaches out for a second copy and the offline promise is not kept. */
+if (VENDOR) {
+  /* Each substitution is checked on its own. Testing whether the document got
+     shorter overall would pass on the preconnect removal alone and quietly
+     leave the three.js tag in place — which is exactly what it did. */
+  const cdnTag = /[ \t]*<script src="https:\/\/[^"]*three[^"]*"><\/script>\n?/i;
+  if (!cdnTag.test(html)) fail('--vendor could not find the three.js CDN tag in src/index.html');
+  html = html.replace(cdnTag, '');
+
+  html = html.replace(/[ \t]*<link rel="preconnect"[^>]*>\n?/gi, '');
+
+  /* Tell the runtime not to fetch jsPDF either; it is already on the page. */
+  const flag = '/*@VENDORED@*/false';
+  if (!html.includes(flag)) fail('--vendor could not find the /*@VENDORED@*/false flag in export/pdf.js');
+  html = html.replace(flag, 'true');
+}
+
 fs.writeFileSync(OUT, html);
 
 const kb = (Buffer.byteLength(html) / 1024).toFixed(0);
-console.log(`\n  wrote dfm-tool.html  (${kb} kB)\n`);
+console.log(`\n  wrote dfm-tool.html  (${kb} kB${VENDOR ? ', fully offline' : ''})\n`);

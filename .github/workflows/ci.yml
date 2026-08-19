@@ -35,6 +35,12 @@ jobs:
       - name: Browser smoke test
         run: npm run test:smoke
 
+      # The tool is meant to be a file you double-click, including on a machine
+      # with no internet. This builds the vendored output and drives it with
+      # every off-origin request refused, then restores the normal build.
+      - name: Offline build works with no network
+        run: npm run test:offline
+
       - name: Upload the built tool
         if: always()
         uses: actions/upload-artifact@v4
