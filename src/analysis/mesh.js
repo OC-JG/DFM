@@ -269,42 +269,10 @@ export function analyseMesh(geom, opts = {}) {
   // Slide vs lifter comes from the outward-normal ray: escaping to infinity
   // means external (slide), hitting more mesh means an internal pocket
   // (lifter).
-  let pullMin = Infinity, pullMax = -Infinity;
-  for (let i = 0; i < vertices.length; i += 3) {
-    const d = vertices[i] * pdx + vertices[i + 1] * pdy + vertices[i + 2] * pdz;
-    if (d < pullMin) pullMin = d;
-    if (d > pullMax) pullMax = d;
-  }
-  const partingBand = (pullMax - pullMin) * 0.08;
-  const minSin = Math.sin(minDraft * Math.PI / 180);
-
-  for (let t = 0; t < triCount; t++) {
-    const pd = triPullDot[t];
-    const cd = triCentroid[t * 3] * pdx + triCentroid[t * 3 + 1] * pdy + triCentroid[t * 3 + 2] * pdz;
-    const distFromPullMin = cd - pullMin;
-
-    let isCandidate;
-    if (isTwoPiece) {
-      isCandidate = pd < -0.7 && distFromPullMin > partingBand;
-    } else {
-      isCandidate = (Math.abs(pd) < 0.7 && pd < -minSin)
-                 || (pd < -0.7 && distFromPullMin > partingBand);
-    }
-    if (!isCandidate) { triUndercut[t] = 0; continue; }
-
-    const cx = triCentroid[t * 3], cy = triCentroid[t * 3 + 1], cz = triCentroid[t * 3 + 2];
-    const nx = triFNorm[t * 3], ny = triFNorm[t * 3 + 1], nz = triFNorm[t * 3 + 2];
-    const outwardHit = castRay(bvh, geom,
-      cx + nx * eps * 10, cy + ny * eps * 10, cz + nz * eps * 10, nx, ny, nz, eps, t);
-    const exitsToInfinity = outwardHit === Infinity || outwardHit > diag * 0.99;
-
-    if (pd < -0.7) {
-      /* An underbelly only counts if it is genuinely external. */
-      triUndercut[t] = exitsToInfinity ? 1 : 0;
-    } else {
-      triUndercut[t] = exitsToInfinity ? 1 : 2;
-    }
-  }
+  classifyUndercutFaces({
+    geom, bvh, triCentroid, triFNorm, triPullDot, triUndercut, triCount,
+    pullDir: [pdx, pdy, pdz], minDraft, isTwoPiece, diag, eps,
+  });
 
   let slideArea = 0, lifterArea = 0;
   for (let t = 0; t < triCount; t++) {
@@ -518,6 +486,78 @@ function sphereThicknessAt(bvh, geom, t, cx, cy, cz, nx, ny, nz, eps, diag, axia
 }
 
 /*
+ * Mark each triangle as no undercut (0), a slide (1) or a lifter (2).
+ *
+ * A face is a true undercut when releasing the part would drag the tool over
+ * solid material. Cases handled:
+ *
+ *  (1) Sidewall undercut — near-vertical wall leaning toward the parting
+ *      plane. Only meaningful for single-pull moulds: in a two-piece mould
+ *      such a wall simply belongs to the other half.
+ *  (2) External underbelly — a face pointing against pull whose outward ray
+ *      escapes to infinity. Lip undersides, snap-hook barbs.
+ *  (3) Excluded — faces near the part's pull-minimum boundary, which are
+ *      formed by the cavity half and release with its retraction, not with
+ *      a slide or lifter.
+ *
+ * Slide vs lifter comes from the outward-normal ray: escaping to infinity
+ * means external (slide), hitting more mesh means an internal pocket (lifter).
+ *
+ * Lifted out of analyseMesh so that suggestPullDirection can score candidate
+ * axes with the same definition the report will use. It previously used its own
+ * — a sidewall-lean test with a hardcoded 1° threshold and no mould-type
+ * awareness — and on a part with an overhanging step it recommended +Z as
+ * having "0.0% undercut area (lowest)" when +Z is the one axis with 420 mm² of
+ * undercut and four others have none. Two definitions of the same thing is one
+ * too many.
+ */
+export function classifyUndercutFaces({
+  geom, bvh, triCentroid, triFNorm, triPullDot, triUndercut, triCount,
+  pullDir, minDraft, isTwoPiece, diag, eps,
+}) {
+  const { vertices } = geom;
+  const [pdx, pdy, pdz] = pullDir;
+
+  let pullMin = Infinity, pullMax = -Infinity;
+  for (let i = 0; i < vertices.length; i += 3) {
+    const d = vertices[i] * pdx + vertices[i + 1] * pdy + vertices[i + 2] * pdz;
+    if (d < pullMin) pullMin = d;
+    if (d > pullMax) pullMax = d;
+  }
+  const partingBand = (pullMax - pullMin) * 0.08;
+  const minSin = Math.sin(minDraft * Math.PI / 180);
+
+  for (let t = 0; t < triCount; t++) {
+    const pd = triPullDot[t];
+    const cd = triCentroid[t * 3] * pdx + triCentroid[t * 3 + 1] * pdy + triCentroid[t * 3 + 2] * pdz;
+    const distFromPullMin = cd - pullMin;
+
+    let isCandidate;
+    if (isTwoPiece) {
+      isCandidate = pd < -0.7 && distFromPullMin > partingBand;
+    } else {
+      isCandidate = (Math.abs(pd) < 0.7 && pd < -minSin)
+                 || (pd < -0.7 && distFromPullMin > partingBand);
+    }
+    if (!isCandidate) { triUndercut[t] = 0; continue; }
+
+    const cx = triCentroid[t * 3], cy = triCentroid[t * 3 + 1], cz = triCentroid[t * 3 + 2];
+    const nx = triFNorm[t * 3], ny = triFNorm[t * 3 + 1], nz = triFNorm[t * 3 + 2];
+    const outwardHit = castRay(bvh, geom,
+      cx + nx * eps * 10, cy + ny * eps * 10, cz + nz * eps * 10, nx, ny, nz, eps, t);
+    const exitsToInfinity = outwardHit === Infinity || outwardHit > diag * 0.99;
+
+    if (pd < -0.7) {
+      /* An underbelly only counts if it is genuinely external. */
+      triUndercut[t] = exitsToInfinity ? 1 : 0;
+    } else {
+      triUndercut[t] = exitsToInfinity ? 1 : 2;
+    }
+  }
+  return triUndercut;
+}
+
+/*
  * How many gate positions to try, given the size of the mesh.
  *
  * The search is one Dijkstra sweep per candidate, so its cost is linear in both
@@ -602,41 +642,103 @@ function measureProjectedArea(geom, bvh, bbox, pullDir, diag) {
 }
 
 /*
- * Suggest a pull direction by scoring all six cardinal axes on undercut area
- * and taking the lowest. Cheap enough to run on every file load.
+ * Suggest a pull direction by scoring all six cardinal axes.
+ *
+ * Ranked on the undercut area each axis would actually produce — measured with
+ * classifyUndercutFaces, the same function the report uses, so the axis this
+ * recommends cannot be one the report then finds undercuts on. It used to score
+ * axes with its own sidewall-lean test at a hardcoded 1°, ignoring the mould
+ * type entirely, and on a part with an overhanging step it recommended the one
+ * axis that has an undercut while claiming "0.0% undercut area (lowest)".
+ *
+ * Ties are broken on draft: among axes that need no moving tooling, prefer the
+ * one where least of the side-wall area falls under the minimum draft. In a
+ * two-piece tool a face releases from whichever half suits it, so what matters
+ * is the magnitude of the draft — and |draft| is asin(|n̂·p̂|) whichever side of
+ * the wall the face is on, so this needs no ray casting.
+ *
+ * Costs one BVH build plus a ray per candidate face per axis. It runs on file
+ * load, where a fraction of a second buys an answer that agrees with itself.
  */
-export function suggestPullDirection(geom) {
+export function suggestPullDirection(geom, opts = {}) {
   const { indices, vertices, triCount } = geom;
+  const minDraft = opts.minDraft > 0 ? opts.minDraft : 1;
+  const isTwoPiece = opts.moldType !== 'single-pull';
+
   const axes = [
     { name: '+Z', vec: [0, 0, 1] }, { name: '-Z', vec: [0, 0, -1] },
     { name: '+X', vec: [1, 0, 0] }, { name: '-X', vec: [-1, 0, 0] },
     { name: '+Y', vec: [0, 1, 0] }, { name: '-Y', vec: [0, -1, 0] },
   ];
 
-  const tA = new Float32Array(triCount);
-  const tN = new Float32Array(triCount * 3);
+  const triAreas = new Float32Array(triCount);
+  const triFNorm = new Float32Array(triCount * 3);
+  const triCentroid = new Float32Array(triCount * 3);
+  let totalArea = 0;
   for (let t = 0; t < triCount; t++) {
     const ia = indices[t * 3] * 3, ib = indices[t * 3 + 1] * 3, ic = indices[t * 3 + 2] * 3;
     const ax = vertices[ia], ay = vertices[ia + 1], az = vertices[ia + 2];
-    const e1x = vertices[ib] - ax, e1y = vertices[ib + 1] - ay, e1z = vertices[ib + 2] - az;
-    const e2x = vertices[ic] - ax, e2y = vertices[ic + 1] - ay, e2z = vertices[ic + 2] - az;
+    const bx = vertices[ib], by = vertices[ib + 1], bz = vertices[ib + 2];
+    const cx = vertices[ic], cy = vertices[ic + 1], cz = vertices[ic + 2];
+    const e1x = bx - ax, e1y = by - ay, e1z = bz - az;
+    const e2x = cx - ax, e2y = cy - ay, e2z = cz - az;
     const nx = e1y * e2z - e1z * e2y, ny = e1z * e2x - e1x * e2z, nz = e1x * e2y - e1y * e2x;
     const dlen = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1;
-    tA[t] = 0.5 * dlen;
-    tN[t * 3] = nx / dlen; tN[t * 3 + 1] = ny / dlen; tN[t * 3 + 2] = nz / dlen;
+    triAreas[t] = 0.5 * dlen;
+    totalArea += triAreas[t];
+    triFNorm[t * 3] = nx / dlen; triFNorm[t * 3 + 1] = ny / dlen; triFNorm[t * 3 + 2] = nz / dlen;
+    triCentroid[t * 3] = (ax + bx + cx) / 3;
+    triCentroid[t * 3 + 1] = (ay + by + cy) / 3;
+    triCentroid[t * 3 + 2] = (az + bz + cz) / 3;
   }
 
-  const sinMin = Math.sin(1 * Math.PI / 180); // 1° draft threshold
-  let best = null;
-  for (const a of axes) {
-    let undercutArea = 0, totalArea = 0;
+  const boundsInfo = computeBounds(vertices);
+  const diag = boundsInfo.diag;
+  const eps = diag * 1e-5;
+  const bbox = { min: boundsInfo.min, max: boundsInfo.max };
+  const bvh = buildBVH(geom);
+
+  const triPullDot = new Float32Array(triCount);
+  const triUndercut = new Uint8Array(triCount);
+  const minSin = Math.sin(minDraft * Math.PI / 180);
+
+  const scored = axes.map((a) => {
+    const [pdx, pdy, pdz] = a.vec;
+    let sideArea = 0, sideUnderMin = 0;
     for (let t = 0; t < triCount; t++) {
-      const pd = tN[t * 3] * a.vec[0] + tN[t * 3 + 1] * a.vec[1] + tN[t * 3 + 2] * a.vec[2];
-      totalArea += tA[t];
-      if (Math.abs(pd) < 0.5 && pd < -sinMin) undercutArea += tA[t];
+      const pd = triFNorm[t * 3] * pdx + triFNorm[t * 3 + 1] * pdy + triFNorm[t * 3 + 2] * pdz;
+      triPullDot[t] = pd;
+      if (Math.abs(pd) < 0.5) {
+        sideArea += triAreas[t];
+        if (Math.abs(pd) < minSin) sideUnderMin += triAreas[t];
+      }
     }
-    const pct = totalArea > 0 ? (undercutArea / totalArea) * 100 : 0;
-    if (!best || pct < best.pct) best = { name: a.name, dir: a.vec, pct };
-  }
-  return { dir: best.dir, name: best.name, reason: `${best.name} — ${best.pct.toFixed(1)}% undercut area (lowest)` };
+
+    classifyUndercutFaces({
+      geom, bvh, triCentroid, triFNorm, triPullDot, triUndercut, triCount,
+      pullDir: a.vec, minDraft, isTwoPiece, diag, eps,
+    });
+
+    let undercutArea = 0;
+    for (let t = 0; t < triCount; t++) if (triUndercut[t] !== 0) undercutArea += triAreas[t];
+
+    return {
+      name: a.name,
+      dir: a.vec,
+      undercutArea,
+      undercutPct: totalArea > 0 ? (undercutArea / totalArea) * 100 : 0,
+      draftUnderMinPct: sideArea > 0 ? (sideUnderMin / sideArea) * 100 : 0,
+    };
+  });
+
+  scored.sort((x, y) =>
+    (x.undercutArea - y.undercutArea) || (x.draftUnderMinPct - y.draftUnderMinPct));
+
+  const best = scored[0];
+  const reason = best.undercutArea > 0
+    ? `${best.name} — ${best.undercutPct.toFixed(1)}% undercut area, the lowest of the six axes`
+    : `${best.name} — no undercuts, ${best.draftUnderMinPct.toFixed(0)}% of side-wall area under ${minDraft.toFixed(1)}° draft`;
+
+  void bbox;
+  return { dir: best.dir, name: best.name, reason, ranked: scored };
 }

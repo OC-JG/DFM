@@ -737,6 +737,37 @@ tried across the part's outer surface, the best is (40.0, 20.0, 6.7), giving a
 worst-case L/T of 24 against the 180 limit for ABS. The worst candidate gives 41,
 so gate position alone moves this by 1.7×."*
 
+**D4 fixed — the axis it recommends is now one it agrees with.**
+
+`suggestPullDirection` scored the six cardinal axes with its own criterion: a
+sidewall-lean test at a hardcoded 1°, with no awareness of the mould type. The
+undercut check uses something quite different. So the tool could recommend an
+axis and then report undercuts on it — and on the overhang fixture it did
+exactly that:
+
+```
+before:  "+Z — 0.0% undercut area (lowest)"
+         ... and the analysis on +Z reports 420 mm² of slide undercut,
+             while +X, +Y, −Y and −Z each report none.
+
+after:   "−Z — no undercuts, 100% of side-wall area under 1.0° draft"
+```
+
+The per-triangle classification is now one exported function,
+`classifyUndercutFaces`, called both by `analyseMesh` and by the axis search, so
+the two cannot drift apart again. The suggestion also takes the material's
+effective draft and the selected mould type instead of assuming 1° and
+two-piece, and ties are broken on draft: among axes needing no moving tooling it
+prefers the one where least side-wall area falls under the minimum. That
+tie-break needs no ray casting, because in a two-piece tool a face releases from
+whichever half suits it and |draft| is asin(|n̂·p̂|) whichever side of the wall a
+face sits on. It also fixes a smaller oddity — on a drafted frustum every axis
+is undercut-free and the old code returned whichever it happened to test first,
+which was +X on a part drafted for +Z.
+
+Costs 168 ms on a 96k-triangle part instead of 17 ms, once, on file load. Worth
+it for a recommendation that does not contradict the report beneath it.
+
 ### Costs
 
 Everything above costs about 30% of a run: 1103 ms to 1438 ms on a 96k-triangle part,
@@ -758,10 +789,13 @@ already extracts and discards, and revision comparison. Cycle time as soon as
 the `coolK` question is answered.
 
 Also outstanding and small: `bossOD` is still collected, persisted and printed
-in the PDF without any rule reading it, and `suggestPullDirection` still scores
-axes with a hardcoded 1° threshold and a normal-sign proxy rather than the
-classifier the undercut check actually uses, so the axis it recommends can be
-one the tool then reports undercuts on.
+in the PDF without any rule reading it. The standard guideline — boss outer
+diameter about twice the hole it carries, which with the existing `bossWall`
+input means `bossWall ≥ bossOD / 4` — would give it a use, and would surface a
+genuine design tension, since a 6 mm boss on a 2 mm wall cannot satisfy both
+that and the 0.7× sink limit already checked. But it is new rule content rather
+than a defect fix, so it is left for someone who owns the calibration to
+approve.
 
 **A STEP fixture**, which needs a decision about vendoring the OpenCascade WASM
 module. The whole STEP path is currently untested.

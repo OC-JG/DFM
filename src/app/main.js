@@ -238,7 +238,13 @@ function setPullDir(mode, value, vec, note) {
 
 function autoSuggestPull() {
   if (!runtime.geom1) return;
-  const sugg = suggestPullDirection(runtime.geom1);
+  /* Scored against the draft this part actually has to hold and the mould type
+     selected, so the recommendation is judged by the same rules the report is. */
+  const material = MATERIALS[settings.material];
+  const sugg = suggestPullDirection(runtime.geom1, {
+    minDraft: effectiveMinDraft(material, settings.surfaceFinish),
+    moldType: settings.moldType,
+  });
   const named = Object.keys(AXIS_VECTORS).find((k) => {
     const v = AXIS_VECTORS[k];
     return v[0] === sugg.dir[0] && v[1] === sugg.dir[1] && v[2] === sugg.dir[2];

@@ -15,7 +15,7 @@ import * as R from './lib/reference.mjs';
 import { weldGeometry } from '../src/geometry/weld.js';
 import { castRay } from '../src/geometry/bvh.js';
 import { validateGeometry, rescaleGeometry, flipWinding } from '../src/geometry/validate.js';
-import { analyseMesh, CONE_RINGS_DEG, CONE_AZIMUTHS } from '../src/analysis/mesh.js';
+import { analyseMesh, suggestPullDirection, CONE_RINGS_DEG, CONE_AZIMUTHS } from '../src/analysis/mesh.js';
 import { stats, medianCI95, makeRandom } from '../src/analysis/stats.js';
 import { runDFM } from '../src/rules/engine.js';
 import { runTwoShotDFM } from '../src/rules/twoshot.js';
@@ -1000,6 +1000,71 @@ describe('gate placement — searching instead of guessing');
     }
     eq(reached, geom.vertCount, 'a closed mesh must be fully reachable:');
     assert(maxD > 100, `a 200 mm bar should have paths over 100 mm, got ${maxD.toFixed(1)}`);
+  });
+}
+
+
+describe('pull direction — the suggestion must agree with the report');
+{
+  const AXES = {
+    '+X': [1, 0, 0], '-X': [-1, 0, 0], '+Y': [0, 1, 0],
+    '-Y': [0, -1, 0], '+Z': [0, 0, 1], '-Z': [0, 0, -1],
+  };
+
+  /* Undercut area the full analysis reports for a given axis. */
+  const reportedUndercut = (geom, axis) => {
+    const m = analyse(geom, { pullDir: AXES[axis], pullAxis: axis.toLowerCase(), suggestGate: false });
+    return m.slideArea + m.lifterArea;
+  };
+
+  it('never recommends an axis the report finds undercuts on', () => {
+    /* The regression. On the overhang block the old heuristic recommended +Z as
+       having "0.0% undercut area (lowest)" — and +Z is the one axis with
+       420 mm² of undercut, while four others have none. It scored axes with its
+       own sidewall-lean test rather than the classifier the report uses. */
+    const geom = weld(S.overhangBlock());
+    const clean = Object.keys(AXES).filter((a) => reportedUndercut(geom, a) === 0);
+    assert(clean.length > 0, 'fixture should have at least one undercut-free axis');
+    const suggested = suggestPullDirection(geom, { minDraft: 1 }).name;
+    assert(clean.includes(suggested),
+      `suggested ${suggested}, which reports ${reportedUndercut(geom, suggested).toFixed(0)} mm² of undercut; clean axes are ${clean.join(', ')}`);
+  });
+
+  it('reports the same undercut area the analysis would', () => {
+    const geom = weld(S.overhangBlock());
+    for (const entry of suggestPullDirection(geom, { minDraft: 1 }).ranked) {
+      within(entry.undercutArea, reportedUndercut(geom, entry.name), 1,
+        `${entry.name}: suggestion vs analysis`);
+    }
+  });
+
+  it('breaks ties on draft rather than arbitrarily', () => {
+    /* Every axis on a drafted frustum is undercut-free, so the tie-break
+       decides — and the only axis the part is actually drafted for is +Z. */
+    const geom = weld(S.frustum(20, 30, 3));
+    const s = suggestPullDirection(geom, { minDraft: 1 });
+    eq(s.name, '+Z', `reason given: ${s.reason}`);
+    eq(s.ranked[0].draftUnderMinPct, 0, 'the winning axis should have no under-draft area:');
+  });
+
+  it('ranks worst-first-last', () => {
+    const ranked = suggestPullDirection(weld(S.overhangBlock()), { minDraft: 1 }).ranked;
+    eq(ranked.length, 6, 'all six axes considered:');
+    for (let i = 1; i < ranked.length; i++) {
+      assert(ranked[i].undercutArea >= ranked[i - 1].undercutArea - 1e-6,
+        `${ranked[i].name} ranked after ${ranked[i - 1].name} despite less undercut`);
+    }
+  });
+
+  it('honours the mould type it is given', () => {
+    /* A single-pull tool cannot let a leaning sidewall belong to the other
+       half, so it must find at least as much undercut as a two-piece one. */
+    const geom = weld(S.frustum(20, 30, 3));
+    const two = suggestPullDirection(geom, { minDraft: 1, moldType: 'two-piece' });
+    const one = suggestPullDirection(geom, { minDraft: 1, moldType: 'single-pull' });
+    const total = (s) => s.ranked.reduce((sum, r) => sum + r.undercutArea, 0);
+    assert(total(one) >= total(two) - 1e-6,
+      `single-pull (${total(one).toFixed(0)} mm²) should find at least as much as two-piece (${total(two).toFixed(0)} mm²)`);
   });
 }
 
