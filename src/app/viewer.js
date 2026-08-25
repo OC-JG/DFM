@@ -22,6 +22,7 @@ let rafHandle = 0;
 let currentGeom = null;       // full geometry, kept for colouring while bodies are hidden
 let bodies = null;
 
+let grid = null;              // ground plane, recoloured with the theme
 let pickMode = null;          // 'face' | 'gate' | null
 let onPick = null;
 
@@ -48,7 +49,6 @@ export function initViewer(onPickCallback) {
   const h = Math.max(viewerEl.clientHeight || 400, 1);
 
   scene = new THREE.Scene();
-  scene.background = new THREE.Color(0xffffff);
 
   camera = new THREE.PerspectiveCamera(35, w / h, 0.1, 5000);
   camera.position.set(80, 60, 100);
@@ -66,10 +66,19 @@ export function initViewer(onPickCallback) {
   fill.position.set(-1, -1, -1);
   scene.add(fill);
 
-  const grid = new THREE.GridHelper(400, 40, 0x0a0e0c, 0x0a0e0c);
+  grid = new THREE.GridHelper(400, 40, 0x0a0e0c, 0x0a0e0c);
   grid.material.opacity = 0.08;
   grid.material.transparent = true;
   scene.add(grid);
+
+  /* The viewport is painted by the renderer, so it is the one surface that
+     cannot inherit the page theme. Left alone, a dark page gets a white slab
+     in the middle of it and every overlay the CSS draws in --ink vanishes
+     against it. Read the same tokens everything else reads. */
+  applyViewerTheme();
+  const darkQuery = window.matchMedia('(prefers-color-scheme: dark)');
+  if (darkQuery.addEventListener) darkQuery.addEventListener('change', applyViewerTheme);
+  else if (darkQuery.addListener) darkQuery.addListener(applyViewerTheme); // Safari < 14
 
   controls = createCameraControls(viewerEl, camera, getMesh, (view) => {
     if (view === 'free') markViewFree();
@@ -87,6 +96,22 @@ export function initViewer(onPickCallback) {
     renderer.render(scene, camera);
   };
   loop();
+}
+
+function tokenColour(name, fallback) {
+  const raw = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  try {
+    return new THREE.Color(raw || fallback);
+  } catch {
+    return new THREE.Color(fallback); // a token in a form THREE cannot parse
+  }
+}
+
+/* Exported so a theme toggle, if one is ever added, has something to call. */
+export function applyViewerTheme() {
+  if (!scene) return;
+  scene.background = tokenColour('--paper-2', '#ffffff');
+  if (grid) grid.material.color = tokenColour('--ink', '#0a0e0c');
 }
 
 export function disposeViewer() {
