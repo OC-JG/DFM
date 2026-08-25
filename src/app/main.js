@@ -2,6 +2,7 @@ import { MATERIALS } from '../core/materials.js';
 import { effectiveMinDraft } from '../core/finishes.js';
 import { parseSTL } from '../geometry/stl.js';
 import { parseSTEP } from '../geometry/step.js';
+import { openIptViaBridge, driveBridgeParameters, probeBridge, bridgeUrl, setBridgeUrl } from './bridge.js';
 import { validateGeometry, rescaleGeometry, flipWinding } from '../geometry/validate.js';
 import { suggestPullDirection } from '../analysis/mesh.js';
 import { estimateShot } from '../analysis/shot.js';
@@ -40,8 +41,26 @@ function hideProgress(delay = 250) {
 
 const STEP_EXTS = new Set(['step', 'stp']);
 
+function fileExt(file) {
+  return file.name.toLowerCase().split('.').pop();
+}
+
+/*
+ * .ipt has no browser-side reader and will not get one, so it goes out to a
+ * local Inventor over the bridge and comes back as STEP — which is a better
+ * input than STL anyway, because it carries B-rep face groups. The part stays
+ * open in Inventor afterwards, which is what makes `applyParameterChange`
+ * below possible.
+ */
 async function parseGeometryFile(file, onProgress) {
-  const ext = file.name.toLowerCase().split('.').pop();
+  const ext = fileExt(file);
+
+  if (ext === 'ipt') {
+    const { buffer, model } = await openIptViaBridge(file, onProgress);
+    onProgress(0.6, 'Tessellating B-rep');
+    return { geom: await parseSTEP(buffer, onProgress), format: 'IPT', model };
+  }
+
   const buffer = await file.arrayBuffer();
   if (STEP_EXTS.has(ext)) {
     onProgress(0.02, 'Initialising');
@@ -113,14 +132,89 @@ function applyMeshFix(fix) {
   setStatus('GEOMETRY CORRECTED');
 }
 
+/*
+ * Change a driving parameter and re-measure.
+ *
+ * This is the loop the whole tool exists to close. A finding says a wall is too
+ * thin; that wall is a named parameter in the part; changing it here rebuilds
+ * in Inventor and brings back new geometry, so the next run measures the fix
+ * rather than an intention to fix. Everything measured on the old mesh is
+ * discarded for the same reason `applyMeshFix` discards it — the numbers
+ * describe geometry that no longer exists.
+ */
+async function applyParameterChange(name, value) {
+  if (!runtime.model) {
+    toast('Parameters can only be driven on a part opened from .ipt.', 'warn');
+    return;
+  }
+  setStatus('REBUILDING');
+  showProgress('Rebuilding in Inventor');
+  try {
+    const previousScore = runtime.dfm && runtime.dfm.result ? runtime.dfm.result.score : null;
+    const { buffer, model } = await driveBridgeParameters(
+      runtime.model.document, [{ name, value }], updateProgress,
+    );
+    const geom = await parseSTEP(buffer, updateProgress);
+
+    runtime.revisions.push({ name, value, scoreBefore: previousScore, at: Date.now() });
+    runtime.analysis = null;
+    runtime.analysis2 = null;
+    runtime.interface = null;
+    runtime.dfm = null;
+    runtime.twoShot = null;
+    runtime.shot = null;
+    clearResults();
+
+    runtime.model = model;
+    installGeometry(geom, null);
+    panel.renderModelTree(model, applyParameterChange);
+    panel.renderRevisions(runtime.revisions);
+    refreshHeatAvailability();
+    setHeatMode('flat');
+    toast(`${name} = ${value}. Inventor rebuilt the part — run the analysis again to see what moved.`, 'info', 7000);
+    setStatus('PART REBUILT');
+  } catch (err) {
+    toast(err.message, 'error', 9000);
+    setStatus('REBUILD FAILED');
+  } finally {
+    hideProgress();
+  }
+}
+
+/*
+ * Report whether a local Inventor is reachable, once, at boot.
+ *
+ * "Up" and "can read .ipt" are separate answers: the server runs perfectly
+ * happily against its own simulator, which cannot open an Inventor file.
+ * Collapsing the two would send someone hunting a network fault that is really
+ * a missing --backend inventor.
+ */
+async function refreshBridgeStatus() {
+  const node = $('bridgeStatus');
+  const detail = $('bridgeDetail');
+  node.dataset.state = 'checking';
+  node.textContent = 'checking…';
+  const health = await probeBridge();
+  node.dataset.state = health.readsIpt ? 'live' : (health.up ? 'limited' : 'down');
+  node.textContent = health.readsIpt ? `Inventor · ${bridgeUrl().replace(/^https?:\/\//, '')}`
+    : health.up ? `simulator · no .ipt` : 'not connected';
+  detail.textContent = health.note || 'Drop an .ipt and Inventor will open it.';
+  $('iptHint').hidden = health.readsIpt;
+  return health;
+}
+
+const LOAD_STATUS = { ipt: 'OPENING IN INVENTOR', step: 'LOADING STEP', stp: 'LOADING STEP' };
+
 async function handleFile1(file) {
   panel.setFileInfo(1, file, null);
-  setStatus(STEP_EXTS.has(file.name.toLowerCase().split('.').pop()) ? 'LOADING STEP' : 'PARSING STL');
+  setStatus(LOAD_STATUS[fileExt(file)] || 'PARSING STL');
   showProgress('Reading file');
 
   try {
-    const { geom, format } = await parseGeometryFile(file, updateProgress);
+    const { geom, format, model } = await parseGeometryFile(file, updateProgress);
     runtime.fileName1 = file.name;
+    runtime.model = model || null;
+    if (model) panel.renderModelTree(model, applyParameterChange);
     const report = installGeometry(geom, file);
     if (report.confidence === 'unusable') {
       toast(`${file.name} loaded, but the mesh needs attention before the numbers mean anything — see the panel under the drop zone.`, 'error', 9000);
@@ -477,6 +571,7 @@ async function doRunAnalysis() {
     runtime.dfm = { input, result };
 
     renderResults(result, runtime.analysis);
+    selectResultsTab('findings');
 
     /* Shot weight and clamp force. Volume is only passed through when the
        validator judged the surface closed — an enclosed volume is undefined
@@ -543,6 +638,25 @@ async function doRunAnalysis() {
   } finally {
     runBtn.disabled = false;
     hideProgress();
+  }
+}
+
+/* ══ results tabs ════════════════════════════════════════════════════════ */
+
+/*
+ * Purely presentational. Every results container stays in the document and
+ * keeps rendering whether its tab is showing or not — a panel the user has not
+ * clicked on must still be complete when they do, and must still be in the DOM
+ * for the PDF and JSON exports, which read from the same nodes.
+ */
+function selectResultsTab(name) {
+  for (const tab of $$('.tab')) {
+    const on = tab.dataset.tab === name;
+    tab.classList.toggle('active', on);
+    tab.setAttribute('aria-selected', String(on));
+  }
+  for (const panelNode of $$('.tab-panel')) {
+    panelNode.hidden = panelNode.dataset.panel !== name;
   }
 }
 
@@ -627,6 +741,9 @@ function startOver() {
   viewer.clearGeometry();
   viewer.setPickMode(null);
   clearResults();
+  panel.renderModelTree(null);
+  panel.renderRevisions([]);
+  selectResultsTab('findings');
   panel.populateSelects();
   panel.syncFormFromSettings();
   panel.clearFileInfo();
@@ -739,6 +856,15 @@ function boot() {
   wireDropZone('dropZone', 'fileInput', handleFile1);
   wireDropZone('dropZone2', 'fileInput2', handleFile2);
 
+  refreshBridgeStatus();
+  $('bridgeRetryBtn').addEventListener('click', refreshBridgeStatus);
+  $('bridgeUrlInput').value = bridgeUrl();
+  $('bridgeUrlInput').addEventListener('change', (e) => {
+    setBridgeUrl(e.target.value);
+    e.target.value = bridgeUrl();
+    refreshBridgeStatus();
+  });
+
   $('bodiesAllBtn').addEventListener('click', () => setAllBodies(true));
   $('bodiesNoneBtn').addEventListener('click', () => setAllBodies(false));
   $('bodiesInvertBtn').addEventListener('click', invertBodies);
@@ -773,6 +899,10 @@ function boot() {
     $('toolingActions').style.display = open ? '' : 'none';
     $('toolingArrow').classList.toggle('open', open);
   });
+
+  for (const tab of $$('.tab')) {
+    tab.addEventListener('click', () => selectResultsTab(tab.dataset.tab));
+  }
 
   $('runBtn').addEventListener('click', doRunAnalysis);
   $('resetBtn').addEventListener('click', startOver);

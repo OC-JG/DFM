@@ -1,6 +1,6 @@
 # OnlyCat DFM — Injection Moulding Analyser
 
-A browser tool that loads an STL or STEP part, measures it, and scores how
+A browser tool that loads an Inventor `.ipt`, STEP or STL part, measures it, and scores how
 manufacturable it is by injection moulding: wall thickness and uniformity,
 draft, ribs and bosses, undercuts and the tooling they imply, sink risk,
 shrinkage and warpage, flow length from a chosen gate, FPC overmoulding, and
@@ -14,6 +14,33 @@ double-click. Everything under `src/` builds into it.
 ## Using it
 
 Open `dfm-tool.html` in a browser. Drop a part, pick a material, run.
+
+### Inventor parts
+
+`.ipt` is a closed binary format with no browser-side reader, so the file goes
+out to a local [InventorMCP](https://github.com/OC-JG/InventorMCP) server, which
+opens it in Inventor and exports STEP:
+
+```sh
+inventor-mcp --backend inventor --transport streamable-http
+```
+
+The chip in the header says which of three situations you are in — connected to
+Inventor, connected but running the simulator (which cannot open an `.ipt`), or
+nothing listening — and the drop zone explains what to do about the last two.
+The default address is `http://127.0.0.1:8000`; change it under the drop zone if
+you run the server elsewhere.
+
+Routing through STEP is not a downgrade from viewing the `.ipt` directly. STEP
+carries the B-rep face groups an STL throws away, which is what lets draft be
+measured per face rather than per triangle.
+
+What the bridge adds over a converter is the return path. The document stays
+open in Inventor, so the **Parameters** panel lists the part's driving
+dimensions and editing one rebuilds the part and brings the new geometry
+straight back — measure, change the dimension that caused the finding, measure
+again, without touching a file. Each change is recorded under **History** with
+the score it replaced.
 
 Three things load from a CDN at runtime and therefore need a connection:
 three.js (the 3D viewer), the OpenCascade WASM reader (STEP files only), and
@@ -79,10 +106,12 @@ src/
   rules/               DFM rule engine, two-shot rules, FMEA scoring
   worker/              off-thread analysis entry point
   app/                 viewer, camera, panels, state, wiring
+  app/bridge.js        talks to a local Inventor via InventorMCP (.ipt)
   export/              PDF and JSON
 test/                  fixture generator, unit tests, browser smoke test
   lib/shapes.mjs       analytic fixtures with known answers
   lib/reference.mjs    slow, independent reference implementations
+  contract.mjs         asserts every id src/app reaches for exists in markup
 .github/workflows/     CI: unit tests, artifact-sync check, browser suite
 legacy/                the original single-file v1, kept for reference
 ```
@@ -360,7 +389,13 @@ build.
 - **Corner radii cannot be detected**, only advised on. That needs B-rep face
   topology; STL does not carry it, and the STEP path does not yet plumb
   through the face groups the parser already extracts. Those groups are
-  preserved in the geometry format, so this is the natural next step.
+  preserved in the geometry format, so this is the natural next step — and now
+  that `.ipt` arrives as STEP rather than as a mesh, it is the natural next step
+  for the Inventor path too.
+- **The bridge trusts its caller.** Its routes are unauthenticated and they open
+  uploaded files in a local Inventor session, so the server binds to localhost
+  and only accepts requests from `file://` and localhost origins. Do not expose
+  it on a network interface.
 - **Wall transitions remain advisory on STL.** Thickness sampling is genuinely
   unreliable at corners and rim edges; the check is off by default and says so.
 - **Two-shot alignment is assumed.** The interface pass expects both meshes to

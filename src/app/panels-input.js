@@ -438,3 +438,101 @@ export function updateOnboarding() {
 export function setFromMeshBadge(hasMesh) {
   $('fromMeshBadge').classList.toggle('show', hasMesh);
 }
+
+// ── the Inventor model: parameters, features, revisions ────────────────────
+
+/*
+ * Everything below only has anything to show when the part came in as .ipt.
+ * An STL is a bag of triangles and a STEP is a solved solid; neither knows
+ * which dimension produced which face, so there is nothing to drive. The
+ * sections stay hidden rather than showing empty scaffolding.
+ */
+
+function parameterRow(param, onChange) {
+  const input = el('input', {
+    type: 'text',
+    class: 'param-expr',
+    value: param.expression,
+    'aria-label': `${param.name} expression`,
+    title: param.comment || `${param.name} — press Enter to rebuild`,
+  });
+
+  /* Commit on Enter or blur, but only when the text actually changed: a blur
+     that leaves the value alone must not trigger an Inventor rebuild. */
+  const commit = () => {
+    const next = input.value.trim();
+    if (!next || next === param.expression) {
+      input.value = param.expression;
+      return;
+    }
+    onChange(param.name, next);
+  };
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
+    if (e.key === 'Escape') { input.value = param.expression; input.blur(); }
+  });
+  input.addEventListener('blur', commit);
+
+  return el('div', { class: 'param-row' }, [
+    el('label', { class: 'param-name', text: param.name }),
+    input,
+    el('span', { class: 'param-value', text: `${Number(param.value).toFixed(3)} ${param.units}` }),
+  ]);
+}
+
+export function renderModelTree(model, onChange) {
+  const paramSection = $('paramsSection');
+  const treeSection = $('featureTreeSection');
+
+  if (!model) {
+    paramSection.hidden = true;
+    treeSection.hidden = true;
+    return;
+  }
+  paramSection.hidden = false;
+  treeSection.hidden = false;
+
+  const params = (model.parameters || []).filter((p) => p.kind !== 'model');
+  replaceChildren($('paramsList'), params.length
+    ? params.map((p) => parameterRow(p, onChange))
+    : [el('p', { class: 'hint', text: 'This part declares no user parameters, so there is nothing to drive. Add them in Inventor and reopen.' })]);
+  $('paramsCount').textContent = params.length ? `${params.length} driving` : 'none';
+
+  const features = model.features || [];
+  replaceChildren($('featureTree'), features.map((f) => el('div', {
+    class: `feature-row${f.suppressed ? ' suppressed' : ''}`,
+    title: f.suppressed ? `${f.name} — suppressed` : f.name,
+  }, [
+    el('span', { class: 'feature-kind', text: f.kind }),
+    el('span', { class: 'feature-name', text: f.name }),
+  ])));
+  $('featureCount').textContent = `${features.length} feature${features.length === 1 ? '' : 's'}`;
+  $('modelName').textContent = model.name || '—';
+}
+
+/*
+ * The session's edit history.
+ *
+ * Kept because the interesting question after a change is never "what is the
+ * score" but "what did that change buy" — and the answer is only visible if
+ * the previous score is still on screen next to the change that replaced it.
+ */
+export function renderRevisions(revisions) {
+  const section = $('revisionsSection');
+  if (!revisions || !revisions.length) {
+    section.hidden = true;
+    return;
+  }
+  section.hidden = false;
+
+  const rows = revisions.slice().reverse().map((rev, i) => el('div', { class: 'revision-row' }, [
+    el('span', { class: 'revision-idx', text: String(revisions.length - i).padStart(2, '0') }),
+    el('span', { class: 'revision-change', text: `${rev.name} = ${rev.value}` }),
+    el('span', {
+      class: 'revision-score',
+      text: rev.scoreBefore == null ? 'not yet scored' : `was ${Math.round(rev.scoreBefore)}`,
+    }),
+  ]));
+  replaceChildren($('revisionsList'), rows);
+  $('revisionCount').textContent = `${revisions.length} change${revisions.length === 1 ? '' : 's'}`;
+}

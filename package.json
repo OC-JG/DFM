@@ -2,7 +2,7 @@
   "name": "onlycat-dfm",
   "version": "2.0.0",
   "private": true,
-  "description": "Injection moulding design-for-manufacture analyser — single-file browser tool",
+  "description": "Injection moulding design-for-manufacture analyser — single-file browser tool, reads .ipt via a local Inventor",
   "license": "MIT",
   "type": "module",
   "scripts": {
@@ -11,9 +11,10 @@
     "fixtures": "node test/make-fixtures.mjs",
     "browser": "playwright install chromium",
     "test:unit": "node test/unit.mjs",
+    "test:contract": "node test/contract.mjs",
     "test:smoke": "node build.js && node test/make-fixtures.mjs && node test/smoke.mjs",
     "test:offline": "node build.js --vendor && node test/make-fixtures.mjs && node test/offline.mjs && node build.js",
-    "test": "node build.js && node test/unit.mjs && node test/make-fixtures.mjs && node test/smoke.mjs",
+    "test": "node build.js && node test/contract.mjs && node test/unit.mjs && node test/make-fixtures.mjs && node test/smoke.mjs",
     "verify:build": "node build.js && git diff --exit-code -- dfm-tool.html"
   },
   "devDependencies": {
@@ -26,6 +27,8 @@
     "browser": "npm install fetches the playwright library but not the browser binary. Run `npm run browser` once after installing, or set DFM_CHROMIUM to a Chromium you already have.",
     "build:offline": "Inlines three.js and jsPDF so the output needs no network at all — about 1.4 MB instead of 500 kB. The committed deliverable is the CDN-loading one; this is for handing someone a file that has to work on a machine with no internet.",
     "test:offline": "Builds the vendored output, proves it runs with every off-origin request refused, then rebuilds the normal one so the tree is left as it was found.",
+    "test:contract": "the markup/script id contract. src/app reaches into the DOM by id, so a restyle that drops one fails silently at runtime; this catches it before the browser does.",
+    "test:contract": "The markup/script id contract. src/app reaches into the DOM by id, so a restyle that drops one fails silently at runtime, often only after a part is loaded. This catches it before the browser does.",
     "verify:build": "dfm-tool.html is the deliverable and is committed. Rebuilds and fails if the result differs from the committed copy, which a source-only commit would otherwise leave stale. Assumes a clean working tree, so it is a CI check rather than a pre-commit one — with src/ edits in progress it will fail by design."
   }
 }

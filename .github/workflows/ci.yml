@@ -21,6 +21,11 @@ jobs:
       # The unit tests need neither a browser nor a network, so they run first
       # and fail fast — a broken thickness calculation should not wait on a
       # Chromium download to report itself.
+      # Cheapest check in the suite and the one a restyle is most likely to
+      # trip: every id src/app reaches for must still exist in the markup.
+      - name: Markup/script contract
+        run: npm run test:contract
+
       - name: Unit tests
         run: npm run test:unit
 
