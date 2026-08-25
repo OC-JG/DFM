@@ -77,6 +77,12 @@ export const runtime = {
   comparison: null,            // diff against a previously exported run
   twoShot: null,               // two-shot check result
 
+  /* Set only when the part arrived as .ipt through the Inventor bridge:
+     { document, name, units, parameters[], features[], sketches[] }. Null for
+     a dropped STL or STEP, which carry no parameters to drive. */
+  model: null,
+  revisions: [],               // parameter changes made this session, newest last
+
   gateLocation: null,          // [x, y, z] in mesh-local coordinates
   gateSuggestion: null,        // best searched gate positions for this geometry
   pullDir: { mode: 'axis', value: '+z', vec: [0, 0, 1] },
@@ -166,6 +172,8 @@ export function resetRuntime() {
   runtime.shot = null;
   runtime.comparison = null;
   runtime.twoShot = null;
+  runtime.model = null;
+  runtime.revisions = [];
   runtime.gateLocation = null;
   runtime.gateSuggestion = null;
   runtime.pullDir = { mode: 'axis', value: '+z', vec: [0, 0, 1] };
