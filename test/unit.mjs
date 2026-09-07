@@ -28,7 +28,7 @@ import { compareRuns } from '../src/rules/compare.js';
 import { estimateShot, nextMachineSize, CAVITY_PRESSURE_MPA } from '../src/analysis/shot.js';
 import { searchGateCandidates, computeFlowLengths, buildAdjacency, geodesicFrom } from '../src/analysis/flow.js';
 import { effectiveMinDraft } from '../src/core/finishes.js';
-import { MATERIALS } from '../src/core/materials.js';
+import { MATERIALS, MATERIAL_ORDER } from '../src/core/materials.js';
 import { DEFAULT_SETTINGS } from '../src/app/state.js';
 
 // ── harness ────────────────────────────────────────────────────────────────
@@ -444,6 +444,64 @@ function meshFor(soup, finishKey = 'spi-a2') {
 }
 
 const DEFAULT_CHECK_KEYS = ['wall', 'draft', 'sink', 'flow', 'ribs', 'warp', 'undercut', 'finish_compat'];
+
+describe('materials — the cooling coefficient is written for the full wall');
+{
+  /* The question that blocked cycle time, kept answered.
+     Rearranging tc = k·s² through the plate-cooling solution, each coefficient
+     implies a thermal diffusivity:
+         α = ln[(4/π)·(Tmelt − Tmould)/(Teject − Tmould)] / (π²·k)
+     under the full-wall reading, and a quarter of that under the half-wall
+     one. Diffusivity is a measured property, so the two readings can be held
+     against physics rather than against opinion. See docs/coolk.md. */
+  const LOG_CONST = 4 / Math.PI;
+  const PROCESS = {
+    abs: [50, 90], pp: [30, 80], pc: [90, 130], pa6: [80, 120],
+    pa66gf: [90, 150], pom: [90, 120], hdpe: [30, 70], pe: [30, 65],
+    ps: [40, 80], pbt: [80, 130], petg: [20, 70], pmma: [70, 95],
+    tpu: [25, 60], asa: [50, 90], asa_n: [50, 90], pcasa: [70, 105],
+  };
+  /* Unfilled thermoplastics measure roughly 0.05–0.20 mm²/s. */
+  const DIFFUSIVITY_LO = 0.05, DIFFUSIVITY_HI = 0.20;
+
+  const impliedAlpha = (key) => {
+    const m = MATERIALS[key];
+    const [mould, eject] = PROCESS[key];
+    const L = Math.log(LOG_CONST * (m.meltC - mould) / (eject - mould));
+    return L / (Math.PI ** 2 * m.coolK);
+  };
+
+  it('every coefficient implies a diffusivity a real polymer has', () => {
+    for (const key of MATERIAL_ORDER) {
+      const a = impliedAlpha(key);
+      assert(a >= DIFFUSIVITY_LO && a <= DIFFUSIVITY_HI,
+        `${MATERIALS[key].name}: coolK ${MATERIALS[key].coolK} implies α = ${a.toFixed(4)} mm²/s, outside ${DIFFUSIVITY_LO}–${DIFFUSIVITY_HI}`);
+    }
+  });
+
+  it('the half-wall reading is impossible for every material, not merely unlikely', () => {
+    /* This is the assertion that pins the convention. If someone rewrites a
+       coefficient into the half-wall form — multiplying it by four — its
+       implied diffusivity lands in a range no thermoplastic occupies, and the
+       test above fails. This one states the other half: that the alternative
+       reading of the current numbers is not a close call. */
+    for (const key of MATERIAL_ORDER) {
+      const a = impliedAlpha(key) / 4;
+      assert(a < DIFFUSIVITY_LO,
+        `${MATERIALS[key].name}: the half-wall reading implies α = ${a.toFixed(4)} mm²/s, which is not obviously impossible — the convention is no longer settled by arithmetic alone`);
+    }
+  });
+
+  it('a 2 mm wall cools in seconds, not in a fraction of one', () => {
+    /* The sanity check a moulder would apply without any of the above: no
+       2 mm thermoplastic section leaves a tool in under a second. */
+    for (const key of MATERIAL_ORDER) {
+      const floor = MATERIALS[key].coolK * 2 * 2;   // full wall, so s = 2 mm
+      assert(floor >= 3 && floor <= 12,
+        `${MATERIALS[key].name}: a 2 mm wall would cool in ${floor.toFixed(1)} s`);
+    }
+  });
+}
 
 describe('scoring — the weight table');
 {

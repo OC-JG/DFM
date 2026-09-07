@@ -4,7 +4,17 @@
  *
  * Field notes:
  *   ltMax     typical spiral-flow L/T ratio (Malloy §2.2.3)
- *   coolK     cooling-time coefficient k in tc = k × s²  (s = half-wall, mm)
+ *   coolK     cooling-time coefficient k in tc = k × s², where s is the
+ *             FULL wall in mm — not the half-wall, which is the same physics
+ *             written with a factor of four in it. This said half-wall and was
+ *             wrong; it blocked cycle time for as long as nobody could say
+ *             which was meant. Re-derived rather than asked: rearranged, each
+ *             coefficient implies a thermal diffusivity, and the full-wall
+ *             reading puts all sixteen inside the measured range for a
+ *             thermoplastic while the half-wall reading puts every one of them
+ *             three to seven times below any polymer that exists. Working, and
+ *             what it does *not* settle, in docs/coolk.md; asserted in
+ *             test/unit.mjs so it cannot drift back.
  *   stripPct  max strippable undercut as % of part OD, for soft materials
  *   meltC     typical injection melt temperature (°C)
  *   hdtC      heat deflection temperature at 0.45 MPa (°C). Reported by the

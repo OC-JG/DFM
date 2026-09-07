@@ -88,7 +88,7 @@ in — those ran roughly to estimate, which is the only reason to trust these.
 | R2.1 | Trust the STEP path | ~~3–5 d~~ done | Unblocked R2.2, R2.3 |
 | R2.2 | Features, not triangles | ~~1–2 wk~~ done | unblocked nothing further |
 | R2.3 | The Inventor loop under test | ~~4–6 d~~ done | one part blocked upstream |
-| R2.4 | Numbers that get quoted | 1 wk + a decision | Needs a moulding engineer |
+| R2.4 | Numbers that get quoted | 1 wk | unblocked — `coolK` answered |
 | R2.5 | Two-shot and FPC earn their weights | 1–2 wk | Needs R2.2 for the FPC region |
 | R2.6 | Findings that survive leaving the tool | 4–6 d | Independent |
 | R2.7 | Navigation for people who navigate for a living | 1–2 wk | Independent |
@@ -290,14 +290,33 @@ were, would close that gap.
 because the tool is deliberately silent on both — correctly, until one question
 is answered.
 
-**The decision that gates it.** `coolK` in `src/core/materials.js` is documented
-as `tc = k × s²` with `s = half-wall` (materials.js:7). If that convention is
-wrong — if the tabulated values were written for full wall — every cycle time
-the tool could print is out by a factor of four. This has been the single open
-question since Phase 3 and it needs a moulding engineer, or a re-derivation from
-a source that states its convention explicitly, or calibration against a part
-with a known measured cycle. Two of those three are available without waiting
-for anybody.
+**The decision that gated it is made.** *(answered — see `docs/coolk.md`.)*
+`coolK` is written for the **full wall**, not the half-wall its comment claimed.
+Re-derived rather than asked, which was one of the three routes open and the one
+that needed nobody: rearranged through the plate-cooling solution, each
+coefficient implies a thermal diffusivity, and diffusivity is a measured
+property with a known range. The full-wall reading puts all sixteen materials
+inside 0.088–0.168 mm²/s; the half-wall reading puts every one of them three to
+seven times below any polymer that exists. For ABS to be half-wall *and*
+physical, the part would have to eject at 155 °C — 57 °C above its own HDT,
+still soft. The comment is corrected and `test/unit.mjs` asserts the convention,
+so it cannot drift back.
+
+Two things the answer does **not** settle, and the first is the one that still
+needs a judgement before a number goes on screen:
+
+- The formula gives the **theoretical cooling floor** — centre plane first
+  reaching ejection temperature, mould wall held fixed, heat leaving in one
+  dimension. A real cycle runs longer; practice is commonly 1.5–2×. On a 2 mm
+  ABS wall that is 6.8 s against nearer 10–14 s. Whichever is printed has to say
+  which it is.
+- The polyolefins imply the *highest* diffusivities in the table (PP 0.160,
+  HDPE 0.166, PE 0.168) where a semi-crystalline's effective value should sit
+  lowest, because latent heat of crystallisation has to come out before the part
+  is rigid. Both readings share this, so it does not affect the convention — but
+  it does suggest `coolK` for the polyolefins is optimistic, and they would be
+  the first numbers argued with. Worth a datasheet check before any of this
+  reaches a quotation.
 
 **What ships, once that is settled.**
 
@@ -314,9 +333,10 @@ for anybody.
 - Cost in the JSON export and the PDF, clearly separated from the score. These
   are not manufacturability verdicts and must not move the number.
 
-**Exit criteria.** No unqualified cycle time appears anywhere until `coolK` is
-settled and the resolution is written down in `src/core/materials.js` next to
-the field. Cost figures state every assumption on the same page they appear on.
+**Exit criteria.** `coolK` settled and the resolution written down next to the
+field — **met**. No unqualified cycle time appears anywhere: still to come, and
+now only a matter of deciding floor against practical and labelling it. Cost
+figures state every assumption on the same page they appear on.
 
 **Risk.** This is the milestone most likely to be quoted from and least likely to
 be checked. It is also the one where being wrong is most expensive, which is why
@@ -507,9 +527,10 @@ for, and it has no automated coverage today.
 Release discipline first, because it is cheap and because a tagged build is what
 makes every later change traceable.
 
-R2.1, R2.2 and R2.3 are done — the three that R2.1's fixture unblocked. What
-remains is independent of everything: R2.4 (behind its one question), R2.5, R2.6
-and R2.7 can be taken in any order.
+R2.1, R2.2 and R2.3 are done — the three that R2.1's fixture unblocked — and
+R2.4's blocking question is answered, so it is no longer waiting on anybody.
+What remains is independent of everything: R2.4, R2.5, R2.6 and R2.7 can be
+taken in any order.
 
 R2.7 depends on nothing and competes with nothing — it is viewer code, and the
 only file it shares with any other milestone is `src/app/camera.js`, which none
@@ -522,8 +543,10 @@ is much cheaper once R2.2 has made faces and bodies first-class.
 
 ## Decisions that need a human
 
-1. **`coolK`: half-wall or full wall?** Factor-of-four consequence. Gates cycle
-   time and everything costed from it.
+1. ~~**`coolK`: half-wall or full wall?**~~ *Answered: the full wall. Derived,
+   not asked — `docs/coolk.md`. What remains is a judgement rather than a fact:
+   whether a printed cycle time is the theoretical floor or a practical time,
+   and saying which on screen.*
 2. ~~**The OpenCascade module: vendor it for tests, or not?**~~ *Settled in
    R2.1: neither. It is an npm package, so it is a pinned devDependency and
    nothing was committed to git.*

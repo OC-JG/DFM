@@ -425,11 +425,19 @@ Cavity pressure is the one assumption in the chain, and it is printed next to th
 result. Mass is withheld when the mesh is not a closed solid rather than
 estimated from the bounding box.
 
-Cycle time is not included. The material table carries a cooling coefficient per
-grade, but its documented convention gives the theoretical cooling floor rather
-than a practical cooling time — the two readings differ by about 4× — and a
-cycle time is exactly the kind of number that gets quoted from. See
-`src/analysis/shot.js` for the detail.
+Cycle time is not included yet, but the question that blocked it is answered.
+The material table's cooling coefficient is written for the **full wall**, not
+the half-wall its comment claimed — a factor of four, settled by re-deriving it
+rather than by asking: rearranged, each coefficient implies a thermal
+diffusivity, and the full-wall reading puts all sixteen materials inside the
+measured range for a thermoplastic while the half-wall reading puts every one of
+them three to seven times below any polymer that exists. `docs/coolk.md` has the
+working, and `test/unit.mjs` asserts it so it cannot drift back.
+
+What remains is a judgement rather than a fact. The formula gives the
+*theoretical cooling floor*; a real cycle is commonly 1.5–2× that. On a 2 mm ABS
+wall, 6.8 s against nearer 10–14 s. A cycle time is exactly the kind of number
+that gets quoted from, so whichever is printed has to say which it is.
 
 ## Comparing revisions
 
