@@ -92,11 +92,29 @@ async function main() {
   page.on('console', (m) => { if (m.type() === 'error') consoleErrors.push(m.text()); });
   page.on('pageerror', (e) => consoleErrors.push(`pageerror: ${e.message}`));
 
+  /* No Inventor is running here — there is none on a CI runner — so the
+     bridge health probe is refused, and Chromium logs the refused request as
+     a console error that no catch inside the page can suppress. "Nothing
+     listening" is a state the tool is built to report, so one such error per
+     refused probe is expected rather than a failure. Everything else still
+     counts, and the allowance is keyed on the request URL rather than on the
+     console text, so a refused connection to anything else is not excused. */
+  const failedRequests = [];
+  page.on('requestfailed', (r) => failedRequests.push(r.url()));
+
+  const unexpectedErrors = () => {
+    let allowance = failedRequests.filter((u) => u.includes('/bridge/health')).length;
+    return consoleErrors.filter((t) => {
+      if (allowance > 0 && /Failed to load resource/.test(t)) { allowance--; return false; }
+      return true;
+    });
+  };
+
   try {
     await page.goto(url, { waitUntil: 'networkidle' });
 
     // ── boot ──────────────────────────────────────────────────────────────
-    check('page boots without errors', consoleErrors.length === 0, consoleErrors.join(' | '));
+    check('page boots without errors', unexpectedErrors().length === 0, unexpectedErrors().join(' | '));
     check('three.js loaded', await page.evaluate(() => typeof THREE !== 'undefined'));
     check('status pill ready', (await page.textContent('#statusPill')).includes('AWAITING'));
     check('worker active over http', (await page.textContent('#threadNote')) === 'worker');
@@ -137,6 +155,9 @@ async function main() {
     // ── moulding estimates ────────────────────────────────────────────────
     // Not scored checks: what it costs to make the part rather than whether it
     // can be made. The fixture is a 40×30×20 shell with 2 mm walls.
+    // The estimates live behind their own results tab, so open it the way a
+    // user does before asking whether they are on screen.
+    await page.click('.tab[data-tab="estimates"]');
     check('moulding estimates shown', await page.locator('#shotSection').isVisible());
     const shotText = await page.textContent('#shotSection');
     check('part mass reported', /\d+\.\d\s*g/.test(shotText), shotText.slice(0, 160));
@@ -235,6 +256,9 @@ async function main() {
     await page.waitForFunction(
       () => document.getElementById('compareSection').style.display !== 'none', null, { timeout: 15000 });
     const cmpText = await page.textContent('#compareSection');
+    /* Same tab as the estimates, and the run above may have left another one
+       selected, so select it again rather than assuming. */
+    await page.click('.tab[data-tab="estimates"]');
     check('comparison panel shown', await page.locator('#compareSection').isVisible());
     check('comparing a run with itself moves nothing', /No check changed band/.test(cmpText), cmpText.slice(0, 200));
     check('comparison warns it is the same geometry', /same geometry twice/.test(cmpText), cmpText.slice(0, 300));
@@ -249,7 +273,7 @@ async function main() {
     check('reset restores default material', (await page.inputValue('#material')) === 'pp');
     check('reset clears results', !(await page.locator('#resultsContent').isVisible()));
 
-    check('no console errors during run', consoleErrors.length === 0, consoleErrors.slice(0, 3).join(' | '));
+    check('no console errors during run', unexpectedErrors().length === 0, unexpectedErrors().slice(0, 3).join(' | '));
 
     // ── mesh health gate ──────────────────────────────────────────────────
     // The panel that has to be read before the score is. Driven on a fresh
