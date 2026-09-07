@@ -336,6 +336,43 @@ Both exports carry it, and both say **which** they measured: `measured_from` is
 — not contradictory ones — and anyone comparing two exports needs to know which
 they are holding.
 
+## Corner radii, fitted
+
+Radii are not in the file. The STEP reader hands back a triangle range per face
+and nothing else — no surface type, no radius, no axis — so a radius has to be
+**fitted** to the face's own triangles rather than read off it.
+
+A cylinder's outward normals all lie square to its axis, so they span a plane
+and the axis is the direction they never point in. Fit a circle to the face's
+vertices projected onto that plane and the radius falls out. Which way the
+normals lean tells convex from concave, and how far the face sweeps tells a
+whole feature from a corner blend:
+
+|            | sweeps the full turn | sweeps part of it |
+|------------|----------------------|-------------------|
+| **convex** | a boss               | an external round |
+| **concave**| a bore               | an internal fillet|
+
+Internal blends are judged against 0.5× wall and external ones against 1.5×
+wall, and the check names the face and the radius that fell short. Bores and
+bosses are not corners, so they are reported rather than judged — "three Ø8
+bores" is what someone wants before quoting a tool.
+
+**The check always states what it cannot see, including when it passes.** A
+corner modelled dead sharp has no cylindrical face to fit, so it cannot appear
+in the report at all. A clean result means every radius that exists is
+adequate; it never means every corner has one.
+
+The fit declines far more often than it succeeds, which is the point. A flat
+face is left flat, and so is a face whose "radius" comes out at five metres —
+that is a plane with rounding on it, not a fillet, and reporting it as one
+would fill the fillet list with fiction.
+
+Scored only where it can measure. On an STL there are no faces, so the check
+stays the advisory it always was and the score is unchanged; on a B-rep it adds
+8 points of exposure to the budget, the same way the FPC and wall-transition
+checks do. No existing export's score moves.
+
 ## Where to put the gate
 
 Flow length, and therefore the short-shot prediction, depends entirely on where
@@ -439,14 +476,11 @@ build.
   split runs well above its base, check that band by eye. Whether a face that
   *is* an undercut needs a slide or a lifter is decided properly, by whether a
   side-action core could physically reach it.
-- **Corner radii cannot be detected**, only advised on. That needs B-rep face
-  topology; STL does not carry it, and the STEP path does not yet plumb
-  through the face groups the parser already extracts. Those groups are
-  preserved in the geometry format and now have a fixture proving they survive
-  the merge intact — `test/step.mjs` asserts that every triangle in a face group
-  is coplanar with its face, and that a 3° taper reads exactly 3° per face — so
-  what remains is a consumer for them in the analysis. See `docs/ROADMAP.md`
-  R2.2.
+- **Corner radii can only be measured where a radius exists.** On a B-rep they
+  are fitted per face and judged (see above). On an STL there are no faces, so
+  the check stays advisory. And on either, a corner modelled with no radius at
+  all is invisible — there is nothing to fit — so a clean radius report is
+  never a statement that every corner is filleted.
 - **The bridge trusts its caller.** Its routes are unauthenticated and they open
   uploaded files in a local Inventor session, so the server binds to localhost
   and only accepts requests from `file://` and localhost origins. Do not expose

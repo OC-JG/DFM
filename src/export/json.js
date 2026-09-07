@@ -110,6 +110,18 @@ function meshHealth(v) {
   };
 }
 
+/* One cylindrical feature, as it appears in the record. */
+function featureRow(c) {
+  return {
+    face_id: c.faceId,
+    body_id: c.bodyId,
+    radius_mm: c.radius,
+    diameter_mm: c.diameter,
+    sweep_deg: c.extentDeg,
+    axis: c.axis,
+  };
+}
+
 function meshSummary(a) {
   return {
     tris: a.triCount,
@@ -147,6 +159,18 @@ function meshSummary(a) {
         side: f.side,
         side_area_pct: f.areaPct,
       })),
+    } : null,
+    /* The cylindrical features, where there were faces to fit them to. Radii
+       are fitted rather than read — the reader carries no surface type — so a
+       corner modelled dead sharp has no face and cannot appear. An empty
+       fillet list does not mean "no sharp corners". */
+    features: a.features ? {
+      fillets: a.features.fillets.map(featureRow),
+      rounds: a.features.rounds.map(featureRow),
+      bores: a.features.bores.map(featureRow),
+      bosses: a.features.bosses.map(featureRow),
+      cylinder_count: a.features.cylinderCount,
+      unfitted_face_count: a.features.unfittedCount,
     } : null,
     wall_median_mm: a.wallStats.median,
     wall_p25_mm: a.wallStats.p25,

@@ -86,7 +86,7 @@ in — those ran roughly to estimate, which is the only reason to trust these.
 | | Milestone | Effort | Blocks / blocked by |
 |---|---|---|---|
 | R2.1 | Trust the STEP path | ~~3–5 d~~ done | Unblocked R2.2, R2.3 |
-| R2.2 | Features, not triangles | draft done | radii re-planned |
+| R2.2 | Features, not triangles | ~~1–2 wk~~ done | unblocked nothing further |
 | R2.3 | The Inventor loop under test | 4–6 d | Needs R2.1 |
 | R2.4 | Numbers that get quoted | 1 wk + a decision | Needs a moulding engineer |
 | R2.5 | Two-shot and FPC earn their weights | 1–2 wk | Needs R2.2 for the FPC region |
@@ -142,13 +142,13 @@ three, and a body range off by one fails one. The body fixture puts its two
 boxes 20 mm apart along x specifically so a wrong offset lands a triangle in
 the neighbouring solid and cannot be mistaken for rounding.
 
-**Still open from this milestone.** Nothing blocking, but two things were
-deliberately not done: curved surfaces (a cylindrical face needs a seam and a
-`CYLINDRICAL_SURFACE`, and no test wants one until R2.2 measures radii), and
-`BREP_WITH_VOIDS` (the shelled fixture is an open-topped cup, one closed shell,
-which is what a moulded part looks like anyway).
+**Still open from this milestone.** `BREP_WITH_VOIDS` — the shelled fixture is
+an open-topped cup, one closed shell, which is what a moulded part looks like
+anyway. Curved surfaces were the other omission and R2.2 closed it: the writer
+now emits `CYLINDRICAL_SURFACE` faces, full turns with a seam and partial
+sweeps with arc-bounded caps.
 
-### R2.2 — Features, not triangles
+### R2.2 — Features, not triangles *(done)*
 
 **Why now.** This is the largest single capability unlock in the repo, the data
 is already being computed and discarded (gap 2), the documentation already
@@ -176,28 +176,52 @@ something trustworthy to assert a per-face measurement against.
   check's own metrics and in the JSON export. The same part through the two
   doors produces different records — not contradictory ones — and a consumer
   comparing two exports needs to know which it holds.
-- **Corner radii, measured.** *Still open, and the plan for it was wrong.* This
+- **Corner radii, measured.** *(done — and the plan for it was wrong.)* This
   section said cylindrical and toroidal faces in the STEP data give radii
-  directly. They do not, through this reader: `occt-import-js` returns
-  `{first, last, color}` per face and nothing else — no surface type, no radius,
-  no axis. So a radius cannot be read, it has to be **fitted** to the
-  tessellated triangles of a face group. That is more work and, as it turns out,
-  better: it works on any B-rep source, it degrades to an honest "not
-  measurable" on a face that fits nothing, and what it needs — an axis, a radius
-  and an extent per face — is exactly what holes and bosses need, so one piece
-  of work unlocks both remaining deliverables.
+  directly. They do not: `occt-import-js` returns `{first, last, color}` per
+  face and nothing else — no surface type, no radius, no axis. So a radius is
+  **fitted** rather than read. A cylinder's outward normals all lie square to
+  its axis, so they span a plane and the axis is the direction they never point
+  in — the eigenvector of their covariance with the smallest eigenvalue. A
+  circle fitted to the face's vertices projected onto that plane gives the
+  radius; which way the normals lean gives convex against concave; how far the
+  face sweeps separates a whole feature from a corner blend.
 
-  It also needs a fixture with a curved face, which means `step-write.mjs`
-  learning `CYLINDRICAL_SURFACE` and a seam — the thing R2.1 deliberately left
-  out because nothing wanted one yet. Something wants one now.
-- **Holes and bosses as features.** *Still open*, and behind the fitting above
-  rather than behind anything else.
+  This turned out better than reading a field would have been. It works on any
+  B-rep source rather than on one reader's metadata, it fails honestly — a face
+  that fits nothing is reported unmeasured rather than as a number — and it is
+  orientation-free: a rod down the (1,1,1) diagonal fits its axis to 1e-3, and
+  a test says so.
 
-**Exit criteria.** The drafted-frustum fixture reporting its draft exactly per
-face rather than as an area distribution is **met**: a 3° taper reads 3.000° on
-each of its four side faces and a box reads 0.00° on each of its. The fillet
-fixture's radius being measured, and `corners` carrying a non-zero weight, are
-**not** met and wait on the fitting work above.
+  The fit declines far more often than it succeeds, which took as much care as
+  making it succeed. A flat face is left flat; so is a face whose radius comes
+  out at five metres, which is a plane with rounding on it rather than a
+  fillet. That guard was the one a mutation test caught unprotected — removing
+  it broke nothing, because the fixtures never reached it — and it now has a
+  test built from the numerical edge it defends rather than from a shape.
+- **Holes and bosses as features.** *(done)* The same fit, read differently: a
+  full sweep is a bore or a boss rather than a blend. Reported, never judged —
+  a hole is not a corner — because "three Ø8 bores and a Ø12 boss" is what
+  someone wants before quoting a tool.
+- **`corners` off `weight: 0`.** *(done, and this is the decision the milestone
+  had to make.)* Neither of the two answers the roadmap offered was taken.
+  Rather than moving weight between the eight checks that sum to 100, or
+  widening the default budget for every part, the scored check is a **separate
+  key** — `corner_radii` — that is pushed only when there were faces to fit. An
+  STL keeps the advisory, the old budget and the old score, so no existing
+  export moves; a B-rep gains 8 points of exposure, exactly as the FPC and
+  wall-transition checks do. Eight rather than eleven for a reason worth
+  repeating: the check can only judge the radii that *exist*, and a corner
+  modelled dead sharp has no face to fit, so a check that cannot see the worst
+  version of its own defect should not carry the weight of one that can.
+
+**Exit criteria, all met.** A 3° taper reads 3.000° on each of its four side
+faces and a box reads 0.00° on each of its. A rod fits R8.000, a bore R6.000, a
+half-tube gives an external round and an internal fillet from one fixture, and a
+quarter rod reads 90°. Radii are measured rather than advised on, and
+`corner_radii` carries a weight — asserted as a budget of 108 on a part that can
+be measured and 100 on one that cannot, so the decision is in a test rather than
+only in a comment.
 
 **Risk.** Scope — and the mitigation held. "Feature recognition" can absorb a
 quarter with nothing shipped, so the deliverables were taken in the order given
@@ -464,10 +488,9 @@ for, and it has no automated coverage today.
 Release discipline first, because it is cheap and because a tagged build is what
 makes every later change traceable.
 
-R2.1 is done, which unblocks the two milestones after it. R2.2 and R2.3 can now
-run in parallel — they touch different directories and share only the STEP
-fixture, which exists — with R2.6 as filler for either, since it depends on
-nothing.
+R2.1 and R2.2 are done. R2.3 is the last of the three that R2.1 unblocked, and
+nothing now blocks anything: R2.3, R2.4 (behind its one question), R2.5, R2.6
+and R2.7 are independent of each other and can be taken in any order.
 
 R2.7 depends on nothing and competes with nothing — it is viewer code, and the
 only file it shares with any other milestone is `src/app/camera.js`, which none
@@ -487,10 +510,10 @@ is much cheaper once R2.2 has made faces and bodies first-class.
    nothing was committed to git.*
 3. **`--vendor` as the committed default?** Trades 900 kB of file size for two
    fewer third-party runtime loads and the SRI question.
-4. **Does `corners`, once measurable, take weight from the other checks or widen
-   the budget?** The eight default checks sum to exactly 100 today; both answers
-   are defensible and the choice should be recorded, not discovered. Still open:
-   radii are not measurable yet, so `corners` still carries `weight: 0`.
+4. ~~**Does `corners`, once measurable, take weight from the other checks or
+   widen the budget?**~~ *Settled in R2.2: neither. The scored check is a
+   separate key that appears only where there are faces to fit, so an STL keeps
+   the budget and the score it always had.*
 
 ## Deliberately not on this roadmap
 

@@ -20,8 +20,12 @@
 import { createRequire } from 'node:module';
 import { parseSTEP } from '../src/geometry/step.js';
 import { writeStepSolids } from './lib/step-write.mjs';
-import { stepBox, stepTaperedBox, stepCup, stepTwoBodies } from './lib/solids.mjs';
-import { analyseMesh, FACE_PLANAR_TOL_DEG } from '../src/analysis/mesh.js';
+import {
+  stepBox, stepTaperedBox, stepCup, stepTwoBodies,
+  stepRod, stepTube, stepHalfTube, stepQuarterRod, stepTiltedRod, stepSharpFillet,
+} from './lib/solids.mjs';
+import { analyseMesh } from '../src/analysis/mesh.js';
+import { FACE_PLANAR_TOL_DEG, classifyCylinder, fitCylinder } from '../src/analysis/faces.js';
 import { weldGeometry } from '../src/geometry/weld.js';
 import { MATERIALS } from '../src/core/materials.js';
 import { runDFM } from '../src/rules/engine.js';
@@ -312,6 +316,204 @@ describe('step — draft per face, which is what a face group is for');
     assert(!/B-rep names them/.test(draft.detail), 'a mesh source claimed a B-rep reading');
     assert(draft.metrics.some((r) => r && r[0] === 'Measured from' && /mesh/.test(r[1])),
       'the mesh path does not say where the measurement came from');
+  });
+}
+
+describe('step — radius, which has to be fitted because nothing reports it');
+{
+  const cylsOf = (a) => a.faces.filter((f) => f.surface.type === 'cylinder');
+
+  await it('a rod fits its authored radius, and knows it is convex', async () => {
+    const { solid, expect } = stepRod(8, 20);
+    const a = analyse(await load([solid], 'rod'));
+    eq(a.faces.length, expect.faceCount, 'face count:');
+    const c = cylsOf(a);
+    eq(c.length, 1, 'cylindrical faces:');
+    close(c[0].surface.radius, expect.radius, 1e-3, 'fitted radius:');
+    eq(c[0].surface.kind, expect.kind, 'classification:');
+    close(c[0].surface.extentDeg, 360, 1e-6, 'angular extent:');
+    close(a.volume, expect.volume, expect.volume * 3e-3, 'volume:');
+  });
+
+  await it('a bore is the same surface inside out, and is not called a boss', async () => {
+    /* Convexity is the whole difference between a pin and a hole, and it is
+       decided by which way the outward normal leans, not by the radius. */
+    const { solid, expect } = stepTube(10, 6, 20);
+    const a = analyse(await load([solid], 'tube'));
+    const c = cylsOf(a);
+    eq(c.length, 2, 'cylindrical faces:');
+    const bore = c.find((f) => f.surface.kind === 'bore');
+    const boss = c.find((f) => f.surface.kind === 'boss');
+    assert(bore && boss, `expected one bore and one boss, got ${c.map((f) => f.surface.kind).join(', ')}`);
+    close(bore.surface.radius, expect.rInner, 1e-3, 'bore radius:');
+    close(boss.surface.radius, expect.rOuter, 1e-3, 'outer radius:');
+    close(a.volume, expect.volume, expect.volume * 3e-3, 'volume:');
+  });
+
+  await it('a partial sweep is a corner blend, not a hole', async () => {
+    /* Same two surfaces as the tube, swept half way: the extent is what tells
+       a fillet from a bore, and both partial branches appear here. */
+    const { solid, expect } = stepHalfTube(10, 6, 20);
+    const a = analyse(await load([solid], 'halftube'));
+    const c = cylsOf(a);
+    eq(c.length, 2, 'cylindrical faces:');
+    const fillet = c.find((f) => f.surface.kind === 'fillet');
+    const round = c.find((f) => f.surface.kind === 'round');
+    assert(fillet && round, `expected a fillet and a round, got ${c.map((f) => f.surface.kind).join(', ')}`);
+    close(fillet.surface.radius, expect.rInner, 1e-2, 'fillet radius:');
+    close(round.surface.radius, expect.rOuter, 1e-2, 'round radius:');
+    close(fillet.surface.extentDeg, expect.extentDeg, 2, 'fillet extent:');
+    close(a.volume, expect.volume, expect.volume * 5e-3, 'volume:');
+  });
+
+  await it('a quarter round measures its radius and its quarter', async () => {
+    const { solid, expect } = stepQuarterRod(4, 12);
+    const a = analyse(await load([solid], 'quarter'));
+    const c = cylsOf(a);
+    eq(c.length, 1, 'cylindrical faces:');
+    eq(c[0].surface.kind, expect.kind, 'classification:');
+    close(c[0].surface.radius, expect.radius, 1e-2, 'radius:');
+    close(c[0].surface.extentDeg, expect.extentDeg, 2, 'extent:');
+    close(a.volume, expect.volume, expect.volume * 5e-3, 'volume:');
+  });
+
+  await it('nothing in the fit depends on the cylinder being axis-aligned', async () => {
+    const { solid, expect } = stepTiltedRod(7, 25);
+    const a = analyse(await load([solid], 'tilted'));
+    const c = cylsOf(a);
+    eq(c.length, 1, 'cylindrical faces:');
+    close(c[0].surface.radius, expect.radius, 1e-3, 'radius down a diagonal:');
+    for (let k = 0; k < 3; k++) {
+      close(Math.abs(c[0].surface.axis[k]), expect.axis[k], 1e-3, `axis component ${k}:`);
+    }
+  });
+
+  await it('a box is all planes, and no plane is mistaken for a cylinder', async () => {
+    /* The fit must decline far more often than it succeeds. A plane's normals
+       collapse to a line rather than spanning one, which is the test that
+       keeps every flat face out of the radius report. */
+    const a = analyse(await load([stepBox()], 'box-nocyl'));
+    eq(cylsOf(a).length, 0, 'cylinders found on a box:');
+    eq(a.features.cylinderCount, 0, 'features.cylinderCount:');
+    for (const f of a.faces) eq(f.surface.type, 'plane', `face ${f.faceId} surface:`);
+  });
+
+  await it('an almost-flat face is flat, not a five-metre fillet', () => {
+    /* The guard that earns its place least obviously, and the one a mutation
+       test found unprotected. aggregateFaces only offers *non*-planar faces to
+       the fit, so an exactly flat face never reaches it — but a face a hair
+       outside the planarity tolerance does, and its projected points are not
+       collinear, so the circle fit will happily return an enormous radius with
+       a tiny residual. Without the guard this face fits as R5000, which is not
+       a corner blend on any moulded part; with it, the face is left flat.
+       Built by hand rather than authored as STEP, because the fixture wanted
+       here is a specific numerical edge rather than a shape. */
+    const R = 5000, span = 20, N = 12;
+    const verts = [], tris = [];
+    for (let i = 0; i <= N; i++) {
+      const t = (i / N - 0.5) * (span / R);
+      const x = R * Math.sin(t), y = R * Math.cos(t) - R;
+      verts.push(x, y, 0, x, y, 10);
+    }
+    for (let i = 0; i < N; i++) {
+      const a = i * 2, b = i * 2 + 1, c = i * 2 + 2, d = i * 2 + 3;
+      tris.push(a, c, b, b, c, d);
+    }
+    const vertices = new Float32Array(verts), indices = new Uint32Array(tris);
+    const nTri = indices.length / 3;
+    const triAreas = new Float64Array(nTri);
+    const triFNorm = new Float64Array(nTri * 3), triCentroid = new Float64Array(nTri * 3);
+    for (let t = 0; t < nTri; t++) {
+      const a = indices[t * 3] * 3, b = indices[t * 3 + 1] * 3, c = indices[t * 3 + 2] * 3;
+      const e1 = [vertices[b] - vertices[a], vertices[b + 1] - vertices[a + 1], vertices[b + 2] - vertices[a + 2]];
+      const e2 = [vertices[c] - vertices[a], vertices[c + 1] - vertices[a + 1], vertices[c + 2] - vertices[a + 2]];
+      const n = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
+      const m = Math.hypot(n[0], n[1], n[2]);
+      triAreas[t] = m / 2;
+      for (let k = 0; k < 3; k++) {
+        triFNorm[t * 3 + k] = n[k] / m;
+        triCentroid[t * 3 + k] = (vertices[a + k] + vertices[b + k] + vertices[c + k]) / 3;
+      }
+    }
+    eq(fitCylinder({ vertices, indices }, 0, nTri - 1, triAreas, triFNorm, triCentroid), null,
+      'fit on a 5 m radius face:');
+  });
+
+  await it('classification is decided by convexity and sweep, and nothing else', () => {
+    /* The four branches, stated as a table rather than reached through four
+       fixtures — the fixtures above prove the fit, this proves the rule. */
+    eq(classifyCylinder({ convex: true, extentDeg: 360 }), 'boss');
+    eq(classifyCylinder({ convex: false, extentDeg: 360 }), 'bore');
+    eq(classifyCylinder({ convex: true, extentDeg: 90 }), 'round');
+    eq(classifyCylinder({ convex: false, extentDeg: 90 }), 'fillet');
+  });
+}
+
+describe('step — the corner radius check, and the limit of what it can see');
+{
+  await it('generous blends pass, and the check says what it measured', async () => {
+    const a = analyse(await load([stepHalfTube(10, 6, 20).solid], 'blends-ok'));
+    const c = runDFM({ ...CLEAN_INPUT, mesh: a }).checks.find((x) => x.key === 'corner_radii');
+    assert(c, 'no corner_radii check on a part with fitted blends');
+    eq(c.status, 'ok', 'status:');
+    eq(c.severity, 'none', 'severity:');
+    assert(/2 fitted cylindrical faces/.test(c.detail), `detail did not say what it measured: ${c.detail}`);
+  });
+
+  await it('a fillet far below the guideline is condemned, not noted', async () => {
+    /* R0.2 against a 1.00 mm guideline on a 2 mm wall: a fifth of what it
+       needs, which is a crack rather than a note for the next revision. */
+    const a = analyse(await load([stepSharpFillet(0.2).solid], 'sharp'));
+    const c = runDFM({ ...CLEAN_INPUT, mesh: a }).checks.find((x) => x.key === 'corner_radii');
+    eq(c.status, 'fail', 'status:');
+    eq(c.severity, 'critical', 'severity:');
+    assert(/R0\.20/.test(c.detail), `detail did not name the radius: ${c.detail}`);
+  });
+
+  await it('the check always states what it cannot see', async () => {
+    /* The honesty constraint: a corner modelled dead sharp has no cylindrical
+       face, so it cannot appear. A clean result means the radii that exist
+       are adequate, never that every corner has one — and the check has to
+       say so even when it passes, or it implies a guarantee it cannot give. */
+    for (const [name, solid] of [['pass', stepHalfTube().solid], ['fail', stepSharpFillet(0.2).solid]]) {
+      const a = analyse(await load([solid], `limit-${name}`));
+      const c = runDFM({ ...CLEAN_INPUT, mesh: a }).checks.find((x) => x.key === 'corner_radii');
+      assert(/does not confirm that every corner is filleted/.test(c.detail),
+        `the ${name} case did not state the limit of the measurement`);
+    }
+  });
+
+  await it('a part with nothing to fit keeps the advisory, and no budget moves', async () => {
+    /* An STL, or a B-rep with no blends at all. The scored check must not
+       appear, the advisory must, and the budget must be the one every
+       existing export was scored against. */
+    for (const [name, mesh] of [
+      ['stl', analyse(toSoup(stepBox()))],
+      ['brep-no-blends', analyse(await load([stepBox()], 'box-advisory'))],
+    ]) {
+      const r = runDFM({ ...CLEAN_INPUT, mesh });
+      assert(!r.checks.some((c) => c.key === 'corner_radii'), `${name}: scored check appeared with nothing to measure`);
+      assert(r.checks.some((c) => c.key === 'corners'), `${name}: the advisory went missing`);
+      eq(r.budget, 100, `${name} budget:`);
+    }
+  });
+
+  await it('the scored check widens the budget rather than taking from the eight', async () => {
+    /* The decision this milestone had to make, asserted rather than left in a
+       comment: a part that can be measured is exposed to 8 more points, and
+       the other checks keep the weights every previous export was scored on. */
+    const a = analyse(await load([stepHalfTube().solid], 'budget'));
+    const r = runDFM({ ...CLEAN_INPUT, mesh: a });
+    eq(r.budget, 108, 'budget with corner_radii:');
+    const c = r.checks.find((x) => x.key === 'corner_radii');
+    eq(c.weight, 8, 'corner_radii weight:');
+  });
+
+  await it('a critical radius finding spends the whole of its weight', async () => {
+    const a = analyse(await load([stepSharpFillet(0.2).solid], 'spend'));
+    const r = runDFM({ ...CLEAN_INPUT, mesh: a });
+    const c = r.checks.find((x) => x.key === 'corner_radii');
+    close(c.scoreDeduction, 8, 1e-9, 'deduction for a critical corner radius:');
   });
 }
 
