@@ -91,6 +91,7 @@ in — those ran roughly to estimate, which is the only reason to trust these.
 | R2.4 | Numbers that get quoted | 1 wk + a decision | Needs a moulding engineer |
 | R2.5 | Two-shot and FPC earn their weights | 1–2 wk | Needs R2.2 for the FPC region |
 | R2.6 | Findings that survive leaving the tool | 4–6 d | Independent |
+| R2.7 | Navigation for people who navigate for a living | 1–2 wk | Independent |
 | — | Release discipline | 2–3 d | Independent, do first |
 
 ### R2.1 — Trust the STEP path
@@ -306,10 +307,82 @@ is cheap to fix and compounds with every export that already exists.
 **Exit criteria.** Two runs of the same part produce the same finding ids. A JSON
 export names the build that produced it. Comparing across a rules change says so.
 
+### R2.7 — Navigation for people who navigate for a living
+
+**Why now.** The people this tool is for spend their day in Inventor with a
+SpaceMouse under their left hand, and then arrive here and have to orbit a part
+with a mouse drag. It is the one part of the tool that feels less capable than
+the CAD package it sits beside, and the fix is bounded.
+
+**What ships.**
+
+- **6-DoF input from a 3Dconnexion device.** Two routes, and the choice should
+  be made by testing rather than argument. WebHID (`navigator.hid`) reads the
+  device directly, needs a user gesture to grant access, and is Chromium-only —
+  and whether it is available at all from a `file://` origin, which is how this
+  tool is opened, is the first thing to establish, not assume. The alternative
+  is 3Dconnexion's own local service, which their web samples talk to over a
+  localhost socket. That second route is the same shape as the Inventor bridge
+  this repo already has (`src/app/bridge.js`) — a local service, a localhost
+  origin, an availability chip in the header — and a SpaceMouse user is very
+  likely to be the same person already running InventorMCP on that machine.
+- **A camera that can express what the device sends.** This is the actual work,
+  and it is worth being clear that it is not a shim. `src/app/camera.js` holds
+  orientation as `theta`, `phi` and `radius` around a target — 2 DoF of
+  rotation with world-up implied, which is why there is no roll. A puck sends
+  three translation and three rotation rates at once. Taking them properly means
+  the camera state becoming a quaternion plus a target plus a distance, with the
+  existing mouse, touch and keyboard paths rewritten onto it. Doing that first,
+  and shipping it with no device attached, de-risks the rest: if the orbit still
+  feels right afterwards, the hard part is done.
+- **Rate control, not position control, with a dead zone.** A SpaceMouse
+  displaces a few millimetres and springs back; the axis value is a velocity, so
+  it integrates per animation frame with a dead zone around centre and a
+  configurable sensitivity per axis. Getting this wrong is what makes 6-DoF
+  navigation feel seasick, and it is tuning, not architecture.
+- **The device's buttons on the actions that already exist.** Fit, top, front,
+  right and iso are already implemented behind `setView` and the `F`/`R` keys
+  (`src/app/camera.js:1-16`); the buttons should reach the same functions rather
+  than grow their own.
+- **An input source the tests can drive.** Nothing about a physical puck is
+  testable in CI, so the device layer should sit behind a small interface that
+  the smoke test can feed synthetic axis samples through — the same trick as the
+  bridge fixture in R2.3. That is what stops this becoming a permanently
+  unverified corner of the viewer.
+- **A reduced-motion answer.** The tool respects `prefers-reduced-motion`
+  elsewhere. Continuous 6-DoF drift is exactly the kind of motion that setting
+  is about, so decide deliberately: damp it, or leave the device to override it
+  on the grounds that the user is driving every frame themselves.
+
+**Exit criteria.** The camera refactor lands and passes the existing smoke test
+with no device present. Synthetic axis samples produce the expected camera pose
+in a test. With a real device, a part can be inspected without touching the
+mouse, and a user with no device notices no change at all.
+
+**Risk.** Chromium-only, whichever route is chosen, so this is an enhancement
+that must degrade to silence — no error, no chip, nothing — on a browser or
+machine without the device. And the camera refactor touches the most
+hand-tuned code in the repo; the mouse and touch feel is the regression to watch
+for, and it has no automated coverage today.
+
 ### Release discipline
 
 **Do this first — it is two or three days and everything else benefits.**
 
+- **`verify:build` is platform-dependent, and `main` has been red since it
+  landed.** The check rebuilds `dfm-tool.html` and fails if the result differs
+  from the committed copy — but the committed copy was built on Windows and CI
+  rebuilds on Linux, so it fails on 33 lines that are nothing but a path
+  separator: `/* ==== core\materials.js */` against `/* ==== core/materials.js
+  */`. `build.js:126` takes the module name from `path.relative`, which returns
+  the host OS's separator, and line 162 writes it into the section banner. The
+  embedded worker string carries the same difference plus escaped `\r\n` from a
+  CRLF checkout. Two lines fix it — normalise `rel` to forward slashes, and
+  normalise line endings on read — plus a `.gitattributes` marking `src/**` as
+  `eol=lf` so a Windows checkout cannot reintroduce the second half. Until it is
+  fixed, the repository's most useful guard rail is a permanent red that
+  everyone learns to ignore, which is worse than not having it: main's last run
+  failed on 2026-08-25 and every branch since has inherited it.
 - **Tag and release.** `package.json` says `2.0.0`; there are no tags and no
   releases. CI already uploads `dfm-tool.html` as an artifact on every run
   (`.github/workflows/ci.yml`); attaching it to a tagged release instead gives
@@ -355,6 +428,10 @@ Then R2.1, because it unblocks the two milestones after it and because the
 largest untested surface in the repo is also the most-used one. R2.2 and R2.3 can
 then run in parallel — they touch different directories and share only the STEP
 fixture — with R2.6 as filler for either, since it depends on nothing.
+
+R2.7 depends on nothing and competes with nothing — it is viewer code, and the
+only file it shares with any other milestone is `src/app/camera.js`, which none
+of them touch. Slot it wherever there is appetite for it.
 
 R2.4's engineering is a week; its blocking decision could take five minutes or a
 fortnight, so raise the `coolK` question at the *start* of R2.1, not when R2.4
