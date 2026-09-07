@@ -1004,6 +1004,10 @@ comments beside them.
 
 ### Still open, in priority order
 
+*Superseded by `docs/ROADMAP.md`, which sequences these into milestones with
+exit criteria. The list below is kept as the record of what was open at the end
+of Phase 4.*
+
 **One question for a moulding engineer**, and it is `coolK`: whether the
 cooling-time coefficient in the material table is written for half-wall or
 full-wall thickness. The two conventions differ by a factor of four in the
