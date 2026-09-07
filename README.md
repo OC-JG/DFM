@@ -351,6 +351,20 @@ It also declines to mislead. Changing material, changing mode or running a
 different set of checks all make score movement something other than a change in
 the part, and each raises a caveat above the diff.
 
+## Roadmap
+
+`docs/ROADMAP.md` is what happens next and why, in order: getting the STEP path
+under test (it is the primary input path and the only untested one), consuming
+the B-rep face groups the parser already extracts, putting the Inventor loop
+under test, SpaceMouse navigation for the people who use one all day, and the
+one question — the `coolK` convention — that cycle time and every cost derived
+from it are waiting on. It also records what has been decided *against*, so it
+does not get re-proposed: a computed parting line, flow
+simulation, and authentication on a localhost-only bridge.
+
+`docs/ASSESSMENT.md` is the review that preceded the rebuild and the record of
+what the five delivered phases actually changed.
+
 ## Licence
 
 MIT — see `LICENSE`. The built `dfm-tool.html` carries the notice in a comment at
