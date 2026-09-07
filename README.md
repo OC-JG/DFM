@@ -72,6 +72,7 @@ npm test               # build + unit tests + fixtures + browser smoke test
 
 npm run test:unit      # just the unit tests: no browser, no network, sub-second
 npm run test:step      # the STEP path, which is also the .ipt path
+npm run test:bridge    # the Inventor loop, against a fake InventorMCP
 npm run test:offline   # proves the --vendor build runs with no network at all
 npm run verify:build   # asserts the committed dfm-tool.html matches src/
 ```
@@ -87,6 +88,19 @@ analytic where the geometry gives one (a 2 mm hollow cylinder measures 2 mm, a
 brute-force implementation in `test/lib/reference.mjs` written from the
 definition rather than from the code under test. It imports the pure modules
 straight into Node, which is what the one-way dependency direction below buys.
+
+`test/bridge.mjs` covers the Inventor loop without an Inventor.
+`test/lib/fake-bridge.mjs` is a real HTTP server on its own origin speaking the
+real protocol, and it genuinely **rebuilds**: a parameter change regenerates the
+STEP from the analytic solid with the new value. So the loop is proved by
+measurement rather than by wiring — drive `wall` to 3 and the tool has to come
+back reading a 3 mm wall. A server returning a canned payload would pass a test
+that proved nothing. The three chip states are covered, so are the ways it goes
+wrong (a modal dialog in Inventor, a rebuild the part refuses, a model whose
+STEP body 404s, a request that never answers, and a rebuild that silently
+returns inches), and so is the route contract — InventorMCP is a separate
+repository on its own release cycle, and nothing else would notice a renamed
+route until a user did.
 
 `test/step.mjs` covers the STEP path, and therefore the `.ipt` path — an
 Inventor part is routed through the same `parseSTEP` a dropped `.step` uses, so
@@ -125,7 +139,9 @@ test/                  fixture generator, unit tests, browser smoke test
   lib/reference.mjs    slow, independent reference implementations
   lib/solids.mjs       the same discipline as shapes.mjs, but as B-rep faces
   lib/step-write.mjs   emits a real AP214 file from one of those solids
+  lib/fake-bridge.mjs  a stand-in InventorMCP that really rebuilds
   step.mjs             the STEP path: face groups, bodies, draft per face
+  bridge.mjs           the Inventor loop, its failure modes, its route contract
   contract.mjs         asserts every id src/app reaches for exists in markup
 .github/workflows/     CI: unit tests, artifact-sync check, browser suite
 legacy/                the original single-file v1, kept for reference
@@ -481,6 +497,14 @@ build.
   the check stays advisory. And on either, a corner modelled with no radius at
   all is invisible — there is nothing to fit — so a clean radius report is
   never a statement that every corner is filleted.
+- **A finding cannot yet name the Inventor feature that caused it.** The
+  **Parameters** panel drives the part and the **History** panel records what
+  changed, but the feature tree is display-only: what the bridge returns is a
+  flat list of feature names, with nothing tying a face to the feature that
+  made it. Now that a finding can name a face, linking that face to a feature
+  and to the parameter behind it is the obvious next step — and it needs
+  InventorMCP to supply the mapping, so it is not work this repository can do
+  on its own.
 - **The bridge trusts its caller.** Its routes are unauthenticated and they open
   uploaded files in a local Inventor session, so the server binds to localhost
   and only accepts requests from `file://` and localhost origins. Do not expose

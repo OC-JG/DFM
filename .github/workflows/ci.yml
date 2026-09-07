@@ -35,6 +35,12 @@ jobs:
       - name: STEP path
         run: npm run test:step
 
+      # The Inventor loop, against a fake InventorMCP on localhost. No
+      # Inventor, no browser — the bridge was the tool's flagship feature and
+      # the only one with no test at all.
+      - name: Inventor bridge
+        run: npm run test:bridge
+
       # dfm-tool.html is the deliverable and is committed to the repository. A
       # source-only commit would otherwise ship a stale one, silently.
       - name: Built artifact matches src/

@@ -87,7 +87,7 @@ in — those ran roughly to estimate, which is the only reason to trust these.
 |---|---|---|---|
 | R2.1 | Trust the STEP path | ~~3–5 d~~ done | Unblocked R2.2, R2.3 |
 | R2.2 | Features, not triangles | ~~1–2 wk~~ done | unblocked nothing further |
-| R2.3 | The Inventor loop under test | 4–6 d | Needs R2.1 |
+| R2.3 | The Inventor loop under test | ~~4–6 d~~ done | one part blocked upstream |
 | R2.4 | Numbers that get quoted | 1 wk + a decision | Needs a moulding engineer |
 | R2.5 | Two-shot and FPC earn their weights | 1–2 wk | Needs R2.2 for the FPC region |
 | R2.6 | Findings that survive leaving the tool | 4–6 d | Independent |
@@ -229,41 +229,60 @@ and the first shipped on its own. Taking them in that order is also what
 surfaced the radius problem early, while it was still a re-plan rather than a
 half-built feature.
 
-### R2.3 — The Inventor loop under test
+### R2.3 — The Inventor loop under test *(done)*
 
 **Why now.** It is the differentiator (gap 3), it is unverified, and it has an
 external dependency that will change underneath it.
 
 **What ships.**
 
-- A fake InventorMCP server in `test/`: a small Node HTTP server speaking the
-  same routes `src/app/bridge.js` calls, returning a recorded STEP payload and a
-  parameter table. This is a fixture, not a mock of the network layer — it lets
-  the smoke test drive connect, export, parameter edit, rebuild and the History
-  entry as one flow.
-- Coverage of the three chip states the README promises — connected to Inventor,
-  connected to the simulator, nothing listening — plus the failure modes that
-  are not currently handled anywhere visible: a request that never returns, an
-  Inventor sitting on a modal dialog, a parameter edit rejected by the rebuild,
-  and a rebuild that succeeds but returns geometry at a different scale.
-- A recorded contract for the bridge protocol, so an InventorMCP release that
-  renames a route fails a test here rather than in front of a user. The bridge
-  talks to a separate repository on a separate release cycle; nothing currently
-  detects a drift between them.
-- Findings linked back to the feature that caused them. The feature tree already
-  arrives and is rendered (`src/app/panels-input.js:501-509`) but is
-  display-only. Once R2.2 gives findings a face, and the bridge gives faces a
-  feature, a finding can name the Inventor feature and the driving parameter
-  responsible — which is the difference between "fix this dimension" and "here
-  is a heatmap".
+- **A fake InventorMCP server.** *(done)* `test/lib/fake-bridge.mjs` — a real
+  HTTP server on its own origin speaking the real protocol, so `bridge.js` runs
+  its actual fetch calls against it. The part that matters is that it
+  **rebuilds**: a parameter change regenerates the STEP from the analytic solid
+  with the new value, so the loop is proved by measurement rather than by
+  wiring. Drive `wall` to 3 and the tool has to come back reading a 3 mm wall.
+  A server returning a canned payload would pass a test that proved nothing.
+- **The three chip states, and the failure modes.** *(done)* Connected to
+  Inventor, connected to the simulator, nothing listening — and then the ones
+  that were handled nowhere visible: a modal dialog in Inventor, a rebuild the
+  part refuses, a value Inventor cannot evaluate, a model whose STEP body 404s,
+  a request that never answers, and the quiet one — a rebuild that comes back
+  in inches, which errors nowhere and is caught by the unit check instead.
+- **A recorded contract for the protocol.** *(done)* The routes, methods and
+  headers the bridge actually calls, asserted as a sequence. InventorMCP is a
+  separate repository on its own release cycle and nothing would have noticed a
+  renamed route until a user did; renaming one now fails three assertions here.
+- **The loop in a browser too.** *(done)* The smoke suite drives it the way a
+  user does: the chip goes live, an `.ipt` opens through the bridge, the
+  driving parameters are listed, the analysis reads 2 mm, the parameter is
+  typed and committed with Enter, Inventor rebuilds, History records the
+  change, and the re-run reads 3 mm.
+- **Findings linked back to the feature that caused them.** *Still open, and
+  not this repository's to close.* This assumed the bridge "gives faces a
+  feature". It does not: what arrives is a flat list of `{kind, name,
+  suppressed}` with nothing tying a face to the feature that made it. R2.2 gave
+  findings a face, so the remaining half is a mapping only InventorMCP can
+  supply — a protocol change there, not work here. Worth asking for: with it, a
+  finding could name the feature and the driving parameter responsible, which
+  is the difference between "fix this dimension" and "here is a heatmap".
 
-**Exit criteria.** `npm test` covers the bridge with no Inventor installed. Each
-failure mode above produces a specific message rather than a generic one. The
-protocol contract fails on a renamed route.
+**Exit criteria, met.** `npm test` covers the bridge with no Inventor installed
+and no browser — 17 assertions in Node, 7 more in the browser suite. Each
+failure mode produces a specific message carrying its own fix rather than a
+status code, asserted on the text. The protocol contract fails on a renamed
+route: four mutations were checked, and renaming `/bridge/health` fails three
+assertions, dropping the `x-filename` header fails one, ignoring the server's
+`ok: false` convention fails three, and returning stale geometry from a rebuild
+fails one.
 
-**Risk.** A fixture server can drift from the real InventorMCP and give false
-confidence. Mitigate by recording the fixture payloads from a real session and
-dating them in the file.
+**Risk, and it is real.** A fixture server can drift from the real InventorMCP
+and give false confidence. The payloads are dated in the file against the routes
+`bridge.js` called on 2026-09-07, and the contract test is what should fail
+first if either side moves — but nothing here can detect the real server
+changing shape while the fake one stays still. Recording the fixture payloads
+from a live session, rather than shaping them from the client code as these
+were, would close that gap.
 
 ### R2.4 — Numbers that get quoted
 
@@ -488,9 +507,9 @@ for, and it has no automated coverage today.
 Release discipline first, because it is cheap and because a tagged build is what
 makes every later change traceable.
 
-R2.1 and R2.2 are done. R2.3 is the last of the three that R2.1 unblocked, and
-nothing now blocks anything: R2.3, R2.4 (behind its one question), R2.5, R2.6
-and R2.7 are independent of each other and can be taken in any order.
+R2.1, R2.2 and R2.3 are done — the three that R2.1's fixture unblocked. What
+remains is independent of everything: R2.4 (behind its one question), R2.5, R2.6
+and R2.7 can be taken in any order.
 
 R2.7 depends on nothing and competes with nothing — it is viewer code, and the
 only file it shares with any other milestone is `src/app/camera.js`, which none

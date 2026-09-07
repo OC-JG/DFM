@@ -16,7 +16,8 @@
  * different build number than the installed Playwright expects.
  */
 import { createServer } from 'node:http';
-import { readFileSync, existsSync } from 'node:fs';
+import { startFakeBridge } from './lib/fake-bridge.mjs';
+import { writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
@@ -357,6 +358,78 @@ async function main() {
     const fallbackScore = Number(await fallbackPage.textContent('#scoreValue'));
     check('fallback produces the same score', fallbackScore === score, `worker=${score} inline=${fallbackScore}`);
     await fallbackPage.close();
+
+    // ── the Inventor loop, in a real browser ──────────────────────────────
+    // The feature the tool exists for, driven the way a user drives it: open
+    // an .ipt, change the dimension that caused a finding, measure again. The
+    // bridge here is test/lib/fake-bridge.mjs — a real server on its own
+    // origin, speaking the real protocol and genuinely rebuilding, so the
+    // wall the page reports afterwards is the wall that was asked for.
+    const bridge = await startFakeBridge({});
+    const iptPath = join(FIXTURES, 'BridgePart.ipt');
+    writeFileSync(iptPath, Buffer.from([0xd0, 0xcf, 0x11, 0xe0]));   // an OLE header, as an .ipt has
+
+    const bridgePage = await browser.newPage({ viewport: { width: 1600, height: 1000 } });
+    await bridgePage.route(/^https:\/\/(cdnjs\.cloudflare\.com|cdn\.jsdelivr\.net)\//, serveVendored);
+    await bridgePage.route(/^https:\/\/fonts\./, (route) => route.fulfill({ status: 200, contentType: 'text/css', body: '' }));
+    /* Point the page at this server before any of its scripts run — the same
+       setting a user would type under the drop zone. */
+    await bridgePage.addInitScript((url) => {
+      try { localStorage.setItem('dfm.bridgeUrl', url); } catch { /* ignore */ }
+    }, bridge.url);
+    await bridgePage.goto(url, { waitUntil: 'networkidle' });
+
+    await bridgePage.waitForFunction(
+      () => document.getElementById('bridgeStatus').dataset.state === 'live', null, { timeout: 30000 });
+    check('bridge chip reports a live Inventor',
+      /Inventor/.test(await bridgePage.textContent('#bridgeStatus')),
+      await bridgePage.textContent('#bridgeStatus'));
+
+    await bridgePage.setInputFiles('#fileInput', iptPath);
+    await bridgePage.waitForFunction(
+      () => document.getElementById('statusPill').textContent.includes('LOADED'), null, { timeout: 90000 });
+    check('an .ipt opens through the bridge',
+      (await bridgePage.textContent('#fileInfo')).includes('BridgePart'),
+      (await bridgePage.textContent('#fileInfo')).slice(0, 100));
+
+    const paramCount = await bridgePage.locator('#paramsList .param-expr').count();
+    check('the driving parameters are listed', paramCount === 2, `rows=${paramCount}`);
+
+    await bridgePage.click('#runBtn');
+    await bridgePage.waitForFunction(
+      () => document.getElementById('resultStatus').textContent === 'complete', null, { timeout: 90000 });
+    const wallBefore = await bridgePage.locator('#checksList .check', { hasText: 'Wall thickness' }).first().textContent();
+    check('the part as opened measures its 2 mm wall',
+      /Nominal \(median\)2\.0\d mm/.test(wallBefore), wallBefore.slice(0, 110));
+
+    /* Drive the dimension that caused the finding, exactly as a user would:
+       type into the parameter and press Enter. */
+    const wallInput = bridgePage.locator('#paramsList .param-expr').first();
+    await wallInput.fill('3');
+    await wallInput.press('Enter');
+    await bridgePage.waitForFunction(
+      () => document.getElementById('statusPill').textContent.includes('REBUILT'), null, { timeout: 90000 });
+    check('Inventor rebuilds on a parameter change', true,
+      await bridgePage.textContent('#statusPill'));
+
+    /* The edit log: one entry, naming the parameter and carrying the score it
+       replaced, and the section actually on screen rather than merely present
+       in the markup. */
+    check('the change is recorded under History',
+      (await bridgePage.locator('#revisionsSection').getAttribute('hidden')) === null
+      && /1 change\b/.test(await bridgePage.textContent('#revisionCount'))
+      && /wall/.test(await bridgePage.textContent('#revisionsSection')),
+      `${await bridgePage.textContent('#revisionCount')} — ${(await bridgePage.textContent('#revisionsSection')).slice(0, 90)}`);
+
+    await bridgePage.click('#runBtn');
+    await bridgePage.waitForFunction(
+      () => document.getElementById('resultStatus').textContent === 'complete', null, { timeout: 90000 });
+    const wallAfter = await bridgePage.locator('#checksList .check', { hasText: 'Wall thickness' }).first().textContent();
+    check('the rebuilt part measures the wall that was asked for',
+      /Nominal \(median\)3\.0\d mm/.test(wallAfter), wallAfter.slice(0, 110));
+
+    await bridgePage.close();
+    await bridge.close();
 
     // ── the STEP path, in a real browser ──────────────────────────────────
     // An .ipt reaches parseSTEP by the same road a dropped .step does, so
