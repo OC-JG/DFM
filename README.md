@@ -71,6 +71,7 @@ npm run browser        # once: fetches the Chromium the smoke test drives
 npm test               # build + unit tests + fixtures + browser smoke test
 
 npm run test:unit      # just the unit tests: no browser, no network, sub-second
+npm run test:step      # the STEP path, which is also the .ipt path
 npm run test:offline   # proves the --vendor build runs with no network at all
 npm run verify:build   # asserts the committed dfm-tool.html matches src/
 ```
@@ -86,6 +87,17 @@ analytic where the geometry gives one (a 2 mm hollow cylinder measures 2 mm, a
 brute-force implementation in `test/lib/reference.mjs` written from the
 definition rather than from the code under test. It imports the pure modules
 straight into Node, which is what the one-way dependency direction below buys.
+
+`test/step.mjs` covers the STEP path, and therefore the `.ipt` path — an
+Inventor part is routed through the same `parseSTEP` a dropped `.step` uses, so
+this is the input most users take. Its fixtures are **authored rather than
+exported**: `test/lib/solids.mjs` defines a solid analytically and
+`test/lib/step-write.mjs` emits a real AP214 file from it, which is why a 3°
+taper reads 3.000° per face by construction. A file exported by OpenCascade and
+then read back by OpenCascade could agree with itself and still be wrong. It
+needs the same OpenCascade reader the tool fetches at runtime, pinned to the
+same version, which is why it is a separate target from `test:unit` — that one
+stays runnable with nothing installed.
 
 The smoke test drives a real Chromium through the whole pipeline — load,
 analyse, heatmaps, gate picking, two-shot, both exports, persistence, reset,
@@ -111,6 +123,9 @@ src/
 test/                  fixture generator, unit tests, browser smoke test
   lib/shapes.mjs       analytic fixtures with known answers
   lib/reference.mjs    slow, independent reference implementations
+  lib/solids.mjs       the same discipline as shapes.mjs, but as B-rep faces
+  lib/step-write.mjs   emits a real AP214 file from one of those solids
+  step.mjs             the STEP path: face groups, bodies, draft per face
   contract.mjs         asserts every id src/app reaches for exists in markup
 .github/workflows/     CI: unit tests, artifact-sync check, browser suite
 legacy/                the original single-file v1, kept for reference
@@ -403,9 +418,11 @@ build.
 - **Corner radii cannot be detected**, only advised on. That needs B-rep face
   topology; STL does not carry it, and the STEP path does not yet plumb
   through the face groups the parser already extracts. Those groups are
-  preserved in the geometry format, so this is the natural next step — and now
-  that `.ipt` arrives as STEP rather than as a mesh, it is the natural next step
-  for the Inventor path too.
+  preserved in the geometry format and now have a fixture proving they survive
+  the merge intact — `test/step.mjs` asserts that every triangle in a face group
+  is coplanar with its face, and that a 3° taper reads exactly 3° per face — so
+  what remains is a consumer for them in the analysis. See `docs/ROADMAP.md`
+  R2.2.
 - **The bridge trusts its caller.** Its routes are unauthenticated and they open
   uploaded files in a local Inventor session, so the server binds to localhost
   and only accepts requests from `file://` and localhost origins. Do not expose

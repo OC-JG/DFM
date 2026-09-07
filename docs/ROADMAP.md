@@ -85,7 +85,7 @@ in — those ran roughly to estimate, which is the only reason to trust these.
 
 | | Milestone | Effort | Blocks / blocked by |
 |---|---|---|---|
-| R2.1 | Trust the STEP path | 3–5 d | Blocks R2.2, R2.3 |
+| R2.1 | Trust the STEP path | ~~3–5 d~~ done | Unblocked R2.2, R2.3 |
 | R2.2 | Features, not triangles | 1–2 wk | Needs R2.1 |
 | R2.3 | The Inventor loop under test | 4–6 d | Needs R2.1 |
 | R2.4 | Numbers that get quoted | 1 wk + a decision | Needs a moulding engineer |
@@ -94,47 +94,66 @@ in — those ran roughly to estimate, which is the only reason to trust these.
 | R2.7 | Navigation for people who navigate for a living | 1–2 wk | Independent |
 | — | Release discipline | 2–3 d | Independent, do first |
 
-### R2.1 — Trust the STEP path
+### R2.1 — Trust the STEP path *(done)*
 
-**Why now.** It is the primary input path and it is untested (gap 1), and it is
-the prerequisite for both of the next two milestones: per-face measurement needs
-a STEP fixture to assert against, and the bridge test needs a STEP payload to
-return.
+**What shipped.** `test/step.mjs` — 23 assertions over the path an `.ipt`
+actually takes — plus the two pieces that make it possible and four checks in
+the browser suite. `npm run test:step`, and CI runs it after the unit tests and
+before the Chromium download.
 
-**What ships.**
+- **The reader is a pinned devDependency, not a vendored blob.** The plan here
+  said to copy the ~6 MB OpenCascade module into `test/vendor/`. It did not need
+  copying: the module the tool fetches from a CDN *is* an npm package, so
+  `occt-import-js` is pinned at `0.0.23` — the same version the artifact
+  requests — and the existing `npm ci` covers it. Nothing was added to git, and
+  the shipped artifact's lazy CDN load is untouched.
+- **The fixtures are authored, not exported**, and this turned out to be the
+  interesting part. `occt-import-js` is a reader: it cannot write STEP, so a
+  fixture could not simply be exported from the kernel under test. So
+  `test/lib/step-write.mjs` emits a real AP214 file — proper shared topology,
+  every edge one `EDGE_CURVE` used `.T.` in one face and `.F.` in the other,
+  because OpenCascade will read a sloppier file and quietly hand back a shell
+  with cracks in it. `test/lib/solids.mjs` defines the solids analytically, the
+  way `shapes.mjs` does for meshes. A 3° taper is 3° because it was written as
+  `tan(3°)`, not because a kernel wrote it out and read it back and agreed with
+  itself.
+- **A test seam in `parseSTEP`.** `loadOcct` needs a DOM to inject its script
+  tag, so the function takes an optional module argument that nothing in the app
+  supplies. Eleven lines, and the reason it exists is written above it.
+- **Four fixtures**: a box (six faces, 0° draft — the part the draft check must
+  fail), a tapered box (four sides at exactly 3°), a shelled box with a 2 mm
+  wall, and two solids in one file.
+- **In the browser too.** The smoke suite now serves the OpenCascade reader and
+  its wasm from `node_modules` and drives `part.step` through load, analysis and
+  the wall reading, then a two-solid file through the body selector. Node proves
+  the parsing; only a browser shows the reader loading lazily over the wire and
+  landing in the viewer.
 
-- A decision on the OpenCascade WASM module, which is what has blocked this
-  since Phase 3. It is ~6 MB, loaded lazily from a CDN, and is not in
-  `devDependencies`. The choice is to vendor it into `test/vendor/` for the test
-  run only — leaving the shipped artifact's lazy CDN load exactly as it is — or
-  to write a small STEP reader for the test harness alone. Vendoring for tests
-  is the recommendation: the alternative is a second implementation of the thing
-  under test, which is the mistake `test/lib/reference.mjs` avoids by being
-  written from the *definition*, not from a parser.
-- Analytic STEP fixtures alongside the STL ones in `test/lib/shapes.mjs`: a
-  drafted frustum whose per-face draft is known exactly, a hollow cylinder of
-  known wall, a two-body assembly, and a part with a known fillet radius. Same
-  discipline as the STL fixtures — each with an answer derived from the geometry
-  rather than from a previous run.
-- Unit coverage of `src/geometry/step.js` proper: index remapping across merged
-  bodies, `faceGroups` triangle ranges landing on the right triangles, the
-  `bodies` array only appearing for multi-body files (`step.js:120`), and the
-  `hasOcctNormals` fallback path.
-- The smoke test drives a STEP file end to end, not just an STL.
+**Exit criteria, met.** The face ranges partition every triangle exactly once;
+every triangle in a face group is coplanar with its face to 1e-6 — the property
+R2.2 rests on, and the difference between a label and a real mapping; a 3° taper
+reads 3.000° per face; the same solid measured as a B-rep and as triangulated
+soup agrees on volume, surface area and wall to 0.1%.
 
-**Exit criteria.** A deliberate off-by-one in `step.js`'s index remapping fails
-the unit suite. STEP and STL of the same nominal part agree on wall thickness
-and mass to within tessellation tolerance, and that agreement is asserted.
+And the criterion that mattered most — that a deliberate off-by-one fails —
+was checked by making three of them rather than by assuming. A wrong vertex
+offset in the merge fails six assertions, a face-group range off by one fails
+three, and a body range off by one fails one. The body fixture puts its two
+boxes 20 mm apart along x specifically so a wrong offset lands a triangle in
+the neighbouring solid and cannot be mistaken for rounding.
 
-**Risk.** The OpenCascade build is the one dependency in the tree nobody has
-pinned or vendored, and its API is not stable across versions. Pin an exact
-build in the same breath as vendoring it.
+**Still open from this milestone.** Nothing blocking, but two things were
+deliberately not done: curved surfaces (a cylindrical face needs a seam and a
+`CYLINDRICAL_SURFACE`, and no test wants one until R2.2 measures radii), and
+`BREP_WITH_VOIDS` (the shelled fixture is an open-topped cup, one closed shell,
+which is what a moulded part looks like anyway).
 
 ### R2.2 — Features, not triangles
 
 **Why now.** This is the largest single capability unlock in the repo, the data
-is already being computed and discarded (gap 2), and the documentation already
-claims part of it.
+is already being computed and discarded (gap 2), the documentation already
+claims part of it — and R2.1 has now put a fixture under it, so there is
+something trustworthy to assert a per-face measurement against.
 
 **What ships.**
 
@@ -430,10 +449,10 @@ for, and it has no automated coverage today.
 Release discipline first, because it is cheap and because a tagged build is what
 makes every later change traceable.
 
-Then R2.1, because it unblocks the two milestones after it and because the
-largest untested surface in the repo is also the most-used one. R2.2 and R2.3 can
-then run in parallel — they touch different directories and share only the STEP
-fixture — with R2.6 as filler for either, since it depends on nothing.
+R2.1 is done, which unblocks the two milestones after it. R2.2 and R2.3 can now
+run in parallel — they touch different directories and share only the STEP
+fixture, which exists — with R2.6 as filler for either, since it depends on
+nothing.
 
 R2.7 depends on nothing and competes with nothing — it is viewer code, and the
 only file it shares with any other milestone is `src/app/camera.js`, which none
@@ -448,8 +467,9 @@ is much cheaper once R2.2 has made faces and bodies first-class.
 
 1. **`coolK`: half-wall or full wall?** Factor-of-four consequence. Gates cycle
    time and everything costed from it.
-2. **The OpenCascade module: vendor it for tests, or not?** Gates the STEP
-   fixture, and through it most of R2.1 and R2.2.
+2. ~~**The OpenCascade module: vendor it for tests, or not?**~~ *Settled in
+   R2.1: neither. It is an npm package, so it is a pinned devDependency and
+   nothing was committed to git.*
 3. **`--vendor` as the committed default?** Trades 900 kB of file size for two
    fewer third-party runtime loads and the SRI question.
 4. **Does `corners`, once measurable, take weight from the other checks or widen
