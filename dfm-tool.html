@@ -1501,6 +1501,50 @@ footer {
 .cmp-row-change { opacity: 0.8; white-space: nowrap; }
 .cmp-row-detail { font-family: var(--mono); opacity: 0.6; white-space: nowrap; }
 
+
+/* ── cost inputs and tooling drivers ─────────────────────────────────────
+   The rates sit with the numbers they produce rather than up in the input
+   panel: someone trying a different resin price is reading the answer at the
+   same moment, and a round trip to another panel is what stops them trying a
+   second one. */
+.cost-inputs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  margin: 10px 0 14px;
+}
+.cost-inputs label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.cost-inputs input {
+  width: 92px;
+  padding: 5px 7px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--fg);
+  background: var(--input-bg, var(--panel));
+  border: 1px solid var(--line);
+  border-radius: 3px;
+}
+.cost-inputs input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+/* A driver's consequence is a sentence, not a figure, so it wraps and sits
+   left-aligned rather than being pushed to the right like a value. */
+.shot-value.shot-driver {
+  text-align: left;
+  font-variant-numeric: normal;
+  color: var(--muted);
+  max-width: 62%;
+}
+
 </style>
 </head>
 <body>
@@ -1906,6 +1950,16 @@ footer {
         <div id="shotSection" style="display:none;">
           <div class="section-subhead">Moulding estimates</div>
           <div id="shotBody"></div>
+        </div>
+        <div id="costSection" style="display:none;">
+          <div class="section-subhead">Cycle time and cost</div>
+          <div class="cost-inputs">
+            <label>Cavities<input type="number" id="cavities" min="1" max="128" step="1" value="1"></label>
+            <label>Resin / kg<input type="number" id="resinPerKg" min="0" step="0.01" placeholder="—"></label>
+            <label>Machine / hour<input type="number" id="machinePerHour" min="0" step="0.01" placeholder="—"></label>
+            <label>Scrap %<input type="number" id="scrapPct" min="0" max="50" step="0.5" value="0"></label>
+          </div>
+          <div id="costBody"></div>
         </div>
         <div id="compareSection" style="display:none;">
           <div class="section-subhead">Compared with a previous run</div>
@@ -5464,25 +5518,28 @@ function suggestPullDirection(geom, opts = {}) {
  */
 
 /*
- * Not here: cooling time, and therefore cycle time.
+ * Cycle time and cost live in cost.js, not here.
  *
- * The material table carries a `coolK` per grade, documented as the coefficient
- * in tc = k · s² with s the half-wall. Under that convention a 2 mm ABS wall
- * cools in 1.7 s, which is the theoretical floor — it is roughly what the
- * one-dimensional conduction solution gives for the centreline reaching
- * ejection temperature, and it is not a number any moulder would quote.
+ * They used to live nowhere at all. The material table carries a `coolK` per
+ * grade whose comment said it was the coefficient in tc = k·s² with s the
+ * *half*-wall — and under that reading a 2 mm ABS wall cools in 1.7 s, which
+ * is not a number any moulder would recognise. Read as a full-wall coefficient
+ * the same table gives 6.8 s, which is a credible theoretical floor. The two
+ * readings differ by four, someone would quote from whichever appeared, so
+ * nothing appeared.
  *
- * Read as a full-wall coefficient the same table gives 6.8 s for ABS, 4.0 s for
- * PP and 8.8 s for PC, which sit inside the practical bands and — more telling
- * — reproduce the right ordering. The analytical reading does not: run through
- * the conduction solution with real diffusivities, PC comes out cooling *faster*
- * than ABS, where the table has it 30% slower. So the coefficients look
- * empirical and full-wall, and the comment describing them looks wrong.
+ * That is settled: it is the full wall, established by re-deriving the
+ * coefficient rather than by asking. Rearranged, each value implies a thermal
+ * diffusivity, and the full-wall reading puts all sixteen materials inside the
+ * measured range for a thermoplastic while the half-wall reading puts every one
+ * of them three to seven times below any polymer that exists. Working in
+ * docs/coolk.md, asserted in test/unit.mjs.
  *
- * "Looks wrong" is not enough to ship a cycle time on. The two readings differ
- * by 4×, someone will quote from whichever appears, and the person who curated
- * those coefficients can settle it in one sentence. Until then the field stays
- * unused and this module reports only what it can stand behind.
+ * So cycle time exists now, in analysis/cost.js, along with the piece-part cost
+ * that sits on top of it. What stays out of *this* file is the reason it was
+ * split: everything here is arithmetic on measured geometry and tabulated data,
+ * and everything there rests on assumptions or on rates the user supplied. They
+ * are different kinds of claim and the split keeps them from being read as one.
  */
 
 /*
@@ -5569,6 +5626,244 @@ function estimateShot({ material, volume, projectedArea, runnerPct = 0 }) {
 function nextMachineSize(tonnes) {
   for (const t of MACHINE_TONNAGES) if (t >= tonnes) return t;
   return null;
+}
+
+/* ==== analysis/cost.js ============================================== */
+/*
+ * Cycle time, piece-part cost and what drives the tool.
+ *
+ * These are the numbers someone actually wants in front of a quotation, and
+ * they are also the numbers most likely to be quoted *from* — which is why
+ * cycle time stayed out of this tool until the coefficient behind it was
+ * settled (docs/coolk.md) and why nothing here produces a currency figure out
+ * of thin air.
+ *
+ * The rule this module follows: **arithmetic on measured geometry and stated
+ * inputs, never on invented data.** Resin price and machine rate are the user's
+ * to supply, because a plausible-looking default would be indistinguishable
+ * on screen from a real quotation and would travel further than it should. If
+ * a rate is missing the cost is null and the reason says which rate is missing.
+ */
+
+/*
+ * ── Cycle time ────────────────────────────────────────────────────────────
+ *
+ * Three steps, each a named assumption rather than one opaque multiplier, so a
+ * reader can disagree with the step rather than with the answer.
+ *
+ * 1. The **cooling floor**, from the plate-cooling solution the material
+ *    table's coolK encodes: tc = k · s², s the full wall in mm. This is the
+ *    moment the centre plane first reaches ejection temperature with the mould
+ *    wall held fixed and heat leaving in one dimension. It is a lower bound and
+ *    is labelled as one.
+ *
+ * 2. **Practical cooling** runs above that floor: the mould wall is not held
+ *    at a constant temperature, the wall is not uniform, and a moulder leaves
+ *    margin so the part does not distort on the pins.
+ *
+ * 3. **The cycle** is longer again, because cooling is only part of it —
+ *    conventionally 50–80% for a thermoplastic part, the rest being fill,
+ *    pack, mould motion and ejection. A band, because that share genuinely
+ *    varies with the part and the machine.
+ *
+ * Both factors are exported so a caller can print them next to the result, and
+ * so a reader can see the estimate is two multiplications on a derived floor
+ * rather than a simulation.
+ */
+
+/* Practical cooling against the theoretical floor. */
+const PRACTICAL_COOLING_FACTOR = 1.3;
+
+/* Cooling's share of a whole cycle: the conventional band. */
+const COOLING_SHARE = { lo: 0.5, hi: 0.8 };
+
+function estimateCycle({ material, wallMm, cavities = 1 }) {
+  const out = {
+    wallMm: wallMm != null && wallMm > 0 ? wallMm : null,
+    coolingFloorS: null,
+    practicalCoolingS: null,
+    cycleS: null,
+    cavities,
+    partsPerHour: null,
+    assumptions: [],
+    notes: [],
+  };
+
+  if (!out.wallMm) {
+    out.notes.push('Cycle time needs a wall thickness, which needs a measured part.');
+    return out;
+  }
+  if (!(material.coolK > 0)) {
+    out.notes.push(`No cooling coefficient for ${material.name}, so no cycle time.`);
+    return out;
+  }
+
+  out.coolingFloorS = material.coolK * out.wallMm * out.wallMm;
+  out.practicalCoolingS = out.coolingFloorS * PRACTICAL_COOLING_FACTOR;
+  out.cycleS = {
+    lo: out.practicalCoolingS / COOLING_SHARE.hi,
+    hi: out.practicalCoolingS / COOLING_SHARE.lo,
+  };
+  out.partsPerHour = {
+    lo: (3600 / out.cycleS.hi) * cavities,
+    hi: (3600 / out.cycleS.lo) * cavities,
+  };
+
+  out.assumptions.push(
+    `Cooling floor is k·s² with k = ${material.coolK} for ${material.name} and s = ${out.wallMm.toFixed(2)} mm, the measured nominal wall. k is the full-wall coefficient — see docs/coolk.md.`,
+    `Practical cooling is taken as ${PRACTICAL_COOLING_FACTOR}× that floor: the floor assumes a mould wall held at a fixed temperature and heat leaving in one dimension, and neither is true of a tool.`,
+    `The cycle is practical cooling divided by cooling's share of it, taken as ${COOLING_SHARE.lo * 100}–${COOLING_SHARE.hi * 100}% — the rest is fill, pack, mould motion and ejection.`,
+  );
+  out.notes.push('A planning estimate, not a quotation. The floor is the only figure here that is derived rather than assumed, and it is a lower bound no tool will beat.');
+
+  return out;
+}
+
+/*
+ * ── Piece-part cost ───────────────────────────────────────────────────────
+ *
+ * Material plus machine time, which is the part of a piece price this tool can
+ * compute from what it has measured. It is deliberately *not* a price: no
+ * labour, no packaging, no overhead recovery, no margin, no secondary
+ * operations. Those are the moulder's, and a figure that quietly implied
+ * otherwise would be worse than no figure.
+ *
+ *   shotMassG    part plus its share of the runner, from estimateShot
+ *   resinPerKg   the user's number. No default: an invented resin price is
+ *                indistinguishable on screen from a real one.
+ *   machinePerHour  likewise, for the machine estimateShot sized
+ *   cavities     how many of this part per shot
+ *   scrapPct     start-up and reject allowance on material
+ */
+function estimatePartCost({
+  shotMassG, cycleS, cavities = 1, resinPerKg = null, machinePerHour = null, scrapPct = 0,
+}) {
+  const out = {
+    materialCost: null,
+    machineCost: null,
+    totalCost: null,
+    cavities,
+    scrapPct,
+    missing: [],
+    assumptions: [],
+    notes: [],
+  };
+
+  if (!(shotMassG > 0)) out.missing.push('a shot weight (needs a closed mesh)');
+  if (!(resinPerKg > 0)) out.missing.push('a resin price per kg');
+  if (!cycleS) out.missing.push('a cycle time');
+  if (!(machinePerHour > 0)) out.missing.push('a machine rate per hour');
+
+  if (shotMassG > 0 && resinPerKg > 0) {
+    out.materialCost = (shotMassG / 1000) * resinPerKg * (1 + scrapPct / 100);
+    out.assumptions.push(
+      `Material is ${shotMassG.toFixed(1)} g — the part plus its share of the runner — at ${resinPerKg}/kg`
+      + (scrapPct ? `, plus ${scrapPct}% for scrap and start-up.` : '.'));
+  }
+
+  if (cycleS && machinePerHour > 0) {
+    /* The machine is paid for by the hour and produces `cavities` parts per
+       cycle, so the cost of a part is its share of the shot. */
+    out.machineCost = {
+      lo: (cycleS.lo / 3600) * machinePerHour / cavities,
+      hi: (cycleS.hi / 3600) * machinePerHour / cavities,
+    };
+    out.assumptions.push(
+      `Machine time is ${cycleS.lo.toFixed(1)}–${cycleS.hi.toFixed(1)} s at ${machinePerHour}/hour, shared across ${cavities} cavit${cavities === 1 ? 'y' : 'ies'}.`);
+  }
+
+  if (out.materialCost != null && out.machineCost) {
+    out.totalCost = {
+      lo: out.materialCost + out.machineCost.lo,
+      hi: out.materialCost + out.machineCost.hi,
+    };
+    out.notes.push('Material and machine time only. No labour, packaging, overhead, secondary operations or margin — a moulder’s price includes all of those and will be higher.');
+  } else if (out.missing.length) {
+    out.notes.push(`No cost until there is ${out.missing.join(', and ')}.`);
+  }
+
+  return out;
+}
+
+/*
+ * ── What drives the tool ──────────────────────────────────────────────────
+ *
+ * Deliberately not a currency figure. Tooling price depends on the toolmaker,
+ * the steel, the country and the lead time, none of which this tool knows —
+ * and a number carrying that much unknown would be quoted from anyway.
+ *
+ * What *is* knowable from the geometry is what makes the tool expensive, and
+ * that is worth saying plainly: every slide is a moving assembly, every cavity
+ * is another set of everything, a glass-filled material means hardened steel,
+ * and a mirror finish is polishing hours. A list of drivers lets a moulder's
+ * quotation be read against the part rather than accepted whole.
+ */
+function toolingDrivers({ analysis, material, finishName, cavities = 1, bboxMm = null }) {
+  const drivers = [];
+
+  /* type 1 is a slide, type 2 a lifter, and regions under 1 mm² are
+     tessellation noise rather than features — the same fields and the same
+     threshold the undercut check uses, so the two counts cannot disagree with
+     each other on the same part. */
+  const regions = (analysis && analysis.undercutRegions) || [];
+  const significant = regions.filter((r) => r.area > 1);
+  const slides = significant.filter((r) => r.type === 1).length;
+  const lifters = significant.filter((r) => r.type === 2).length;
+
+  if (slides) {
+    drivers.push({
+      driver: `${slides} side action${slides === 1 ? '' : 's'}`,
+      effect: 'Each is a moving assembly in the tool — cam or hydraulic, with its own wear surfaces and its own way of going wrong. The most expensive thing on this list, and the one most often removed by a geometry change.',
+    });
+  }
+  if (lifters) {
+    drivers.push({
+      driver: `${lifters} lifter${lifters === 1 ? '' : 's'}`,
+      effect: 'Cheaper than a slide and mechanically simpler, but still a moving core that has to clear on ejection.',
+    });
+  }
+  if (!slides && !lifters) {
+    drivers.push({
+      driver: 'No moving tooling needed',
+      effect: 'Everything releases on the main pull, which is the cheapest tool this part can have.',
+    });
+  }
+
+  drivers.push({
+    driver: `${cavities} cavit${cavities === 1 ? 'y' : 'ies'}`,
+    effect: cavities === 1
+      ? 'A single cavity is the cheapest tool and the slowest output. The trade against piece price is the main tooling decision on this part.'
+      : `Every cavity repeats the cavity, core, cooling and ejection, so tool cost climbs with cavitation while piece price falls. ${cavities} cavities also need a balanced runner, or they will not fill alike.`,
+  });
+
+  if (/GF|glass/i.test(material.name)) {
+    drivers.push({
+      driver: `${material.name} is abrasive`,
+      effect: 'Glass fibre wears tool steel. Expect hardened cavity and core, and treat gate inserts as consumable — this is a tool-life question, not just a tool-price one.',
+    });
+  }
+  if (finishName && /A[123]|mirror|polish/i.test(finishName)) {
+    drivers.push({
+      driver: `${finishName} finish`,
+      effect: 'Polishing is hours of skilled hand work, and it has to be redone after any weld repair to the cavity.',
+    });
+  }
+  if (bboxMm) {
+    const longest = Math.max(...bboxMm);
+    drivers.push({
+      driver: `${bboxMm.map((v) => v.toFixed(0)).join(' × ')} mm envelope`,
+      effect: `The tool has to be bigger than the part in every direction; a ${longest.toFixed(0)} mm part sets the bolster size, and bolster size sets the steel bill before anything is cut.`,
+    });
+  }
+
+  return {
+    drivers,
+    slides,
+    lifters,
+    cavities,
+    note: 'Drivers, not a price. What a tool costs depends on the toolmaker, the steel, the country and the lead time — none of which is in this file. Read a quotation against this list rather than instead of it.',
+    partingCaveat: 'The moving-tooling counts come from the undercut check and inherit its assumption of a flat parting line at the pull minimum. A stepped or contoured split may release some of these with no moving tooling at all, so they are features needing a decision rather than a confirmed slide count.',
+  };
 }
 
 /* ==== rules/scoring.js ============================================== */
@@ -7148,7 +7443,7 @@ function describeRun(run) {
  * Includes the two-shot block, which the original omitted: running an
  * overmould analysis and then exporting produced a file with no trace of it.
  */
-function buildExportJSON({ sessionId, dfm, analysis, twoShot, interface: iface, validation, shot, settings }) {
+function buildExportJSON({ sessionId, dfm, analysis, twoShot, interface: iface, validation, shot, cycle, cost, tooling, settings }) {
   const out = {
     tool: 'OnlyCat DFM',
     session: sessionId,
@@ -7195,6 +7490,45 @@ function buildExportJSON({ sessionId, dfm, analysis, twoShot, interface: iface, 
       clamp_force_tonnes: shot.clampTonnes,
       machine_clamp_tonnes: shot.machineTonnes,
       assumptions: shot.notes,
+    } : null,
+
+    /* Cycle time and cost travel with every assumption behind them, because
+       these are the figures most likely to be lifted out of a record and put
+       into a quotation. A consumer that reads the numbers and drops the
+       assumptions has taken a planning estimate for a price. */
+    cycle: cycle ? {
+      wall_mm: cycle.wallMm,
+      /* Derived, and a genuine lower bound: no tool beats it. */
+      cooling_floor_s: cycle.coolingFloorS,
+      practical_cooling_s: cycle.practicalCoolingS,
+      cycle_s: cycle.cycleS,
+      cavities: cycle.cavities,
+      parts_per_hour: cycle.partsPerHour,
+      assumptions: cycle.assumptions,
+      caveats: cycle.notes,
+    } : null,
+
+    cost: cost ? {
+      /* Currency-free on purpose: the rates were the user's, in whatever
+         currency they were thinking in, and this file has no business
+         guessing which. */
+      material_per_part: cost.materialCost,
+      machine_per_part: cost.machineCost,
+      material_plus_machine_per_part: cost.totalCost,
+      cavities: cost.cavities,
+      scrap_pct: cost.scrapPct,
+      missing_inputs: cost.missing,
+      assumptions: cost.assumptions,
+      caveats: cost.notes,
+    } : null,
+
+    tooling_drivers: tooling ? {
+      slides: tooling.slides,
+      lifters: tooling.lifters,
+      cavities: tooling.cavities,
+      drivers: tooling.drivers,
+      note: tooling.note,
+      parting_line_caveat: tooling.partingCaveat,
     } : null,
   };
 
@@ -7554,7 +7888,7 @@ function stripMarkup(text) {
   return String(text).replace(/<[^>]+>/g, '');
 }
 
-async function exportPDF({ sessionId, dfm, analysis, twoShot, validation, shot, settings }) {
+async function exportPDF({ sessionId, dfm, analysis, twoShot, validation, shot, cycle, cost, tooling, settings }) {
   const jsPDF = await loadJsPDF();
   const doc = new jsPDF({ unit: 'mm', format: 'a4' });
   const r = dfm.result;
@@ -7693,6 +8027,38 @@ async function exportPDF({ sessionId, dfm, analysis, twoShot, validation, shot, 
       ['Machine clamp', shot.machineTonnes ? `${shot.machineTonnes} tonnes` : '—'],
     ], 50);
     for (const note of shot.notes) cur.paragraph(note);
+  }
+
+  // ── cycle time and cost ──────────────────────────────────────────────────
+  // Every assumption printed under the figures it produced. These are the
+  // numbers most likely to be read out of this page and into a quotation, and
+  // a reader who cannot see what they rest on will treat them as a price.
+  if (cycle && cycle.coolingFloorS != null) {
+    cur.heading('CYCLE TIME AND COST');
+    const money = (n) => n.toFixed(n < 1 ? 3 : 2);
+    const rows = [
+      ['Nominal wall', `${cycle.wallMm.toFixed(2)} mm`],
+      ['Cooling floor', `${cycle.coolingFloorS.toFixed(1)} s (derived lower bound)`],
+      ['Cycle time', `${cycle.cycleS.lo.toFixed(0)}–${cycle.cycleS.hi.toFixed(0)} s (estimate)`],
+      ['Cavities', String(cycle.cavities)],
+      ['Parts per hour', `${cycle.partsPerHour.lo.toFixed(0)}–${cycle.partsPerHour.hi.toFixed(0)}`],
+    ];
+    if (cost && cost.materialCost != null) rows.push(['Material per part', money(cost.materialCost)]);
+    if (cost && cost.machineCost) rows.push(['Machine per part', `${money(cost.machineCost.lo)}–${money(cost.machineCost.hi)}`]);
+    if (cost && cost.totalCost) rows.push(['Material + machine', `${money(cost.totalCost.lo)}–${money(cost.totalCost.hi)}`]);
+    cur.pairs(rows, 50);
+    for (const line of cycle.assumptions) cur.paragraph(line);
+    for (const line of (cost ? cost.assumptions : [])) cur.paragraph(line);
+    for (const line of cycle.notes) cur.paragraph(line);
+    for (const line of (cost ? cost.notes : [])) cur.paragraph(line);
+  }
+
+  // ── what drives the tool ─────────────────────────────────────────────────
+  if (tooling && tooling.drivers.length) {
+    cur.heading('WHAT DRIVES THE TOOL');
+    for (const d of tooling.drivers) cur.paragraph(`${d.driver} — ${d.effect}`);
+    cur.paragraph(tooling.note);
+    if (tooling.slides || tooling.lifters) cur.paragraph(tooling.partingCaveat);
   }
 
   // ── tooling actions ──────────────────────────────────────────────────────
@@ -8971,6 +9337,14 @@ const DEFAULT_SETTINGS = {
   bossWall: 1.0,
   hasUndercut: '0',
 
+  /* Cost inputs. The rates are deliberately null rather than defaulted: a
+     plausible-looking resin price is indistinguishable on screen from a real
+     one, and would travel further than it should. No rate, no cost. */
+  cavities: 1,
+  resinPerKg: null,
+  machinePerHour: null,
+  scrapPct: 0,
+
   fpcEnabled: false,
   fpcThickness: 0.20,
   fpcCover: 0.50,
@@ -9008,6 +9382,9 @@ const runtime = {
   interface: null,             // two-shot interface measurement
   dfm: null,                   // { input, result }
   shot: null,                  // shot weight / clamp force estimate
+  cycle: null,                 // cooling floor and cycle band
+  cost: null,                  // material + machine, when the rates are given
+  tooling: null,               // what drives the tool, not what it costs
   comparison: null,            // diff against a previously exported run
   twoShot: null,               // two-shot check result
 
@@ -9104,6 +9481,9 @@ function resetRuntime() {
   runtime.interface = null;
   runtime.dfm = null;
   runtime.shot = null;
+  runtime.cycle = null;
+  runtime.cost = null;
+  runtime.tooling = null;
   runtime.comparison = null;
   runtime.twoShot = null;
   runtime.model = null;
@@ -9152,7 +9532,16 @@ const FIELD_BINDINGS = [
   ['fpcThickness', 'fpcThickness', Number],
   ['fpcCover', 'fpcCover', Number],
   ['fpcAnchors', 'fpcAnchors', String],
+  ['cavities', 'cavities', Number],
+  ['scrapPct', 'scrapPct', Number],
+  /* A rate left blank means "no rate", not zero: an empty field must clear the
+     cost rather than cost the part at nothing per kilo. */
+  ['resinPerKg', 'resinPerKg', NumberOrNull],
+  ['machinePerHour', 'machinePerHour', NumberOrNull],
 ];
+
+/* Marker coercion — see the binding loop. */
+function NumberOrNull(v) { return v === '' ? null : Number(v); }
 
 const CHECK_IDS = ['wall', 'draft', 'ribs', 'undercut', 'sink', 'warp', 'transitions', 'flow', 'fpc'];
 
@@ -9192,10 +9581,13 @@ function bindForm(onChange) {
     const event = node.tagName === 'SELECT' || node.type === 'checkbox' ? 'change' : 'input';
     node.addEventListener(event, () => {
       const raw = coerce === Boolean ? node.checked : node.value;
-      let value = coerce === Number ? Number(raw) : raw;
+      let value = coerce === Number ? Number(raw) : coerce === NumberOrNull ? NumberOrNull(raw) : raw;
       /* An emptied numeric field should not silently become zero and start
-         producing divide-by-zero ratios in the rules. */
+         producing divide-by-zero ratios in the rules. A rate is the exception:
+         blank is a meaningful value there, and it means the cost cannot be
+         computed rather than that it is free. */
       if (coerce === Number && !Number.isFinite(value)) return;
+      if (coerce === NumberOrNull && value !== null && !Number.isFinite(value)) return;
       updateSettings({ [key]: value }, `field:${key}`);
       if (key === 'material') runtime.materialChosen = true;
       onChange(key);
@@ -9788,6 +10180,73 @@ function renderShot(shot) {
 }
 
 /*
+ * Cycle time, cost and what drives the tool.
+ *
+ * Separate from the shot figures above because it is a different kind of
+ * claim: those are arithmetic on measured geometry, these rest on stated
+ * assumptions and on rates the user supplied. Every one of those assumptions
+ * is printed here rather than kept in the source, because these are the
+ * numbers most likely to be quoted from.
+ */
+function renderCost(cycle, cost, tooling) {
+  const section = $('costSection');
+  if (!cycle) { section.style.display = 'none'; return; }
+  section.style.display = '';
+
+  const rows = [];
+  const add = (label, value, hint) => rows.push(el('div', { class: 'shot-row', title: hint || '' }, [
+    el('span', { class: 'shot-label', text: label }),
+    el('span', { class: 'shot-value', text: value }),
+  ]));
+  const money = (n) => n.toFixed(n < 1 ? 3 : 2);
+
+  add('Cooling floor', cycle.coolingFloorS != null ? `${cycle.coolingFloorS.toFixed(1)} s` : '—',
+    'The derived lower bound: the centre of the wall first reaching ejection temperature. No tool beats it.');
+  add('Cycle time', cycle.cycleS ? `${cycle.cycleS.lo.toFixed(0)}–${cycle.cycleS.hi.toFixed(0)} s` : '—',
+    'Practical cooling divided by cooling\u2019s share of a cycle. A planning estimate, not a quotation.');
+  if (cycle.partsPerHour) {
+    add('Parts per hour', `${cycle.partsPerHour.lo.toFixed(0)}–${cycle.partsPerHour.hi.toFixed(0)}`,
+      `At ${cycle.cavities} cavit${cycle.cavities === 1 ? 'y' : 'ies'}.`);
+  }
+
+  if (cost && cost.materialCost != null) {
+    add('Material / part', money(cost.materialCost), 'Shot weight at the resin price entered.');
+  }
+  if (cost && cost.machineCost) {
+    add('Machine / part', `${money(cost.machineCost.lo)}–${money(cost.machineCost.hi)}`,
+      'Cycle time at the machine rate entered, shared across the cavities.');
+  }
+  if (cost && cost.totalCost) {
+    add('Material + machine', `${money(cost.totalCost.lo)}–${money(cost.totalCost.hi)}`,
+      'Not a piece price: no labour, packaging, overhead, secondary operations or margin.');
+  }
+
+  const nodes = [el('div', { class: 'shot-grid' }, rows)];
+
+  /* The assumptions, on the same screen as the numbers they produced. */
+  for (const line of cycle.assumptions) nodes.push(el('div', { class: 'shot-note', text: line }));
+  for (const line of (cost ? cost.assumptions : [])) nodes.push(el('div', { class: 'shot-note', text: line }));
+  for (const line of cycle.notes) nodes.push(el('div', { class: 'shot-note', text: line }));
+  for (const line of (cost ? cost.notes : [])) nodes.push(el('div', { class: 'shot-note', text: line }));
+
+  if (tooling && tooling.drivers.length) {
+    nodes.push(el('div', { class: 'section-subhead', text: 'What drives the tool' }));
+    for (const d of tooling.drivers) {
+      nodes.push(el('div', { class: 'shot-row' }, [
+        el('span', { class: 'shot-label', text: d.driver }),
+        el('span', { class: 'shot-value shot-driver', text: d.effect }),
+      ]));
+    }
+    nodes.push(el('div', { class: 'shot-note', text: tooling.note }));
+    if (tooling.slides || tooling.lifters) {
+      nodes.push(el('div', { class: 'shot-note', text: tooling.partingCaveat }));
+    }
+  }
+
+  replaceChildren($('costBody'), nodes);
+}
+
+/*
  * Revision comparison.
  *
  * The score answers whether the part is manufacturable; this answers whether it
@@ -9972,6 +10431,7 @@ function clearResults() {
   $('resultsEmpty').style.display = '';
   $('resultsContent').style.display = 'none';
   renderShot(null);
+  renderCost(null, null, null);
   renderComparison(null);
   hideTwoShotResults();
   replaceChildren($('checksList'), []);
@@ -10549,6 +11009,8 @@ async function doRunAnalysis() {
       : null;
     renderShot(runtime.shot);
 
+    refreshCostEstimates();
+
     /* The comparison on screen was against the previous run's numbers, which
        these have just replaced. */
     runtime.comparison = null;
@@ -10634,6 +11096,9 @@ function currentRecord() {
     interface: runtime.interface,
     validation: runtime.validation,
     shot: runtime.shot,
+    cycle: runtime.cycle,
+    cost: runtime.cost,
+    tooling: runtime.tooling,
     settings,
   });
 }
@@ -10684,6 +11149,9 @@ async function doExportPDF() {
       twoShot: runtime.twoShot,
       validation: runtime.validation,
       shot: runtime.shot,
+      cycle: runtime.cycle,
+      cost: runtime.cost,
+      tooling: runtime.tooling,
       settings,
     });
   } catch (err) {
@@ -10739,7 +11207,57 @@ function refreshEverything() {
   panel.updatePullDirInfo();
 }
 
+/*
+ * Cycle time, cost and tooling drivers.
+ *
+ * Kept out of the analysis run so a changed rate re-costs the part
+ * immediately: none of this needs the geometry re-measured, and making
+ * someone re-run an analysis to try a different resin price would be an
+ * invitation to not bother trying one.
+ */
+function refreshCostEstimates() {
+  if (!runtime.analysis) {
+    runtime.cycle = null;
+    runtime.cost = null;
+    runtime.tooling = null;
+    renderCost(null, null, null);
+    return;
+  }
+
+  /* Judged on the same wall the checks are judged on — the sphere-fit
+     nominal, the conservative of the two thickness measures — so a cycle time
+     cannot come out shorter than the wall the part was passed or failed on. */
+  const wallMm = runtime.analysis.nominalWall
+    || (runtime.analysis.wallStats && runtime.analysis.wallStats.median)
+    || null;
+
+  runtime.cycle = estimateCycle({
+    material: MATERIALS[settings.material],
+    wallMm,
+    cavities: settings.cavities,
+  });
+  runtime.cost = estimatePartCost({
+    shotMassG: runtime.shot ? runtime.shot.shotMassG : null,
+    cycleS: runtime.cycle.cycleS,
+    cavities: settings.cavities,
+    resinPerKg: settings.resinPerKg,
+    machinePerHour: settings.machinePerHour,
+    scrapPct: settings.scrapPct,
+  });
+  runtime.tooling = toolingDrivers({
+    analysis: runtime.analysis,
+    material: MATERIALS[settings.material],
+    finishName: SURFACE_FINISHES[settings.surfaceFinish] ? SURFACE_FINISHES[settings.surfaceFinish].name : null,
+    cavities: settings.cavities,
+    bboxMm: runtime.analysis.bbox ? runtime.analysis.bbox.size : null,
+  });
+  renderCost(runtime.cycle, runtime.cost, runtime.tooling);
+}
+
+const COST_KEYS = new Set(['cavities', 'resinPerKg', 'machinePerHour', 'scrapPct']);
+
 function onFieldChange(key) {
+  if (COST_KEYS.has(key) || key === 'material' || key === 'surfaceFinish') refreshCostEstimates();
   if (key === 'analysisMode') panel.updateTwoShotUI();
   if (key === 'material' || key === 'material2' || key === 'surfaceFinish') {
     panel.updateMaterialInfo();

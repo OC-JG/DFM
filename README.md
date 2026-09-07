@@ -425,21 +425,48 @@ Cavity pressure is the one assumption in the chain, and it is printed next to th
 result. Mass is withheld when the mesh is not a closed solid rather than
 estimated from the bounding box.
 
-Cycle time is not included yet, but the question that blocked it is answered.
-The material table's cooling coefficient is written for the **full wall**, not
-the half-wall its comment claimed — a factor of four, settled by re-deriving it
-rather than by asking: rearranged, each coefficient implies a thermal
-diffusivity, and the full-wall reading puts all sixteen materials inside the
-measured range for a thermoplastic while the half-wall reading puts every one of
-them three to seven times below any polymer that exists. `docs/coolk.md` has the
-working, and `test/unit.mjs` asserts it so it cannot drift back.
+## Cycle time, and what a part costs to run
 
-What remains is a judgement rather than a fact. The formula gives the
-*theoretical cooling floor*; a real cycle is commonly 1.5–2× that. On a 2 mm ABS
-wall, 6.8 s against nearer 10–14 s. A cycle time is exactly the kind of number
-that gets quoted from, so whichever is printed has to say which it is.
+Cycle time exists now that the coefficient behind it is settled — it is written
+for the **full wall**, established by re-deriving it rather than by asking
+(`docs/coolk.md`, asserted in `test/unit.mjs`). It is reported in three steps
+rather than as one opaque figure, because only the first is derived:
 
-## Comparing revisions
+- the **cooling floor**, `k · s²` on the measured nominal wall — the moment the
+  centre of the wall first reaches ejection temperature, with the mould held at
+  a fixed temperature and heat leaving in one dimension. A lower bound no tool
+  beats, and labelled as one;
+- **practical cooling**, taken as 1.3× that floor, because neither of those two
+  conditions is true of a real tool;
+- the **cycle**, practical cooling divided by cooling's share of it, taken as
+  50–80%. The rest is fill, pack, mould motion and ejection.
+
+Both factors are printed next to the answer. A reader who disagrees can
+disagree with the step rather than with the number.
+
+**Cost is material plus machine time, and only when the rates are given.** There
+are no default resin prices and no default machine rates, deliberately: a
+plausible-looking default is indistinguishable on screen from a real quotation
+and travels further than it should. Enter a price per kg and a rate per hour and
+the part is costed; leave either blank and the tool says which is missing rather
+than costing the part at nothing per kilo. The figure that results is material
+and machine only — no labour, packaging, overhead, secondary operations or
+margin — and it says so wherever it appears.
+
+**Tooling is a list of drivers, never a price.** What a tool costs depends on
+the toolmaker, the steel, the country and the lead time, none of which this tool
+knows. What it *can* say is what makes the tool expensive: every side action is
+a moving assembly, every cavity repeats everything, glass fill means hardened
+steel, a mirror finish is polishing hours. The moving-tooling counts come from
+the undercut check and inherit its flat-parting-line assumption, which is stated
+alongside them.
+
+None of this is scored. Cycle time and cost are not pass-or-fail properties of a
+part, so they carry no weight, appear as no check, and cannot move the score — a
+part scores the same whether or not anyone has entered a resin price. A test
+asserts it.
+
+## Comparing revisions## Comparing revisions
 
 **Compare with JSON** reads a previous export and says what moved: the score, the
 grade, which checks changed band, and which measurements shifted and in which

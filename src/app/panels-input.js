@@ -38,7 +38,16 @@ const FIELD_BINDINGS = [
   ['fpcThickness', 'fpcThickness', Number],
   ['fpcCover', 'fpcCover', Number],
   ['fpcAnchors', 'fpcAnchors', String],
+  ['cavities', 'cavities', Number],
+  ['scrapPct', 'scrapPct', Number],
+  /* A rate left blank means "no rate", not zero: an empty field must clear the
+     cost rather than cost the part at nothing per kilo. */
+  ['resinPerKg', 'resinPerKg', NumberOrNull],
+  ['machinePerHour', 'machinePerHour', NumberOrNull],
 ];
+
+/* Marker coercion — see the binding loop. */
+function NumberOrNull(v) { return v === '' ? null : Number(v); }
 
 const CHECK_IDS = ['wall', 'draft', 'ribs', 'undercut', 'sink', 'warp', 'transitions', 'flow', 'fpc'];
 
@@ -78,10 +87,13 @@ export function bindForm(onChange) {
     const event = node.tagName === 'SELECT' || node.type === 'checkbox' ? 'change' : 'input';
     node.addEventListener(event, () => {
       const raw = coerce === Boolean ? node.checked : node.value;
-      let value = coerce === Number ? Number(raw) : raw;
+      let value = coerce === Number ? Number(raw) : coerce === NumberOrNull ? NumberOrNull(raw) : raw;
       /* An emptied numeric field should not silently become zero and start
-         producing divide-by-zero ratios in the rules. */
+         producing divide-by-zero ratios in the rules. A rate is the exception:
+         blank is a meaningful value there, and it means the cost cannot be
+         computed rather than that it is free. */
       if (coerce === Number && !Number.isFinite(value)) return;
+      if (coerce === NumberOrNull && value !== null && !Number.isFinite(value)) return;
       updateSettings({ [key]: value }, `field:${key}`);
       if (key === 'material') runtime.materialChosen = true;
       onChange(key);

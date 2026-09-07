@@ -37,6 +37,14 @@ export const DEFAULT_SETTINGS = {
   bossWall: 1.0,
   hasUndercut: '0',
 
+  /* Cost inputs. The rates are deliberately null rather than defaulted: a
+     plausible-looking resin price is indistinguishable on screen from a real
+     one, and would travel further than it should. No rate, no cost. */
+  cavities: 1,
+  resinPerKg: null,
+  machinePerHour: null,
+  scrapPct: 0,
+
   fpcEnabled: false,
   fpcThickness: 0.20,
   fpcCover: 0.50,
@@ -74,6 +82,9 @@ export const runtime = {
   interface: null,             // two-shot interface measurement
   dfm: null,                   // { input, result }
   shot: null,                  // shot weight / clamp force estimate
+  cycle: null,                 // cooling floor and cycle band
+  cost: null,                  // material + machine, when the rates are given
+  tooling: null,               // what drives the tool, not what it costs
   comparison: null,            // diff against a previously exported run
   twoShot: null,               // two-shot check result
 
@@ -170,6 +181,9 @@ export function resetRuntime() {
   runtime.interface = null;
   runtime.dfm = null;
   runtime.shot = null;
+  runtime.cycle = null;
+  runtime.cost = null;
+  runtime.tooling = null;
   runtime.comparison = null;
   runtime.twoShot = null;
   runtime.model = null;

@@ -1,11 +1,12 @@
 import { MATERIALS } from '../core/materials.js';
-import { effectiveMinDraft } from '../core/finishes.js';
+import { effectiveMinDraft, SURFACE_FINISHES } from '../core/finishes.js';
 import { parseSTL } from '../geometry/stl.js';
 import { parseSTEP } from '../geometry/step.js';
 import { openIptViaBridge, driveBridgeParameters, probeBridge, bridgeUrl, setBridgeUrl } from './bridge.js';
 import { validateGeometry, rescaleGeometry, flipWinding } from '../geometry/validate.js';
 import { suggestPullDirection } from '../analysis/mesh.js';
 import { estimateShot } from '../analysis/shot.js';
+import { estimateCycle, estimatePartCost, toolingDrivers } from '../analysis/cost.js';
 import { computeBounds } from '../geometry/weld.js';
 import { runDFM } from '../rules/engine.js';
 import { runTwoShotDFM } from '../rules/twoshot.js';
@@ -16,7 +17,7 @@ import { runAnalysis, initWorker } from './analysis-runner.js';
 import { computeHeatColours, computeInterfaceColours, buildLegend, HEAT_MODES } from './heatmap.js';
 import * as viewer from './viewer.js';
 import * as panel from './panels-input.js';
-import { renderResults, renderShot, renderComparison, renderTwoShotResults, hideTwoShotResults, clearResults } from './panels-results.js';
+import { renderResults, renderShot, renderCost, renderComparison, renderTwoShotResults, hideTwoShotResults, clearResults } from './panels-results.js';
 import { settings, runtime, loadSettings, resetSettings, resetRuntime, isTwoShot } from './state.js';
 import { $, $$, el, toast, nextFrame } from './dom.js';
 
@@ -587,6 +588,8 @@ async function doRunAnalysis() {
       : null;
     renderShot(runtime.shot);
 
+    refreshCostEstimates();
+
     /* The comparison on screen was against the previous run's numbers, which
        these have just replaced. */
     runtime.comparison = null;
@@ -672,6 +675,9 @@ function currentRecord() {
     interface: runtime.interface,
     validation: runtime.validation,
     shot: runtime.shot,
+    cycle: runtime.cycle,
+    cost: runtime.cost,
+    tooling: runtime.tooling,
     settings,
   });
 }
@@ -722,6 +728,9 @@ async function doExportPDF() {
       twoShot: runtime.twoShot,
       validation: runtime.validation,
       shot: runtime.shot,
+      cycle: runtime.cycle,
+      cost: runtime.cost,
+      tooling: runtime.tooling,
       settings,
     });
   } catch (err) {
@@ -777,7 +786,57 @@ function refreshEverything() {
   panel.updatePullDirInfo();
 }
 
+/*
+ * Cycle time, cost and tooling drivers.
+ *
+ * Kept out of the analysis run so a changed rate re-costs the part
+ * immediately: none of this needs the geometry re-measured, and making
+ * someone re-run an analysis to try a different resin price would be an
+ * invitation to not bother trying one.
+ */
+function refreshCostEstimates() {
+  if (!runtime.analysis) {
+    runtime.cycle = null;
+    runtime.cost = null;
+    runtime.tooling = null;
+    renderCost(null, null, null);
+    return;
+  }
+
+  /* Judged on the same wall the checks are judged on — the sphere-fit
+     nominal, the conservative of the two thickness measures — so a cycle time
+     cannot come out shorter than the wall the part was passed or failed on. */
+  const wallMm = runtime.analysis.nominalWall
+    || (runtime.analysis.wallStats && runtime.analysis.wallStats.median)
+    || null;
+
+  runtime.cycle = estimateCycle({
+    material: MATERIALS[settings.material],
+    wallMm,
+    cavities: settings.cavities,
+  });
+  runtime.cost = estimatePartCost({
+    shotMassG: runtime.shot ? runtime.shot.shotMassG : null,
+    cycleS: runtime.cycle.cycleS,
+    cavities: settings.cavities,
+    resinPerKg: settings.resinPerKg,
+    machinePerHour: settings.machinePerHour,
+    scrapPct: settings.scrapPct,
+  });
+  runtime.tooling = toolingDrivers({
+    analysis: runtime.analysis,
+    material: MATERIALS[settings.material],
+    finishName: SURFACE_FINISHES[settings.surfaceFinish] ? SURFACE_FINISHES[settings.surfaceFinish].name : null,
+    cavities: settings.cavities,
+    bboxMm: runtime.analysis.bbox ? runtime.analysis.bbox.size : null,
+  });
+  renderCost(runtime.cycle, runtime.cost, runtime.tooling);
+}
+
+const COST_KEYS = new Set(['cavities', 'resinPerKg', 'machinePerHour', 'scrapPct']);
+
 function onFieldChange(key) {
+  if (COST_KEYS.has(key) || key === 'material' || key === 'surfaceFinish') refreshCostEstimates();
   if (key === 'analysisMode') panel.updateTwoShotUI();
   if (key === 'material' || key === 'material2' || key === 'surfaceFinish') {
     panel.updateMaterialInfo();

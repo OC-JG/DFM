@@ -173,6 +173,52 @@ async function main() {
     check('projected area reported', /12\.0\s*cm²/.test(shotText), shotText.slice(0, 200));
     check('machine size reported', /Machine size\s*\d+\s*t/.test(shotText), shotText.slice(0, 220));
 
+    // ── cycle time and cost ───────────────────────────────────────────────
+    // Not scored, so this checks the figures appear, that they carry their
+    // assumptions, and that a rate typed in re-costs the part without anyone
+    // having to run the analysis again.
+    await page.click('.tab[data-tab="estimates"]');
+    check('cycle time is shown', (await page.textContent('#costBody')).includes('Cooling floor'),
+      (await page.textContent('#costBody')).slice(0, 120));
+    check('the cooling floor is labelled a lower bound',
+      /derived lower bound|no tool beats|lower bound/i.test(await page.locator('#costSection').innerHTML()),
+      '');
+    check('the cycle assumptions are printed with it',
+      /full-wall/.test(await page.textContent('#costBody'))
+      && /50–80%/.test(await page.textContent('#costBody')),
+      (await page.textContent('#costBody')).slice(-160));
+
+    const beforeRates = await page.textContent('#costBody');
+    check('no cost until a rate is given', /No cost until there is/.test(beforeRates),
+      beforeRates.slice(-120));
+
+    await page.fill('#resinPerKg', '2.20');
+    await page.fill('#machinePerHour', '45');
+    await page.waitForFunction(
+      () => /Material \+ machine/.test(document.getElementById('costBody').textContent),
+      null, { timeout: 15000 });
+    check('typing a rate costs the part without re-running the analysis',
+      /Material \+ machine/.test(await page.textContent('#costBody')),
+      (await page.textContent('#costBody')).slice(0, 140));
+    check('the cost says it is not a piece price',
+      /labour|margin|overhead/i.test(await page.textContent('#costBody')), '');
+
+    await page.fill('#cavities', '4');
+    await page.waitForFunction(
+      () => /4 cavities/.test(document.getElementById('costBody').textContent),
+      null, { timeout: 15000 });
+    check('cavities re-cost the part too',
+      /4 cavities/.test(await page.textContent('#costBody')), '');
+
+    check('what drives the tool is listed', /What drives the tool/.test(await page.textContent('#costSection')),
+      '');
+
+    /* Put the inputs back so the rest of the run is unaffected. */
+    await page.fill('#cavities', '1');
+    await page.fill('#resinPerKg', '');
+    await page.fill('#machinePerHour', '');
+    await page.click('.tab[data-tab="findings"]');
+
     // ── gate suggestion ───────────────────────────────────────────────────
     // With no gate set the flow check has nothing to compute, so it searches
     // for where the gate should go instead of only asking for one.

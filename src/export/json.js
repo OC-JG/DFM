@@ -6,7 +6,7 @@ import { formatPullAxis } from '../analysis/stats.js';
  * Includes the two-shot block, which the original omitted: running an
  * overmould analysis and then exporting produced a file with no trace of it.
  */
-export function buildExportJSON({ sessionId, dfm, analysis, twoShot, interface: iface, validation, shot, settings }) {
+export function buildExportJSON({ sessionId, dfm, analysis, twoShot, interface: iface, validation, shot, cycle, cost, tooling, settings }) {
   const out = {
     tool: 'OnlyCat DFM',
     session: sessionId,
@@ -53,6 +53,45 @@ export function buildExportJSON({ sessionId, dfm, analysis, twoShot, interface: 
       clamp_force_tonnes: shot.clampTonnes,
       machine_clamp_tonnes: shot.machineTonnes,
       assumptions: shot.notes,
+    } : null,
+
+    /* Cycle time and cost travel with every assumption behind them, because
+       these are the figures most likely to be lifted out of a record and put
+       into a quotation. A consumer that reads the numbers and drops the
+       assumptions has taken a planning estimate for a price. */
+    cycle: cycle ? {
+      wall_mm: cycle.wallMm,
+      /* Derived, and a genuine lower bound: no tool beats it. */
+      cooling_floor_s: cycle.coolingFloorS,
+      practical_cooling_s: cycle.practicalCoolingS,
+      cycle_s: cycle.cycleS,
+      cavities: cycle.cavities,
+      parts_per_hour: cycle.partsPerHour,
+      assumptions: cycle.assumptions,
+      caveats: cycle.notes,
+    } : null,
+
+    cost: cost ? {
+      /* Currency-free on purpose: the rates were the user's, in whatever
+         currency they were thinking in, and this file has no business
+         guessing which. */
+      material_per_part: cost.materialCost,
+      machine_per_part: cost.machineCost,
+      material_plus_machine_per_part: cost.totalCost,
+      cavities: cost.cavities,
+      scrap_pct: cost.scrapPct,
+      missing_inputs: cost.missing,
+      assumptions: cost.assumptions,
+      caveats: cost.notes,
+    } : null,
+
+    tooling_drivers: tooling ? {
+      slides: tooling.slides,
+      lifters: tooling.lifters,
+      cavities: tooling.cavities,
+      drivers: tooling.drivers,
+      note: tooling.note,
+      parting_line_caveat: tooling.partingCaveat,
     } : null,
   };
 

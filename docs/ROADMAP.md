@@ -88,7 +88,7 @@ in — those ran roughly to estimate, which is the only reason to trust these.
 | R2.1 | Trust the STEP path | ~~3–5 d~~ done | Unblocked R2.2, R2.3 |
 | R2.2 | Features, not triangles | ~~1–2 wk~~ done | unblocked nothing further |
 | R2.3 | The Inventor loop under test | ~~4–6 d~~ done | one part blocked upstream |
-| R2.4 | Numbers that get quoted | 1 wk | unblocked — `coolK` answered |
+| R2.4 | Numbers that get quoted | ~~1 wk~~ done | — |
 | R2.5 | Two-shot and FPC earn their weights | 1–2 wk | Needs R2.2 for the FPC region |
 | R2.6 | Findings that survive leaving the tool | 4–6 d | Independent |
 | R2.7 | Navigation for people who navigate for a living | 1–2 wk | Independent |
@@ -284,7 +284,7 @@ changing shape while the fake one stays still. Recording the fixture payloads
 from a live session, rather than shaping them from the client code as these
 were, would close that gap.
 
-### R2.4 — Numbers that get quoted
+### R2.4 — Numbers that get quoted *(done)*
 
 **Why now.** Because cycle time and cost are what someone asks for first, and
 because the tool is deliberately silent on both — correctly, until one question
@@ -318,25 +318,50 @@ needs a judgement before a number goes on screen:
   the first numbers argued with. Worth a datasheet check before any of this
   reaches a quotation.
 
-**What ships, once that is settled.**
+**What shipped.**
 
-- Cycle time, with the convention it assumes printed beside it, in the same
-  style as the cavity-pressure assumption already printed next to clamp force
-  (`src/analysis/shot.js`).
-- Piece-part cost: material mass at a price per kg, machine rate against the
-  machine size `nextMachineSize` already selects, cycle time and a cavity count.
-  Every input user-editable and every input shown, because a cost figure whose
-  assumptions are hidden is worse than no cost figure.
-- A tooling-cost band — not a number. Tooling depends on the undercut and slide
-  count the tool already computes, cavity count and finish, and a point estimate
-  would be false precision. A band, with the drivers listed, is defensible.
-- Cost in the JSON export and the PDF, clearly separated from the score. These
-  are not manufacturability verdicts and must not move the number.
+- **Cycle time, in three steps rather than one multiplier.** *(done)* The
+  cooling floor `k·s²` on the measured nominal wall — derived, and labelled a
+  lower bound; practical cooling at 1.3× it, because the floor assumes a mould
+  wall held at a fixed temperature and one-dimensional heat flow and a tool is
+  neither; and the cycle, practical cooling over cooling's 50–80% share. Both
+  factors are printed with the answer and exported with it, so a reader can
+  disagree with a step instead of with the number. Judged on the sphere-fit
+  nominal wall — the same conservative measure the checks are judged on — so a
+  cycle time cannot come out shorter than the wall the part was passed on.
+- **Piece-part cost, and silence without rates.** *(done)* Material at the
+  resin price entered plus machine time at the rate entered, shared across the
+  cavities. **No default prices**, which was the important decision: a
+  plausible-looking default is indistinguishable on screen from a real
+  quotation and travels further than it should. A missing rate produces no
+  cost and a sentence naming which rate is missing. What it produces is
+  labelled material-and-machine, not a piece price — no labour, packaging,
+  overhead, secondary operations or margin.
+- **Tooling as drivers, not a band.** *(done, and narrower than planned.)* The
+  roadmap wanted a currency band with the drivers listed. On reflection a band
+  is still currency, and what a tool costs depends on the toolmaker, the steel,
+  the country and the lead time — none of which is in this repository. So it
+  ships as the drivers alone: side actions, lifters, cavitation, abrasive
+  material, finish, envelope, each with what it does to the tool. The
+  moving-tooling counts read the same fields and the same 1 mm² threshold the
+  undercut check uses, so the two can never disagree about one part, and they
+  inherit its flat-parting-line caveat, which is printed with them.
+- **In both exports, and not in the score.** *(done)* The JSON and the PDF
+  carry the figures with every assumption attached. Nothing here is scored:
+  cycle time and cost are not pass-or-fail properties of a part, so they carry
+  no weight, appear as no check and cannot move the number. A test asserts a
+  part scores the same whether or not anyone has entered a resin price.
 
-**Exit criteria.** `coolK` settled and the resolution written down next to the
-field — **met**. No unqualified cycle time appears anywhere: still to come, and
-now only a matter of deciding floor against practical and labelling it. Cost
-figures state every assumption on the same page they appear on.
+**The judgement the derivation left open, made.** `docs/coolk.md` settled the
+convention but not whether a printed figure should be the floor or a practical
+time. Both are printed, labelled, and the factor between them is shown — which
+is the answer that does not require anyone to trust a single number.
+
+**Exit criteria, met.** `coolK` settled and written down next to the field. No
+unqualified cycle time appears anywhere — the floor is labelled a floor, the
+cycle is labelled an estimate, and both factors between them are on screen. Cost
+figures state every assumption on the same page they appear on, in the panel, in
+the PDF and in the JSON.
 
 **Risk.** This is the milestone most likely to be quoted from and least likely to
 be checked. It is also the one where being wrong is most expensive, which is why
@@ -527,10 +552,10 @@ for, and it has no automated coverage today.
 Release discipline first, because it is cheap and because a tagged build is what
 makes every later change traceable.
 
-R2.1, R2.2 and R2.3 are done — the three that R2.1's fixture unblocked — and
-R2.4's blocking question is answered, so it is no longer waiting on anybody.
-What remains is independent of everything: R2.4, R2.5, R2.6 and R2.7 can be
-taken in any order.
+R2.1, R2.2, R2.3 and R2.4 are done. What remains is independent of everything
+and of each other: R2.5 (two-shot registration, the FPC region, Vicat data),
+R2.6 (stable finding ids, build identity, the findings package) and R2.7
+(SpaceMouse) can be taken in any order.
 
 R2.7 depends on nothing and competes with nothing — it is viewer code, and the
 only file it shares with any other milestone is `src/app/camera.js`, which none
