@@ -369,20 +369,26 @@ for, and it has no automated coverage today.
 
 **Do this first — it is two or three days and everything else benefits.**
 
-- **`verify:build` is platform-dependent, and `main` has been red since it
-  landed.** The check rebuilds `dfm-tool.html` and fails if the result differs
-  from the committed copy — but the committed copy was built on Windows and CI
-  rebuilds on Linux, so it fails on 33 lines that are nothing but a path
-  separator: `/* ==== core\materials.js */` against `/* ==== core/materials.js
-  */`. `build.js:126` takes the module name from `path.relative`, which returns
-  the host OS's separator, and line 162 writes it into the section banner. The
-  embedded worker string carries the same difference plus escaped `\r\n` from a
-  CRLF checkout. Two lines fix it — normalise `rel` to forward slashes, and
-  normalise line endings on read — plus a `.gitattributes` marking `src/**` as
-  `eol=lf` so a Windows checkout cannot reintroduce the second half. Until it is
-  fixed, the repository's most useful guard rail is a permanent red that
-  everyone learns to ignore, which is worse than not having it: main's last run
-  failed on 2026-08-25 and every branch since has inherited it.
+- **A deterministic build, and the two suites its failure was hiding.**
+  *(done — #6)* `verify:build` had been red on `main` since 2026-08-25, and not
+  because anything was stale: the committed `dfm-tool.html` was built on Windows
+  and CI rebuilds on Linux, so 33 lines differed by nothing but a path separator
+  — `path.relative` returns the host OS's separator and it went straight into
+  the section banner — while the embedded worker string differed by escaped
+  `\r\n` from a CRLF checkout. Forward slashes always, and CRLF normalised on
+  read, makes the output independent of the platform and of how the source was
+  checked out.
+
+  The reason this belongs in a roadmap rather than only in a commit is what was
+  behind it. Because that check fails third in the job, the browser suite and
+  the offline suite had not run in CI for two weeks, and both had rotted: two
+  smoke checks asserted `isVisible()` on panels the dashboard rework had moved
+  into a tab that carries `hidden`, and three more could not pass anywhere an
+  Inventor is not running, because the refused bridge probe is logged as a
+  console error the page cannot suppress. None of that was visible while the
+  step in front of it was permanently red. A guard rail everyone has learned to
+  ignore is worse than not having one — and the cost is not the guard rail
+  itself, it is everything downstream of it that quietly stops being checked.
 - **Tag and release.** `package.json` says `2.0.0`; there are no tags and no
   releases. CI already uploads `dfm-tool.html` as an artifact on every run
   (`.github/workflows/ci.yml`); attaching it to a tagged release instead gives
