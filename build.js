@@ -44,7 +44,13 @@ const VENDOR_FILES = {
 
 /* ---------------------------------------------------------------- helpers */
 
-const read = (p) => fs.readFileSync(p, 'utf8');
+/* CRLF is normalised on read so the output does not depend on how the source
+   was checked out. A Windows clone with core.autocrlf gives every file CRLF,
+   and the worker is embedded via JSON.stringify, which turns each CR into a
+   literal \r escape that survives git's own normalisation on commit — so
+   without this the committed artifact and a rebuild of it differ, and
+   `npm run verify:build` fails on the platform rather than on the content. */
+const read = (p) => fs.readFileSync(p, 'utf8').replace(/\r\n/g, '\n');
 
 function fail(msg) {
   console.error(`\n  build error: ${msg}\n`);
@@ -123,7 +129,10 @@ function bundle(entry, label) {
   let namespaceCount = 0;
 
   for (const abs of files) {
-    const rel = path.relative(SRC, abs);
+    /* Forward slashes always: path.relative returns the host separator, and
+       this string is written into a section banner in the output, so a
+       Windows build would otherwise disagree with a POSIX one byte for byte. */
+    const rel = path.relative(SRC, abs).split(path.sep).join('/');
     let code = read(abs);
 
     for (const name of topLevelNames(code)) {

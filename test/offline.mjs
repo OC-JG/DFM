@@ -101,10 +101,15 @@ async function main() {
     const bytes = readFileSync(await (await download).path());
     check('PDF exports offline', bytes.subarray(0, 5).toString() === '%PDF-', `${bytes.length} bytes`);
 
-    /* The one thing that legitimately still needs a connection. */
+    /* The one thing that legitimately still needs a connection. The bridge
+       health probe is allowed alongside it: it is a request to localhost
+       rather than to the internet, it is how the header chip reports whether
+       an Inventor is listening, and nothing is listening here — so it is not
+       evidence that this build depends on a network. */
+    const EXPECTED_OFF_ORIGIN = /occt|fonts\.|\/bridge\/health$/;
     check('only the STEP reader was ever requested off-origin',
-      blocked.every((u) => /occt|fonts\./.test(u)),
-      blocked.filter((u) => !/occt|fonts\./.test(u)).join(', ') || 'none');
+      blocked.every((u) => EXPECTED_OFF_ORIGIN.test(u)),
+      blocked.filter((u) => !EXPECTED_OFF_ORIGIN.test(u)).join(', ') || 'none');
   } finally {
     await browser.close();
     server.close();
