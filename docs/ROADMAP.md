@@ -86,7 +86,7 @@ in — those ran roughly to estimate, which is the only reason to trust these.
 | | Milestone | Effort | Blocks / blocked by |
 |---|---|---|---|
 | R2.1 | Trust the STEP path | ~~3–5 d~~ done | Unblocked R2.2, R2.3 |
-| R2.2 | Features, not triangles | 1–2 wk | Needs R2.1 |
+| R2.2 | Features, not triangles | draft done | radii re-planned |
 | R2.3 | The Inventor loop under test | 4–6 d | Needs R2.1 |
 | R2.4 | Numbers that get quoted | 1 wk + a decision | Needs a moulding engineer |
 | R2.5 | Two-shot and FPC earn their weights | 1–2 wk | Needs R2.2 for the FPC region |
@@ -157,38 +157,53 @@ something trustworthy to assert a per-face measurement against.
 
 **What ships.**
 
-- `faceGroups` survives into analysis. Today it is produced in
-  `src/geometry/step.js` and read nowhere; `src/analysis/mesh.js` should take it
-  as an optional input and, where present, aggregate per-face rather than
-  per-triangle. Note that `src/geometry/weld.js:169` sets `faceGroups: null`
-  unconditionally — welding destroys the mapping. The STL path is unaffected
-  because it never had face groups, but if welding is ever applied to STEP
-  geometry the mapping has to be carried through the merge rather than dropped.
-- **Draft per face.** A B-rep face has one draft angle; a tessellation of it has
-  hundreds of slightly different ones, and a finding reported as "4% of side-wall
-  area under minimum" is much less actionable than "this face, 0.3°". This also
-  makes the README's existing claim true.
-- **Corner radii, measured.** Cylindrical and toroidal faces in the STEP data
-  give radii directly. The `corners` check moves off `weight: 0`
-  (`src/rules/scoring.js:82`) and becomes a scored check with a real threshold —
-  and its weight has to be re-derived against the other checks rather than
-  invented, since the eight default checks currently sum to exactly 100.
-- **Holes and bosses as features.** A cylindrical face with an axis is a hole or
-  a boss; today both are inferred from triangle clusters. This sharpens the rib
-  and boss rules and gives the undercut classifier a better question to ask.
-- A statement, in the check output, of which measurements came from B-rep and
-  which from the mesh — because the same part dropped as STL will now score
-  differently from the same part arriving as `.ipt`, and a user comparing the
-  two deserves to be told why rather than left to discover it.
+- **`faceGroups` survives into analysis.** *(done)* `analyseMesh` takes
+  `geom.faceGroups` when the source carried it and aggregates the per-triangle
+  results by face. Nothing is re-measured: draft per triangle, the inner/outer
+  ray classification and the two-piece rule all run as before, and a test
+  asserts the per-face verdict and the area statistic agree to 1e-6 — they are
+  one measurement grouped two ways, and if that ever stops being true the test
+  says so. `src/geometry/weld.js` still nulls `faceGroups`, which is correct
+  (welding merges vertices across face boundaries and destroys the mapping) and
+  now carries a comment saying to route the mapping through the merge rather
+  than delete the line.
+- **Draft per face.** *(done)* The check names them: *4 of 4 side faces are
+  under 0.50° — face 2 0.00° (29% of side area, outer)*. A face is given a
+  single angle only where it has one; a face whose triangle normals fan out
+  reports the range it spans instead, because one number for a curved face
+  would be a fiction. This makes the README's existing claim true.
+- **Provenance, stated.** *(done)* `measured_from` is `brep` or `mesh`, in the
+  check's own metrics and in the JSON export. The same part through the two
+  doors produces different records — not contradictory ones — and a consumer
+  comparing two exports needs to know which it holds.
+- **Corner radii, measured.** *Still open, and the plan for it was wrong.* This
+  section said cylindrical and toroidal faces in the STEP data give radii
+  directly. They do not, through this reader: `occt-import-js` returns
+  `{first, last, color}` per face and nothing else — no surface type, no radius,
+  no axis. So a radius cannot be read, it has to be **fitted** to the
+  tessellated triangles of a face group. That is more work and, as it turns out,
+  better: it works on any B-rep source, it degrades to an honest "not
+  measurable" on a face that fits nothing, and what it needs — an axis, a radius
+  and an extent per face — is exactly what holes and bosses need, so one piece
+  of work unlocks both remaining deliverables.
 
-**Exit criteria.** The drafted-frustum STEP fixture reports its draft exactly
-per face, not as an area distribution. The fillet fixture's radius is measured,
-not advised on. `corners` carries a non-zero weight, and the weight change is
-recorded in `docs/ASSESSMENT.md`'s scoring rationale rather than only in code.
+  It also needs a fixture with a curved face, which means `step-write.mjs`
+  learning `CYLINDRICAL_SURFACE` and a seam — the thing R2.1 deliberately left
+  out because nothing wanted one yet. Something wants one now.
+- **Holes and bosses as features.** *Still open*, and behind the fitting above
+  rather than behind anything else.
 
-**Risk.** Scope. "Feature recognition" can absorb a quarter with nothing
-shipped. The three deliverables above are worth having independently — draft,
-radii, cylinders — and should ship in that order, each on its own.
+**Exit criteria.** The drafted-frustum fixture reporting its draft exactly per
+face rather than as an area distribution is **met**: a 3° taper reads 3.000° on
+each of its four side faces and a box reads 0.00° on each of its. The fillet
+fixture's radius being measured, and `corners` carrying a non-zero weight, are
+**not** met and wait on the fitting work above.
+
+**Risk.** Scope — and the mitigation held. "Feature recognition" can absorb a
+quarter with nothing shipped, so the deliverables were taken in the order given
+and the first shipped on its own. Taking them in that order is also what
+surfaced the radius problem early, while it was still a re-plan rather than a
+half-built feature.
 
 ### R2.3 — The Inventor loop under test
 
@@ -474,7 +489,8 @@ is much cheaper once R2.2 has made faces and bodies first-class.
    fewer third-party runtime loads and the SRI question.
 4. **Does `corners`, once measurable, take weight from the other checks or widen
    the budget?** The eight default checks sum to exactly 100 today; both answers
-   are defensible and the choice should be recorded, not discovered.
+   are defensible and the choice should be recorded, not discovered. Still open:
+   radii are not measurable yet, so `corners` still carries `weight: 0`.
 
 ## Deliberately not on this roadmap
 

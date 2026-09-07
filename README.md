@@ -312,6 +312,30 @@ measurements there would invent findings: the sink check, which holds a
 per-triangle local thickness against the nominal, and the thin-gate advisory,
 which holds a single reading at the gate against the median.
 
+## Draft, measured per face
+
+An STL is a bag of triangles, so every measurement over one is a statistic: "42%
+of side-wall area is under the minimum" is the most a heap of triangles can say,
+and it leaves someone hunting for which wall. A STEP file — and therefore an
+`.ipt` — carries the faces the part was modelled with, and a face is the thing a
+designer can go and change. So where the geometry carries them, the draft check
+names them: *4 of 4 side faces are under 0.50° — face 2 0.00° (29% of side area,
+outer)*.
+
+Nothing is measured twice to do this. Draft per triangle, the inner/outer
+classification and the two-piece rule all run as before, and the per-face figure
+is those results grouped by face — which is what stops a face's angle and the
+area percentage from ever disagreeing. A test asserts they agree exactly.
+
+A face is only given a single angle when it really has one. Where a face's
+triangle normals fan out it is not a plane, and one number for it would be a
+fiction, so a curved face reports the range it spans instead.
+
+Both exports carry it, and both say **which** they measured: `measured_from` is
+`brep` or `mesh`. The same part through the two doors produces different records
+— not contradictory ones — and anyone comparing two exports needs to know which
+they are holding.
+
 ## Where to put the gate
 
 Flow length, and therefore the short-shot prediction, depends entirely on where

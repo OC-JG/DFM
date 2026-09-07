@@ -164,6 +164,14 @@ export function analyseMesh(geom, opts = {}) {
     if (effectiveDraft < minDraft * 0.5) sideAreaUnderHalf += a;
   }
 
+  /* Per-face draft, where the geometry carried faces to begin with. Nothing
+     here re-measures anything: it aggregates the per-triangle draft already
+     computed above, so a face's angle and the area statistic can never
+     disagree. See aggregateFaces. */
+  const faces = geom.faceGroups
+    ? aggregateFaces(geom, { triAreas, triFNorm, triPullDot, triDraft, triFaceSide, minDraft, isTwoPiece })
+    : null;
+
   if (onProgress) onProgress(0.4, 'Sampling wall thickness');
 
   // ── Wall thickness ───────────────────────────────────────────────────────
@@ -321,6 +329,12 @@ export function analyseMesh(geom, opts = {}) {
     triPullDot, triUndercut, triSinkRisk, triFaceSide,
 
     sideCount, sideArea,
+    /* Present only on a B-rep source. Null on STL, which has no faces to
+       group by — and the difference is reported rather than papered over,
+       because the same part measures differently through the two doors. */
+    faces,
+    faceDraft: faces ? summariseFaceDraft(faces) : null,
+    measuredFrom: faces ? 'brep' : 'mesh',
     sidePctUnderMin: sideArea > 0 ? (sideAreaUnderMin / sideArea) * 100 : 0,
     sidePctUnderHalf: sideArea > 0 ? (sideAreaUnderHalf / sideArea) * 100 : 0,
     outerArea, innerArea, outerAreaUnderMin, innerAreaUnderMin,
@@ -854,4 +868,136 @@ export function suggestPullDirection(geom, opts = {}) {
 
   void bbox;
   return { dir: best.dir, name: best.name, reason, ranked: scored };
+}
+
+/*
+ * ── Per-face aggregation ───────────────────────────────────────────────────
+ *
+ * An STL is a bag of triangles, so every measurement over it is a statistic:
+ * "42% of side-wall area is under the minimum" is the most a heap of triangles
+ * can say. A B-rep carries the faces the part was modelled with, and a face is
+ * the thing a designer can actually go and change — so where the geometry
+ * carries them, the same measurement becomes "this face, 0.3°".
+ *
+ * Nothing is re-measured here. Draft per triangle, the inner/outer
+ * classification and the two-piece rule have all already run above, and this
+ * only groups their results, which is what stops a face's angle and the area
+ * statistic from ever disagreeing with each other.
+ *
+ * Curvature is reported rather than averaged away. A face whose triangle
+ * normals fan out is not a plane, and quoting one angle for it would be a
+ * fiction — so `planar` gates whether a single number is offered, and a
+ * curved face reports the range it spans instead. Nothing produces a curved
+ * face yet; when radius measurement arrives it will, and this will already
+ * be telling the truth about it.
+ */
+
+/* Above this spread between a face's triangle normals, the face is not flat
+   and one angle does not describe it. Tessellation of a genuine plane comes
+   back well inside a thousandth of a degree, so this is loose enough to be
+   about geometry rather than about floating point. */
+export const FACE_PLANAR_TOL_DEG = 0.25;
+
+export function aggregateFaces(geom, ctx) {
+  const { triAreas, triFNorm, triPullDot, triDraft, triFaceSide, minDraft, isTwoPiece } = ctx;
+  const out = [];
+
+  for (const g of geom.faceGroups) {
+    let area = 0, nx = 0, ny = 0, nz = 0;
+    let innerArea = 0, sideArea = 0;
+    let draftSum = 0, draftMin = Infinity, draftMax = -Infinity;
+    let pullDotSum = 0;
+    let n = 0;
+
+    for (let t = g.first; t <= g.last; t++) {
+      const a = triAreas[t];
+      if (!(a > 0)) continue;          // degenerate triangles carry no direction
+      area += a;
+      n++;
+      nx += triFNorm[t * 3] * a; ny += triFNorm[t * 3 + 1] * a; nz += triFNorm[t * 3 + 2] * a;
+      pullDotSum += triPullDot[t] * a;
+      draftSum += triDraft[t] * a;
+      if (triDraft[t] < draftMin) draftMin = triDraft[t];
+      if (triDraft[t] > draftMax) draftMax = triDraft[t];
+      if (triFaceSide[t] === 1) innerArea += a;
+      if (Math.abs(triPullDot[t]) < 0.5) sideArea += a;
+    }
+
+    if (!n || area <= 0) continue;
+
+    const nLen = Math.hypot(nx, ny, nz) || 1;
+    const normal = [nx / nLen, ny / nLen, nz / nLen];
+
+    /* How far the flattest reading is from the most tilted one, as an angle
+       between triangle normals and the face's own. */
+    let devDeg = 0;
+    for (let t = g.first; t <= g.last; t++) {
+      if (!(triAreas[t] > 0)) continue;
+      const dot = triFNorm[t * 3] * normal[0] + triFNorm[t * 3 + 1] * normal[1] + triFNorm[t * 3 + 2] * normal[2];
+      const d = Math.acos(Math.max(-1, Math.min(1, dot))) * 180 / Math.PI;
+      if (d > devDeg) devDeg = d;
+    }
+
+    const planar = devDeg <= FACE_PLANAR_TOL_DEG;
+    const draftDeg = draftSum / area;
+    const isSide = sideArea > area * 0.5;
+    const effective = isTwoPiece ? Math.abs(draftDeg) : draftDeg;
+
+    out.push({
+      faceId: g.faceId,
+      bodyId: g.bodyId != null ? g.bodyId : 0,
+      triCount: n,
+      area,
+      normal,
+      pullDot: pullDotSum / area,
+      planar,
+      planarDevDeg: devDeg,
+      /* One angle only where one angle is true. */
+      draftDeg: planar ? draftDeg : null,
+      draftMinDeg: draftMin,
+      draftMaxDeg: draftMax,
+      side: innerArea > area * 0.5 ? 'inner' : 'outer',
+      kind: isSide ? 'side' : (normal[2] >= 0 ? 'top' : 'bottom'),
+      underMin: isSide && effective < minDraft,
+    });
+  }
+
+  return out;
+}
+
+/*
+ * The headline a per-face measurement buys: not how much area is short of
+ * draft, but which faces are, and by how much. Worst first, because that is
+ * the order someone fixes them in.
+ */
+export function summariseFaceDraft(faces) {
+  const sides = faces.filter((f) => f.kind === 'side');
+  const under = sides.filter((f) => f.underMin);
+  const sideArea = sides.reduce((a, f) => a + f.area, 0);
+  const underArea = under.reduce((a, f) => a + f.area, 0);
+
+  const worst = under
+    .slice()
+    .sort((a, b) => (Math.abs(a.draftDeg ?? a.draftMinDeg) - Math.abs(b.draftDeg ?? b.draftMinDeg))
+      || (b.area - a.area))
+    .slice(0, 5)
+    .map((f) => ({
+      faceId: f.faceId,
+      bodyId: f.bodyId,
+      draftDeg: f.draftDeg,
+      draftMinDeg: f.draftMinDeg,
+      draftMaxDeg: f.draftMaxDeg,
+      planar: f.planar,
+      side: f.side,
+      areaPct: sideArea > 0 ? (f.area / sideArea) * 100 : 0,
+    }));
+
+  return {
+    faceCount: faces.length,
+    sideFaceCount: sides.length,
+    underMinCount: under.length,
+    underMinAreaPct: sideArea > 0 ? (underArea / sideArea) * 100 : 0,
+    curvedSideCount: sides.filter((f) => !f.planar).length,
+    worst,
+  };
 }

@@ -166,6 +166,12 @@ export function weldGeometry(unindexedPos, triCount, opts = {}) {
     normals: computeVertexNormals(vertsArr, indices),
     triCount,
     vertCount: nextIdx,
+    /* Welding merges vertices across face boundaries, which destroys any
+       triangle-to-face mapping — so a welded mesh has none, and says so
+       rather than carrying a stale one. This costs nothing today: welding is
+       the STL path, and an STL never had faces. It would cost something the
+       day STEP geometry is routed through here, so route the mapping through
+       the merge rather than deleting this line. */
     faceGroups: null,
     bodies: null,
     weld: { tolerance: tol, exactMerges, nearMerges, cellsProbed },
