@@ -189,6 +189,11 @@ export function runDFM(input) {
       detail = `Stated draft ${manualDraft}° comfortably exceeds the ${requiredStr} required${because}.`;
     }
 
+    /* Where the part arrived as a B-rep, the same finding can name the faces
+       rather than only the percentage. A percentage tells someone there is a
+       problem; a face and an angle tell them what to go and change. */
+    const fd = mesh ? mesh.faceDraft : null;
+
     if (pctUnderMin !== null) {
       const moldTypeStr = input.moldType === 'single-pull' ? 'single-pull' : 'two-piece';
       const draftPhrase = input.moldType === 'single-pull' ? 'with proper draft direction' : '(either mould half)';
@@ -205,6 +210,23 @@ export function runDFM(input) {
       }
     }
 
+    if (fd && fd.sideFaceCount > 0) {
+      if (fd.underMinCount > 0) {
+        const named = fd.worst.map((f) => {
+          const ang = f.planar && f.draftDeg != null
+            ? `${Math.abs(f.draftDeg).toFixed(2)}°`
+            /* A curved face has no single angle, so it is quoted as the range
+               it spans rather than as an average nobody could measure. */
+            : `${Math.abs(f.draftMaxDeg).toFixed(2)}–${Math.abs(f.draftMinDeg).toFixed(2)}°`;
+          return `face ${f.faceId} ${ang} (${f.areaPct.toFixed(0)}% of side area, ${f.side})`;
+        }).join('; ');
+        const more = fd.underMinCount > fd.worst.length ? `, and ${fd.underMinCount - fd.worst.length} more` : '';
+        detail += ` The B-rep names them: ${fd.underMinCount} of ${fd.sideFaceCount} side faces are under ${requiredStr} — ${named}${more}.`;
+      } else {
+        detail += ` All ${fd.sideFaceCount} side faces in the B-rep clear ${requiredStr} individually.`;
+      }
+    }
+
     checks.push({
       key: 'draft', name: 'Draft angles', status, detail, severity,
       metrics: [
@@ -213,6 +235,9 @@ export function runDFM(input) {
         textureAllowance > 0.005 ? ['Texture allowance', `+${textureAllowance.toFixed(2)}° (${finishName})`] : null,
         ['Required', requiredStr],
         pctUnderMin !== null ? [`Area <${requiredStr}`, `${pctUnderMin.toFixed(1)}%`] : null,
+        fd ? ['Side faces', `${fd.underMinCount} of ${fd.sideFaceCount} under minimum`] : null,
+        fd && fd.curvedSideCount ? ['Curved side faces', `${fd.curvedSideCount} (reported as a range)`] : null,
+        mesh && mesh.measuredFrom ? ['Measured from', mesh.measuredFrom === 'brep' ? 'B-rep faces' : 'mesh triangles'] : null,
         pctUnderMin !== null ? [`Area <${(required / 2).toFixed(2)}°`, `${mesh.sidePctUnderHalf.toFixed(1)}%`] : null,
       ].filter(Boolean),
     });

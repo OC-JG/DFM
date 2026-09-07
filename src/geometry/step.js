@@ -38,9 +38,18 @@ export function loadOcct() {
   return occtPromise;
 }
 
-export async function parseSTEP(buffer, onProgress) {
+/*
+ * `occtOverride` is a test seam, and the reason it exists is worth stating:
+ * .ipt now arrives through this function (main.js routes an Inventor part
+ * here), so this is the tool's primary input path, and until it had one it
+ * was also the only path with no automated coverage. loadOcct needs a DOM to
+ * inject its script tag, which a Node test does not have, so a test passes
+ * the module in and exercises everything after it. Nothing in the app
+ * supplies this argument.
+ */
+export async function parseSTEP(buffer, onProgress, occtOverride) {
   if (onProgress) onProgress(0.05, 'Loading OpenCascade');
-  const occt = await loadOcct();
+  const occt = occtOverride || await loadOcct();
 
   if (onProgress) onProgress(0.3, 'Tessellating B-rep');
   const result = occt.ReadStepFile(new Uint8Array(buffer), {

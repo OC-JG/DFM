@@ -29,6 +29,12 @@ jobs:
       - name: Unit tests
         run: npm run test:unit
 
+      # .ipt arrives as STEP, so this covers the tool's primary input path.
+      # Needs the OpenCascade reader from node_modules but no browser, so it
+      # runs before the Chromium download rather than after it.
+      - name: STEP path
+        run: npm run test:step
+
       # dfm-tool.html is the deliverable and is committed to the repository. A
       # source-only commit would otherwise ship a stale one, silently.
       - name: Built artifact matches src/

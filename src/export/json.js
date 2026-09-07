@@ -122,6 +122,32 @@ function meshSummary(a) {
     mould_type: a.moldType,
     effective_min_draft_deg: a.minDraft,
     sidewall_area_under_min_draft_pct: a.sidePctUnderMin,
+    /* Where the measurement came from. A B-rep source is measured per face
+       and a mesh source can only be measured statistically, so the same part
+       through the two doors produces different — not contradictory — records,
+       and a consumer comparing two exports needs to know which it has. */
+    measured_from: a.measuredFrom || 'mesh',
+    /* The named faces, present only on a B-rep source. Deliberately the
+       summary and the worst offenders rather than every face: a real part has
+       thousands, and a JSON record that lists them all is one nobody opens. */
+    draft_by_face: a.faceDraft ? {
+      face_count: a.faceDraft.faceCount,
+      side_face_count: a.faceDraft.sideFaceCount,
+      under_min_count: a.faceDraft.underMinCount,
+      under_min_area_pct: a.faceDraft.underMinAreaPct,
+      curved_side_count: a.faceDraft.curvedSideCount,
+      worst: a.faceDraft.worst.map((f) => ({
+        face_id: f.faceId,
+        body_id: f.bodyId,
+        /* null on a curved face, where one angle would be a fiction; the
+           range is always given. */
+        draft_deg: f.draftDeg,
+        draft_range_deg: [f.draftMinDeg, f.draftMaxDeg],
+        planar: f.planar,
+        side: f.side,
+        side_area_pct: f.areaPct,
+      })),
+    } : null,
     wall_median_mm: a.wallStats.median,
     wall_p25_mm: a.wallStats.p25,
     wall_p75_mm: a.wallStats.p75,

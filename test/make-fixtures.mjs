@@ -1,10 +1,13 @@
 /*
- * Generates the binary STL fixtures the smoke test drives the app with.
+ * Generates the fixtures the smoke test drives the app with: binary STLs, and
+ * a STEP file so the browser exercises the path an .ipt actually takes.
  * Run: node test/make-fixtures.mjs
  */
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { writeStepSolids } from './lib/step-write.mjs';
+import { stepCup, stepTwoBodies } from './lib/solids.mjs';
 
 const OUT_DIR = join(dirname(fileURLToPath(import.meta.url)), 'fixtures');
 
@@ -83,3 +86,15 @@ console.log('part.stl        ', writeBinarySTL(join(OUT_DIR, 'part.stl'), part),
 console.log('overmould.stl   ', writeBinarySTL(join(OUT_DIR, 'overmould.stl'), overmould), 'triangles');
 console.log('part-inches.stl ', writeBinarySTL(join(OUT_DIR, 'part-inches.stl'), inchPart), 'triangles');
 console.log('part-open.stl   ', writeBinarySTL(join(OUT_DIR, 'part-open.stl'), openPart), 'triangles');
+
+/* STEP, from the same analytic solids test/step.mjs measures in Node: the
+   same 40x30x20 shelled box with a 2 mm wall, and a two-solid file for the
+   body selector. The browser gets the real B-rep path, not a mesh. */
+for (const [name, solids] of [
+  ['part.step', [stepCup([40, 30, 20], 2)]],
+  ['part-twobody.step', stepTwoBodies().solids],
+]) {
+  const text = writeStepSolids(solids, name.replace('.step', ''));
+  writeFileSync(join(OUT_DIR, name), text);
+  console.log(`${name.padEnd(16)} ${text.split('\n').length} lines`);
+}

@@ -85,8 +85,8 @@ in — those ran roughly to estimate, which is the only reason to trust these.
 
 | | Milestone | Effort | Blocks / blocked by |
 |---|---|---|---|
-| R2.1 | Trust the STEP path | 3–5 d | Blocks R2.2, R2.3 |
-| R2.2 | Features, not triangles | 1–2 wk | Needs R2.1 |
+| R2.1 | Trust the STEP path | ~~3–5 d~~ done | Unblocked R2.2, R2.3 |
+| R2.2 | Features, not triangles | draft done | radii re-planned |
 | R2.3 | The Inventor loop under test | 4–6 d | Needs R2.1 |
 | R2.4 | Numbers that get quoted | 1 wk + a decision | Needs a moulding engineer |
 | R2.5 | Two-shot and FPC earn their weights | 1–2 wk | Needs R2.2 for the FPC region |
@@ -94,82 +94,116 @@ in — those ran roughly to estimate, which is the only reason to trust these.
 | R2.7 | Navigation for people who navigate for a living | 1–2 wk | Independent |
 | — | Release discipline | 2–3 d | Independent, do first |
 
-### R2.1 — Trust the STEP path
+### R2.1 — Trust the STEP path *(done)*
 
-**Why now.** It is the primary input path and it is untested (gap 1), and it is
-the prerequisite for both of the next two milestones: per-face measurement needs
-a STEP fixture to assert against, and the bridge test needs a STEP payload to
-return.
+**What shipped.** `test/step.mjs` — 23 assertions over the path an `.ipt`
+actually takes — plus the two pieces that make it possible and four checks in
+the browser suite. `npm run test:step`, and CI runs it after the unit tests and
+before the Chromium download.
 
-**What ships.**
+- **The reader is a pinned devDependency, not a vendored blob.** The plan here
+  said to copy the ~6 MB OpenCascade module into `test/vendor/`. It did not need
+  copying: the module the tool fetches from a CDN *is* an npm package, so
+  `occt-import-js` is pinned at `0.0.23` — the same version the artifact
+  requests — and the existing `npm ci` covers it. Nothing was added to git, and
+  the shipped artifact's lazy CDN load is untouched.
+- **The fixtures are authored, not exported**, and this turned out to be the
+  interesting part. `occt-import-js` is a reader: it cannot write STEP, so a
+  fixture could not simply be exported from the kernel under test. So
+  `test/lib/step-write.mjs` emits a real AP214 file — proper shared topology,
+  every edge one `EDGE_CURVE` used `.T.` in one face and `.F.` in the other,
+  because OpenCascade will read a sloppier file and quietly hand back a shell
+  with cracks in it. `test/lib/solids.mjs` defines the solids analytically, the
+  way `shapes.mjs` does for meshes. A 3° taper is 3° because it was written as
+  `tan(3°)`, not because a kernel wrote it out and read it back and agreed with
+  itself.
+- **A test seam in `parseSTEP`.** `loadOcct` needs a DOM to inject its script
+  tag, so the function takes an optional module argument that nothing in the app
+  supplies. Eleven lines, and the reason it exists is written above it.
+- **Four fixtures**: a box (six faces, 0° draft — the part the draft check must
+  fail), a tapered box (four sides at exactly 3°), a shelled box with a 2 mm
+  wall, and two solids in one file.
+- **In the browser too.** The smoke suite now serves the OpenCascade reader and
+  its wasm from `node_modules` and drives `part.step` through load, analysis and
+  the wall reading, then a two-solid file through the body selector. Node proves
+  the parsing; only a browser shows the reader loading lazily over the wire and
+  landing in the viewer.
 
-- A decision on the OpenCascade WASM module, which is what has blocked this
-  since Phase 3. It is ~6 MB, loaded lazily from a CDN, and is not in
-  `devDependencies`. The choice is to vendor it into `test/vendor/` for the test
-  run only — leaving the shipped artifact's lazy CDN load exactly as it is — or
-  to write a small STEP reader for the test harness alone. Vendoring for tests
-  is the recommendation: the alternative is a second implementation of the thing
-  under test, which is the mistake `test/lib/reference.mjs` avoids by being
-  written from the *definition*, not from a parser.
-- Analytic STEP fixtures alongside the STL ones in `test/lib/shapes.mjs`: a
-  drafted frustum whose per-face draft is known exactly, a hollow cylinder of
-  known wall, a two-body assembly, and a part with a known fillet radius. Same
-  discipline as the STL fixtures — each with an answer derived from the geometry
-  rather than from a previous run.
-- Unit coverage of `src/geometry/step.js` proper: index remapping across merged
-  bodies, `faceGroups` triangle ranges landing on the right triangles, the
-  `bodies` array only appearing for multi-body files (`step.js:120`), and the
-  `hasOcctNormals` fallback path.
-- The smoke test drives a STEP file end to end, not just an STL.
+**Exit criteria, met.** The face ranges partition every triangle exactly once;
+every triangle in a face group is coplanar with its face to 1e-6 — the property
+R2.2 rests on, and the difference between a label and a real mapping; a 3° taper
+reads 3.000° per face; the same solid measured as a B-rep and as triangulated
+soup agrees on volume, surface area and wall to 0.1%.
 
-**Exit criteria.** A deliberate off-by-one in `step.js`'s index remapping fails
-the unit suite. STEP and STL of the same nominal part agree on wall thickness
-and mass to within tessellation tolerance, and that agreement is asserted.
+And the criterion that mattered most — that a deliberate off-by-one fails —
+was checked by making three of them rather than by assuming. A wrong vertex
+offset in the merge fails six assertions, a face-group range off by one fails
+three, and a body range off by one fails one. The body fixture puts its two
+boxes 20 mm apart along x specifically so a wrong offset lands a triangle in
+the neighbouring solid and cannot be mistaken for rounding.
 
-**Risk.** The OpenCascade build is the one dependency in the tree nobody has
-pinned or vendored, and its API is not stable across versions. Pin an exact
-build in the same breath as vendoring it.
+**Still open from this milestone.** Nothing blocking, but two things were
+deliberately not done: curved surfaces (a cylindrical face needs a seam and a
+`CYLINDRICAL_SURFACE`, and no test wants one until R2.2 measures radii), and
+`BREP_WITH_VOIDS` (the shelled fixture is an open-topped cup, one closed shell,
+which is what a moulded part looks like anyway).
 
 ### R2.2 — Features, not triangles
 
 **Why now.** This is the largest single capability unlock in the repo, the data
-is already being computed and discarded (gap 2), and the documentation already
-claims part of it.
+is already being computed and discarded (gap 2), the documentation already
+claims part of it — and R2.1 has now put a fixture under it, so there is
+something trustworthy to assert a per-face measurement against.
 
 **What ships.**
 
-- `faceGroups` survives into analysis. Today it is produced in
-  `src/geometry/step.js` and read nowhere; `src/analysis/mesh.js` should take it
-  as an optional input and, where present, aggregate per-face rather than
-  per-triangle. Note that `src/geometry/weld.js:169` sets `faceGroups: null`
-  unconditionally — welding destroys the mapping. The STL path is unaffected
-  because it never had face groups, but if welding is ever applied to STEP
-  geometry the mapping has to be carried through the merge rather than dropped.
-- **Draft per face.** A B-rep face has one draft angle; a tessellation of it has
-  hundreds of slightly different ones, and a finding reported as "4% of side-wall
-  area under minimum" is much less actionable than "this face, 0.3°". This also
-  makes the README's existing claim true.
-- **Corner radii, measured.** Cylindrical and toroidal faces in the STEP data
-  give radii directly. The `corners` check moves off `weight: 0`
-  (`src/rules/scoring.js:82`) and becomes a scored check with a real threshold —
-  and its weight has to be re-derived against the other checks rather than
-  invented, since the eight default checks currently sum to exactly 100.
-- **Holes and bosses as features.** A cylindrical face with an axis is a hole or
-  a boss; today both are inferred from triangle clusters. This sharpens the rib
-  and boss rules and gives the undercut classifier a better question to ask.
-- A statement, in the check output, of which measurements came from B-rep and
-  which from the mesh — because the same part dropped as STL will now score
-  differently from the same part arriving as `.ipt`, and a user comparing the
-  two deserves to be told why rather than left to discover it.
+- **`faceGroups` survives into analysis.** *(done)* `analyseMesh` takes
+  `geom.faceGroups` when the source carried it and aggregates the per-triangle
+  results by face. Nothing is re-measured: draft per triangle, the inner/outer
+  ray classification and the two-piece rule all run as before, and a test
+  asserts the per-face verdict and the area statistic agree to 1e-6 — they are
+  one measurement grouped two ways, and if that ever stops being true the test
+  says so. `src/geometry/weld.js` still nulls `faceGroups`, which is correct
+  (welding merges vertices across face boundaries and destroys the mapping) and
+  now carries a comment saying to route the mapping through the merge rather
+  than delete the line.
+- **Draft per face.** *(done)* The check names them: *4 of 4 side faces are
+  under 0.50° — face 2 0.00° (29% of side area, outer)*. A face is given a
+  single angle only where it has one; a face whose triangle normals fan out
+  reports the range it spans instead, because one number for a curved face
+  would be a fiction. This makes the README's existing claim true.
+- **Provenance, stated.** *(done)* `measured_from` is `brep` or `mesh`, in the
+  check's own metrics and in the JSON export. The same part through the two
+  doors produces different records — not contradictory ones — and a consumer
+  comparing two exports needs to know which it holds.
+- **Corner radii, measured.** *Still open, and the plan for it was wrong.* This
+  section said cylindrical and toroidal faces in the STEP data give radii
+  directly. They do not, through this reader: `occt-import-js` returns
+  `{first, last, color}` per face and nothing else — no surface type, no radius,
+  no axis. So a radius cannot be read, it has to be **fitted** to the
+  tessellated triangles of a face group. That is more work and, as it turns out,
+  better: it works on any B-rep source, it degrades to an honest "not
+  measurable" on a face that fits nothing, and what it needs — an axis, a radius
+  and an extent per face — is exactly what holes and bosses need, so one piece
+  of work unlocks both remaining deliverables.
 
-**Exit criteria.** The drafted-frustum STEP fixture reports its draft exactly
-per face, not as an area distribution. The fillet fixture's radius is measured,
-not advised on. `corners` carries a non-zero weight, and the weight change is
-recorded in `docs/ASSESSMENT.md`'s scoring rationale rather than only in code.
+  It also needs a fixture with a curved face, which means `step-write.mjs`
+  learning `CYLINDRICAL_SURFACE` and a seam — the thing R2.1 deliberately left
+  out because nothing wanted one yet. Something wants one now.
+- **Holes and bosses as features.** *Still open*, and behind the fitting above
+  rather than behind anything else.
 
-**Risk.** Scope. "Feature recognition" can absorb a quarter with nothing
-shipped. The three deliverables above are worth having independently — draft,
-radii, cylinders — and should ship in that order, each on its own.
+**Exit criteria.** The drafted-frustum fixture reporting its draft exactly per
+face rather than as an area distribution is **met**: a 3° taper reads 3.000° on
+each of its four side faces and a box reads 0.00° on each of its. The fillet
+fixture's radius being measured, and `corners` carrying a non-zero weight, are
+**not** met and wait on the fitting work above.
+
+**Risk.** Scope — and the mitigation held. "Feature recognition" can absorb a
+quarter with nothing shipped, so the deliverables were taken in the order given
+and the first shipped on its own. Taking them in that order is also what
+surfaced the radius problem early, while it was still a re-plan rather than a
+half-built feature.
 
 ### R2.3 — The Inventor loop under test
 
@@ -430,10 +464,10 @@ for, and it has no automated coverage today.
 Release discipline first, because it is cheap and because a tagged build is what
 makes every later change traceable.
 
-Then R2.1, because it unblocks the two milestones after it and because the
-largest untested surface in the repo is also the most-used one. R2.2 and R2.3 can
-then run in parallel — they touch different directories and share only the STEP
-fixture — with R2.6 as filler for either, since it depends on nothing.
+R2.1 is done, which unblocks the two milestones after it. R2.2 and R2.3 can now
+run in parallel — they touch different directories and share only the STEP
+fixture, which exists — with R2.6 as filler for either, since it depends on
+nothing.
 
 R2.7 depends on nothing and competes with nothing — it is viewer code, and the
 only file it shares with any other milestone is `src/app/camera.js`, which none
@@ -448,13 +482,15 @@ is much cheaper once R2.2 has made faces and bodies first-class.
 
 1. **`coolK`: half-wall or full wall?** Factor-of-four consequence. Gates cycle
    time and everything costed from it.
-2. **The OpenCascade module: vendor it for tests, or not?** Gates the STEP
-   fixture, and through it most of R2.1 and R2.2.
+2. ~~**The OpenCascade module: vendor it for tests, or not?**~~ *Settled in
+   R2.1: neither. It is an npm package, so it is a pinned devDependency and
+   nothing was committed to git.*
 3. **`--vendor` as the committed default?** Trades 900 kB of file size for two
    fewer third-party runtime loads and the SRI question.
 4. **Does `corners`, once measurable, take weight from the other checks or widen
    the budget?** The eight default checks sum to exactly 100 today; both answers
-   are defensible and the choice should be recorded, not discovered.
+   are defensible and the choice should be recorded, not discovered. Still open:
+   radii are not measurable yet, so `corners` still carries `weight: 0`.
 
 ## Deliberately not on this roadmap
 

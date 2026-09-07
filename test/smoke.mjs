@@ -71,18 +71,26 @@ async function main() {
   const vendored = {
     'three.min.js': join(ROOT, 'node_modules/three/build/three.min.js'),
     'jspdf.umd.min.js': join(ROOT, 'node_modules/jspdf/dist/jspdf.umd.min.js'),
+    /* The OpenCascade reader, so a STEP file can be driven through the real
+       browser path. Both halves are needed: the loader script, and the wasm
+       it then fetches beside itself — and the wasm has to arrive as
+       application/wasm or instantiateStreaming refuses it. */
+    'occt-import-js.js': join(ROOT, 'node_modules/occt-import-js/dist/occt-import-js.js'),
+    'occt-import-js.wasm': join(ROOT, 'node_modules/occt-import-js/dist/occt-import-js.wasm'),
   };
-  await page.route(/^https:\/\/(cdnjs\.cloudflare\.com|cdn\.jsdelivr\.net)\//, (route) => {
-    const url = route.request().url();
-    const hit = Object.keys(vendored).find((name) => url.endsWith(name));
-    if (!hit) return route.abort();
-    if (!existsSync(vendored[hit])) return route.abort();
+
+  /* One handler, used by every page the test opens, so a new vendored file
+     does not have to be remembered in three places. */
+  const serveVendored = (route) => {
+    const hit = Object.keys(vendored).find((name) => route.request().url().endsWith(name));
+    if (!hit || !existsSync(vendored[hit])) return route.abort();
     return route.fulfill({
       status: 200,
-      contentType: 'application/javascript',
+      contentType: hit.endsWith('.wasm') ? 'application/wasm' : 'application/javascript',
       body: readFileSync(vendored[hit]),
     });
-  });
+  };
+  await page.route(/^https:\/\/(cdnjs\.cloudflare\.com|cdn\.jsdelivr\.net)\//, serveVendored);
   /* Fonts are decoration. Answer them with an empty stylesheet rather than
      aborting, so a blocked request does not masquerade as an app error. */
   await page.route(/^https:\/\/fonts\.(googleapis|gstatic)\.com\//, (route) =>
@@ -279,12 +287,7 @@ async function main() {
     // The panel that has to be read before the score is. Driven on a fresh
     // page so it cannot be confused with the state the run above left behind.
     const healthPage = await browser.newPage({ viewport: { width: 1600, height: 1000 } });
-    await healthPage.route(/^https:\/\/(cdnjs\.cloudflare\.com|cdn\.jsdelivr\.net)\//, (route) => {
-      const hit = Object.keys(vendored).find((name) => route.request().url().endsWith(name));
-      return hit
-        ? route.fulfill({ status: 200, contentType: 'application/javascript', body: readFileSync(vendored[hit]) })
-        : route.abort();
-    });
+    await healthPage.route(/^https:\/\/(cdnjs\.cloudflare\.com|cdn\.jsdelivr\.net)\//, serveVendored);
     await healthPage.route(/^https:\/\/fonts\./, (route) => route.fulfill({ status: 200, contentType: 'text/css', body: '' }));
     await healthPage.goto(url, { waitUntil: 'networkidle' });
 
@@ -338,12 +341,7 @@ async function main() {
     // refuses blob-backed workers. That fallback is the common case, not an
     // edge case, so it gets asserted: same inputs, same score.
     const fallbackPage = await browser.newPage({ viewport: { width: 1600, height: 1000 } });
-    await fallbackPage.route(/^https:\/\/(cdnjs\.cloudflare\.com|cdn\.jsdelivr\.net)\//, (route) => {
-      const hit = Object.keys(vendored).find((name) => route.request().url().endsWith(name));
-      return hit
-        ? route.fulfill({ status: 200, contentType: 'application/javascript', body: readFileSync(vendored[hit]) })
-        : route.abort();
-    });
+    await fallbackPage.route(/^https:\/\/(cdnjs\.cloudflare\.com|cdn\.jsdelivr\.net)\//, serveVendored);
     await fallbackPage.route(/^https:\/\/fonts\./, (route) => route.fulfill({ status: 200, contentType: 'text/css', body: '' }));
     await fallbackPage.addInitScript(() => {
       window.Worker = function () { throw new Error('workers blocked (simulating file:// origin)'); };
@@ -359,6 +357,46 @@ async function main() {
     const fallbackScore = Number(await fallbackPage.textContent('#scoreValue'));
     check('fallback produces the same score', fallbackScore === score, `worker=${score} inline=${fallbackScore}`);
     await fallbackPage.close();
+
+    // ── the STEP path, in a real browser ──────────────────────────────────
+    // An .ipt reaches parseSTEP by the same road a dropped .step does, so
+    // this is the tool's primary input and it had never been driven here.
+    // Node covers the parsing in test/step.mjs; what only a browser can show
+    // is that the reader loads lazily over the wire, tessellates, and lands
+    // in the viewer with its bodies and its measurements intact.
+    const stepPage = await browser.newPage({ viewport: { width: 1600, height: 1000 } });
+    await stepPage.route(/^https:\/\/(cdnjs\.cloudflare\.com|cdn\.jsdelivr\.net)\//, serveVendored);
+    await stepPage.route(/^https:\/\/fonts\./, (route) => route.fulfill({ status: 200, contentType: 'text/css', body: '' }));
+    await stepPage.goto(url, { waitUntil: 'networkidle' });
+
+    await stepPage.setInputFiles('#fileInput', join(FIXTURES, 'part.step'));
+    await stepPage.waitForFunction(
+      () => document.getElementById('statusPill').textContent.includes('LOADED'), null, { timeout: 90000 });
+    check('STEP file loads in the browser',
+      (await stepPage.textContent('#fileInfo')).includes('part.step'),
+      (await stepPage.textContent('#fileInfo')).slice(0, 120));
+
+    await stepPage.click('#runBtn');
+    await stepPage.waitForFunction(
+      () => document.getElementById('resultStatus').textContent === 'complete', null, { timeout: 90000 });
+
+    const stepScore = Number(await stepPage.textContent('#scoreValue'));
+    check('STEP analysis produces a score', Number.isFinite(stepScore) && stepScore >= 0 && stepScore <= 100, `score=${stepScore}`);
+
+    /* The fixture is the same 40x30x20 shelled box as part.stl, authored as a
+       B-rep instead of as triangles, so the wall it reports has a right
+       answer and it is the same one the STL gives. */
+    const stepWall = await stepPage.locator('#checksList .check', { hasText: 'Wall thickness' }).first().textContent();
+    check('STEP part measures its 2 mm wall', /2\.0\d mm/.test(stepWall), stepWall.slice(0, 140));
+
+    await stepPage.setInputFiles('#fileInput', join(FIXTURES, 'part-twobody.step'));
+    await stepPage.waitForFunction(
+      () => document.getElementById('statusPill').textContent.includes('LOADED'), null, { timeout: 90000 });
+    check('a two-solid STEP file offers the body selector',
+      await stepPage.locator('#bodiesSection').count() > 0
+      && (await stepPage.locator('#bodiesList .body-row, #bodiesList > *').count()) >= 2,
+      `rows=${await stepPage.locator('#bodiesList > *').count()}`);
+    await stepPage.close();
   } finally {
     await browser.close();
     server.close();
