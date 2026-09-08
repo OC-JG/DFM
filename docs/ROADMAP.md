@@ -579,7 +579,13 @@ mouse — **unverified**, for want of hardware.
 
 ### Release discipline
 
-**Do this first — it is two or three days and everything else benefits.**
+**Done, last rather than first.** It was estimated at two or three days and it
+was cheap, but "cheap" turned out to be the wrong word: five of its seven items
+turned up a defect, two of those were defects in checks that were reporting
+green, and three of its stated premises did not survive contact — `-diff` on
+the built file would have hidden the diff that diagnosed the build, the PDF was
+never affected by the webfonts, and CI cannot fail on a benchmark at all. Each
+item below records what shipped and what it found.
 
 - **A deterministic build, and the two suites its failure was hiding.**
   *(done — #6)* `verify:build` had been red on `main` since 2026-08-25, and not
@@ -808,26 +814,80 @@ mouse — **unverified**, for want of hardware.
   One thing fell out: `--vendor`'s preconnect strip is gone, because there are
   no preconnects left to strip. It was the line whose existence once let a
   length-based check pass while leaving the three.js tag in place.
-- **The CDN question.** SRI hashes were considered and deliberately not added
-  blind — a wrong `integrity` attribute kills the page and the hashes must come
-  from the bytes the CDN actually serves. Whoever has network access should
-  compute them and confirm the tool still boots. Worth weighing against the
-  alternative: making `--vendor` the committed default removes two of the three
-  runtime loads and the SRI question with them, at 1.4 MB instead of 500 kB. The
-  STEP reader stays lazy and remote either way, so the exposure narrows rather
-  than closing.
+- **The CDN question.** *(the tooling and the weighing, done. The hashes,
+  still blocked — and now with the evidence rather than the assumption.)*
+
+  **Measured: `cdnjs.cloudflare.com` and `cdn.jsdelivr.net` both answer 403 to
+  CONNECT at this environment's proxy.** So the hashes cannot be computed here,
+  and hashing the `node_modules` copies would be exactly the guess this item
+  warned against — a bet that the npm tarball and the CDN's build are
+  byte-identical, staked on the viewer appearing at all.
+
+  `npm run sri` is the missing half made executable. It fetches all three,
+  prints the `sha384` attribute for each and **where each one goes** — which is
+  the part that was not written down anywhere: three URLs in three files, one a
+  static `<script>` that also needs `crossorigin="anonymous"` (without which a
+  cross-origin response is opaque and the check fails whatever the hash says),
+  and two set on script elements a loader creates. It also reports whether the
+  served bytes matched the `node_modules` copy, which is the piece of evidence
+  nobody has had and which settles whether the shortcut was ever safe. It
+  writes nothing, deliberately: nothing lands that has not been read and then
+  confirmed by opening the file.
+
+  One caveat the item did not have: the OpenCascade loader fetches a `.wasm` of
+  its own afterwards, from a URL an `integrity` on the loader does not cover.
+  Pinning the loader is worth doing and is not the whole job.
+
+  Four assertions hold it together, and two of them matter more than they look.
+  The attribute is base64 of the *digest bytes*, checked against FIPS 180-4's
+  own SHA-384 example converted independently — base64 of the hex text is 96
+  characters of plausible nonsense no browser will match and nothing but a
+  test can tell apart. And the list of URLs is held against `src/` in both
+  directions, because a version bumped in one of three files leaves a stale
+  hash in another and the only thing that notices is a blank page.
+
+  **The alternative, re-measured.** Making `--vendor` the committed default
+  removes two of the three runtime loads and the SRI question with them. The
+  cost is no longer the "1.4 MB instead of 500 kB" above: it is now
+  **1,918,750 bytes against 950,663** — 1.87 MB against 928 kB, a factor of
+  2.02. The comparison also changed shape while this milestone ran, in a way
+  that argues *for* the vendored default: with the fonts embedded, those three
+  CDN loads are the only thing the default build reaches for at all, so
+  vendoring would take a file with three remote dependencies down to one
+  (the STEP reader, which is 6 MB and stays lazy and remote either way).
+
+  Not switched, because the deliverable is a file people email and 1.87 MB is
+  a different kind of attachment from 928 kB — and that is a judgement about
+  how the tool is handed around rather than a technical one, so it belongs to
+  whoever hands it around. Both routes are now one command away: `npm run sri`
+  for the hashes, or `--vendor` in the build script for the other.
 
 ---
 
 ## Sequencing, and why this order
 
-Release discipline first, because it is cheap and because a tagged build is what
-makes every later change traceable.
+Release discipline was meant to come first, "because it is cheap and because a
+tagged build is what makes every later change traceable". It came last, and the
+prediction was half right: it *was* cheap, and it would have been worth more
+earlier — the changelog it produced had to reconstruct 48 commits of score
+movements from their commit messages, which is work that would have been free
+if the file had existed while they landed. The half that was wrong is "cheap":
+five of its seven items turned up a defect, and two of those were defects in
+the checks themselves.
 
-R2.1 to R2.7 are done, bar two things that need something this environment
-does not have: R2.5's sixteen Vicat values need datasheet access, and R2.7's
-device layer needs a SpaceMouse plugged in. Both are recorded at their
-milestones. What remains that needs neither is release discipline, below.
+R2.1 to R2.7 and release discipline are all done, bar three things that need
+something a keyboard cannot supply and one that is a judgement rather than a
+task:
+
+- R2.5's sixteen Vicat softening points need datasheet access, which this
+  environment does not have.
+- R2.7's device layer needs a SpaceMouse plugged in for half an hour.
+- The SRI hashes need a machine that can reach cdnjs and jsdelivr, which both
+  answer 403 here. `npm run sri` does the rest of that job.
+- The first tag is a version number, which is a promise about what the tool is
+  and belongs to whoever makes it. Everything mechanical around it is in place.
+
+Each is recorded at its own milestone with what is missing and what to run.
 
 The sequencing held up, and two of its predictions are worth keeping for the
 next roadmap.

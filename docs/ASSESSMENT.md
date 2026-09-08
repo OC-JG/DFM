@@ -984,6 +984,12 @@ environment cannot reach those hosts to compute them, and deriving them from the
 are byte-identical. Guessing wrong takes the viewer out entirely. Whoever adds
 them should fetch the real files and check the tool still boots afterwards.
 
+*Since this was written, `npm run sri` does the fetching, the hashing and the
+saying-where — three URLs across three files, one of which also needs
+`crossorigin="anonymous"` or the check fails whatever the hash says. It still
+needs a machine that can reach the two CDNs; this one answers 403 to both,
+which is now measured rather than assumed.*
+
 ### Costs
 
 A run on a 96k-triangle part has gone from 1,469 ms to 2,531 ms — about +72%,

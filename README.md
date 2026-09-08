@@ -79,6 +79,7 @@ npm run test:bridge    # the Inventor loop, against a fake InventorMCP
 npm run test:perf      # the work budget: rays, BVH nodes and triangles tested
 npm run test:offline   # proves the --vendor build runs with no network at all
 npm run verify:build   # asserts the committed dfm-tool.html matches src/
+npm run sri            # the integrity attributes for the three CDN loads (needs network)
 ```
 
 `npm install` brings in the Playwright library but not a browser binary, which

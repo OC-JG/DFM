@@ -170,6 +170,10 @@ until it was settled.
   hang above — that no async test's result is dropped.
 - **`verify:build`** rebuilds `dfm-tool.html` and fails if it differs from the
   committed copy, so a source-only commit cannot ship a stale deliverable.
+- **`npm run sri`**, which prints the subresource-integrity attribute for each
+  of the three runtime CDN loads and says where each one goes. The attributes
+  are not in the source yet: they have to come from the bytes the CDN actually
+  serves, and a wrong one is a blank viewer rather than a warning.
 - **A performance budget** (`test/perf.mjs`). It budgets the work the analysis
   asks for — rays cast, BVH nodes visited, triangles tested, which are the same
   integers on every machine — rather than the time it takes, which on an idle

@@ -11,7 +11,7 @@
  * No browser, no network, no build step. Run: node test/unit.mjs
  */
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -48,6 +48,7 @@ import {
 import { analyseInterface } from '../src/analysis/interface.js';
 import { analyseFpcRegion, FPC_SAMPLES, MAX_CROSSINGS } from '../src/analysis/fpc.js';
 import { tagVersion, isPrerelease, section, releaseProblems, releaseNotes } from '../release.js';
+import { sriHash, RUNTIME_LOADS } from '../sri.js';
 import { castRayAll } from '../src/geometry/bvh.js';
 import { effectiveMinDraft } from '../src/core/finishes.js';
 import { MATERIALS, MATERIAL_ORDER } from '../src/core/materials.js';
@@ -3623,6 +3624,70 @@ describe('build identity');
     assert(gate > 0, 'the release workflow does not run the release gate');
     assert(browser > 0, 'the release workflow does not install a browser');
     assert(gate < browser, 'the release gate runs after the browser download');
+  });
+}
+
+// ── subresource integrity ──────────────────────────────────────────────────
+
+{
+  describe('sri: the hash, and the list of what needs one');
+
+  await it('the attribute is base64 of the digest bytes, not of its hex text', () => {
+    /* FIPS 180-4's own SHA-384 example, quoted as hex, converted here rather
+       than taken from the implementation under test. This is the mistake the
+       encoding invites: base64 of the hex string is 96 characters of
+       plausible-looking nonsense that no browser will ever match, and it
+       cannot be told from the real thing by looking. */
+    const FIPS_ABC = 'cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed'
+      + '8086072ba1e7cc2358baeca134c825a7';
+    const expected = `sha384-${Buffer.from(FIPS_ABC, 'hex').toString('base64')}`;
+    eq(sriHash(Buffer.from('abc', 'utf8')), expected, 'SHA-384 of "abc":');
+    /* And the wrong encoding is demonstrably different, so the test above is
+       not passing by accident. */
+    assert(sriHash(Buffer.from('abc', 'utf8')) !== `sha384-${Buffer.from(FIPS_ABC, 'utf8').toString('base64')}`,
+      'the hex-text encoding and the digest-bytes encoding came out the same, which cannot be');
+  });
+
+  await it('the algorithm is part of the value', () => {
+    const bytes = Buffer.from('abc', 'utf8');
+    assert(sriHash(bytes).startsWith('sha384-'), 'the default is not labelled sha384');
+    assert(sriHash(bytes, 'sha512').startsWith('sha512-'), 'sha512 is not labelled');
+    assert(sriHash(bytes, 'sha512') !== sriHash(bytes), 'two algorithms produced the same value');
+  });
+
+  await it('every runtime CDN URL in src/ is on the list, and every URL on the list is in src/', () => {
+    /* The list is spread across three files, and a version bumped in one of
+       them leaves a stale hash in another — which nothing notices, because a
+       stale integrity attribute is a blank viewer rather than an error. So the
+       two are held against each other, in both directions. */
+    const sources = ['index.html', 'export/pdf.js', 'geometry/step.js']
+      .map((f) => readFileSync(join(REPO_ROOT, 'src', f), 'utf8'));
+    const inSrc = new Set();
+    for (const text of sources) {
+      for (const m of text.matchAll(/https:\/\/(?:cdnjs\.cloudflare\.com|cdn\.jsdelivr\.net)\/[^"'\s)]+/g)) {
+        inSrc.add(m[0]);
+      }
+    }
+    const listed = new Set(RUNTIME_LOADS.map((l) => l.url));
+    for (const url of inSrc) {
+      assert(listed.has(url), `src/ fetches ${url}, which sri.js does not list`);
+    }
+    for (const url of listed) {
+      assert(inSrc.has(url), `sri.js lists ${url}, which nothing in src/ fetches any more`);
+    }
+    eq(listed.size, inSrc.size, 'runtime loads:');
+  });
+
+  await it('each entry says where it goes and what it needs alongside', () => {
+    for (const load of RUNTIME_LOADS) {
+      assert(load.site && load.how, `${load.name} does not say where its attribute goes`);
+      assert(existsSync(join(REPO_ROOT, 'src', load.site.replace(/^src\//, ''))),
+        `${load.name} names ${load.site}, which does not exist`);
+    }
+    /* The static tag is the one that also needs crossorigin, and forgetting it
+       fails the check whatever the hash is. */
+    const three = RUNTIME_LOADS.find((l) => l.name === 'three.js');
+    assert(/crossorigin/i.test(three.how), 'the <script> tag entry does not mention crossorigin');
   });
 }
 
