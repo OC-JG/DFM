@@ -1469,3 +1469,47 @@ footer {
 .cmp-row-name { flex: 1; font-weight: 700; }
 .cmp-row-change { opacity: 0.8; white-space: nowrap; }
 .cmp-row-detail { font-family: var(--mono); opacity: 0.6; white-space: nowrap; }
+
+
+/* ── cost inputs and tooling drivers ─────────────────────────────────────
+   The rates sit with the numbers they produce rather than up in the input
+   panel: someone trying a different resin price is reading the answer at the
+   same moment, and a round trip to another panel is what stops them trying a
+   second one. */
+.cost-inputs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  margin: 10px 0 14px;
+}
+.cost-inputs label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.cost-inputs input {
+  width: 92px;
+  padding: 5px 7px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--fg);
+  background: var(--input-bg, var(--panel));
+  border: 1px solid var(--line);
+  border-radius: 3px;
+}
+.cost-inputs input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+/* A driver's consequence is a sentence, not a figure, so it wraps and sits
+   left-aligned rather than being pushed to the right like a value. */
+.shot-value.shot-driver {
+  text-align: left;
+  font-variant-numeric: normal;
+  color: var(--muted);
+  max-width: 62%;
+}

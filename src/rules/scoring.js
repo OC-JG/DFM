@@ -58,10 +58,13 @@ export function escalate(current, next) {
  * three conditional entries sit outside that hundred and are folded in by
  * normalisation when they run — see scoreChecks.
  *
- * `corners` carries no budget on purpose. It cannot fail: it has no way to
- * measure a radius, so it emits advice off the declared wall thickness and
- * nothing else. Holding 3 points it could never spend made the reachable
- * maximum deduction 87 while the grade bands were calibrated for 100.
+ * `corners` carries no budget on purpose. It cannot fail: with no faces to
+ * fit, it emits advice off the declared wall thickness and nothing else.
+ * Holding 3 points it could never spend made the reachable maximum deduction
+ * 87 while the grade bands were calibrated for 100.
+ *
+ * `corner_radii` is the scored version, and it appears only when the geometry
+ * carried faces to measure. The two are alternatives, never both.
  */
 export const CHECK_RISK_PROFILES = {
   // ── the default eight, summing to 100 ──────────────────────────────────
@@ -78,8 +81,23 @@ export const CHECK_RISK_PROFILES = {
   fpc:           { S: 4, L: 3, D: 3, weight: 12 }, // substrate damage or delamination
   transitions:   { S: 2, L: 2, D: 4, weight: 5  }, // stress and shrink; advisory on STL
 
+  /* Conditional on the geometry rather than on a checkbox: only a B-rep
+     source carries the faces a radius can be fitted to, so this check is only
+     pushed when there was something to measure. That is what keeps it from
+     changing the score of every part that arrives as an STL — it widens the
+     budget where it applies, exactly as fpc and transitions do, rather than
+     taking points from the eight that sum to 100.
+
+     Eight rather than eleven, and the reason is exposure rather than
+     consequence: a sharp internal corner is as likely to matter as a badly
+     proportioned rib, but this check can only judge the radii that *exist*.
+     A corner modelled with no fillet at all has no cylindrical face to fit,
+     so it is invisible here — and a check that cannot see the worst version
+     of its own defect should not carry the weight of one that can. */
+  corner_radii:  { S: 3, L: 3, D: 2, weight: 8  }, // stress riser; only where a radius exists
+
   // ── advisory: present, never deducts ───────────────────────────────────
-  corners:       { S: 3, L: 2, D: 2, weight: 0  }, // cannot be measured without B-rep
+  corners:       { S: 3, L: 2, D: 2, weight: 0  }, // the guideline, where nothing can be measured
 };
 
 /*

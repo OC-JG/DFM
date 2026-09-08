@@ -6,7 +6,7 @@ import { formatPullAxis } from '../analysis/stats.js';
  * Includes the two-shot block, which the original omitted: running an
  * overmould analysis and then exporting produced a file with no trace of it.
  */
-export function buildExportJSON({ sessionId, dfm, analysis, twoShot, interface: iface, validation, shot, settings }) {
+export function buildExportJSON({ sessionId, dfm, analysis, twoShot, interface: iface, validation, shot, cycle, cost, tooling, settings }) {
   const out = {
     tool: 'OnlyCat DFM',
     session: sessionId,
@@ -53,6 +53,45 @@ export function buildExportJSON({ sessionId, dfm, analysis, twoShot, interface: 
       clamp_force_tonnes: shot.clampTonnes,
       machine_clamp_tonnes: shot.machineTonnes,
       assumptions: shot.notes,
+    } : null,
+
+    /* Cycle time and cost travel with every assumption behind them, because
+       these are the figures most likely to be lifted out of a record and put
+       into a quotation. A consumer that reads the numbers and drops the
+       assumptions has taken a planning estimate for a price. */
+    cycle: cycle ? {
+      wall_mm: cycle.wallMm,
+      /* Derived, and a genuine lower bound: no tool beats it. */
+      cooling_floor_s: cycle.coolingFloorS,
+      practical_cooling_s: cycle.practicalCoolingS,
+      cycle_s: cycle.cycleS,
+      cavities: cycle.cavities,
+      parts_per_hour: cycle.partsPerHour,
+      assumptions: cycle.assumptions,
+      caveats: cycle.notes,
+    } : null,
+
+    cost: cost ? {
+      /* Currency-free on purpose: the rates were the user's, in whatever
+         currency they were thinking in, and this file has no business
+         guessing which. */
+      material_per_part: cost.materialCost,
+      machine_per_part: cost.machineCost,
+      material_plus_machine_per_part: cost.totalCost,
+      cavities: cost.cavities,
+      scrap_pct: cost.scrapPct,
+      missing_inputs: cost.missing,
+      assumptions: cost.assumptions,
+      caveats: cost.notes,
+    } : null,
+
+    tooling_drivers: tooling ? {
+      slides: tooling.slides,
+      lifters: tooling.lifters,
+      cavities: tooling.cavities,
+      drivers: tooling.drivers,
+      note: tooling.note,
+      parting_line_caveat: tooling.partingCaveat,
     } : null,
   };
 
@@ -110,6 +149,18 @@ function meshHealth(v) {
   };
 }
 
+/* One cylindrical feature, as it appears in the record. */
+function featureRow(c) {
+  return {
+    face_id: c.faceId,
+    body_id: c.bodyId,
+    radius_mm: c.radius,
+    diameter_mm: c.diameter,
+    sweep_deg: c.extentDeg,
+    axis: c.axis,
+  };
+}
+
 function meshSummary(a) {
   return {
     tris: a.triCount,
@@ -147,6 +198,18 @@ function meshSummary(a) {
         side: f.side,
         side_area_pct: f.areaPct,
       })),
+    } : null,
+    /* The cylindrical features, where there were faces to fit them to. Radii
+       are fitted rather than read — the reader carries no surface type — so a
+       corner modelled dead sharp has no face and cannot appear. An empty
+       fillet list does not mean "no sharp corners". */
+    features: a.features ? {
+      fillets: a.features.fillets.map(featureRow),
+      rounds: a.features.rounds.map(featureRow),
+      bores: a.features.bores.map(featureRow),
+      bosses: a.features.bosses.map(featureRow),
+      cylinder_count: a.features.cylinderCount,
+      unfitted_face_count: a.features.unfittedCount,
     } : null,
     wall_median_mm: a.wallStats.median,
     wall_p25_mm: a.wallStats.p25,

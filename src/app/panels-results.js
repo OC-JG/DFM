@@ -137,6 +137,73 @@ export function renderShot(shot) {
 }
 
 /*
+ * Cycle time, cost and what drives the tool.
+ *
+ * Separate from the shot figures above because it is a different kind of
+ * claim: those are arithmetic on measured geometry, these rest on stated
+ * assumptions and on rates the user supplied. Every one of those assumptions
+ * is printed here rather than kept in the source, because these are the
+ * numbers most likely to be quoted from.
+ */
+export function renderCost(cycle, cost, tooling) {
+  const section = $('costSection');
+  if (!cycle) { section.style.display = 'none'; return; }
+  section.style.display = '';
+
+  const rows = [];
+  const add = (label, value, hint) => rows.push(el('div', { class: 'shot-row', title: hint || '' }, [
+    el('span', { class: 'shot-label', text: label }),
+    el('span', { class: 'shot-value', text: value }),
+  ]));
+  const money = (n) => n.toFixed(n < 1 ? 3 : 2);
+
+  add('Cooling floor', cycle.coolingFloorS != null ? `${cycle.coolingFloorS.toFixed(1)} s` : '—',
+    'The derived lower bound: the centre of the wall first reaching ejection temperature. No tool beats it.');
+  add('Cycle time', cycle.cycleS ? `${cycle.cycleS.lo.toFixed(0)}–${cycle.cycleS.hi.toFixed(0)} s` : '—',
+    'Practical cooling divided by cooling\u2019s share of a cycle. A planning estimate, not a quotation.');
+  if (cycle.partsPerHour) {
+    add('Parts per hour', `${cycle.partsPerHour.lo.toFixed(0)}–${cycle.partsPerHour.hi.toFixed(0)}`,
+      `At ${cycle.cavities} cavit${cycle.cavities === 1 ? 'y' : 'ies'}.`);
+  }
+
+  if (cost && cost.materialCost != null) {
+    add('Material / part', money(cost.materialCost), 'Shot weight at the resin price entered.');
+  }
+  if (cost && cost.machineCost) {
+    add('Machine / part', `${money(cost.machineCost.lo)}–${money(cost.machineCost.hi)}`,
+      'Cycle time at the machine rate entered, shared across the cavities.');
+  }
+  if (cost && cost.totalCost) {
+    add('Material + machine', `${money(cost.totalCost.lo)}–${money(cost.totalCost.hi)}`,
+      'Not a piece price: no labour, packaging, overhead, secondary operations or margin.');
+  }
+
+  const nodes = [el('div', { class: 'shot-grid' }, rows)];
+
+  /* The assumptions, on the same screen as the numbers they produced. */
+  for (const line of cycle.assumptions) nodes.push(el('div', { class: 'shot-note', text: line }));
+  for (const line of (cost ? cost.assumptions : [])) nodes.push(el('div', { class: 'shot-note', text: line }));
+  for (const line of cycle.notes) nodes.push(el('div', { class: 'shot-note', text: line }));
+  for (const line of (cost ? cost.notes : [])) nodes.push(el('div', { class: 'shot-note', text: line }));
+
+  if (tooling && tooling.drivers.length) {
+    nodes.push(el('div', { class: 'section-subhead', text: 'What drives the tool' }));
+    for (const d of tooling.drivers) {
+      nodes.push(el('div', { class: 'shot-row' }, [
+        el('span', { class: 'shot-label', text: d.driver }),
+        el('span', { class: 'shot-value shot-driver', text: d.effect }),
+      ]));
+    }
+    nodes.push(el('div', { class: 'shot-note', text: tooling.note }));
+    if (tooling.slides || tooling.lifters) {
+      nodes.push(el('div', { class: 'shot-note', text: tooling.partingCaveat }));
+    }
+  }
+
+  replaceChildren($('costBody'), nodes);
+}
+
+/*
  * Revision comparison.
  *
  * The score answers whether the part is manufacturable; this answers whether it
@@ -321,6 +388,7 @@ export function clearResults() {
   $('resultsEmpty').style.display = '';
   $('resultsContent').style.display = 'none';
   renderShot(null);
+  renderCost(null, null, null);
   renderComparison(null);
   hideTwoShotResults();
   replaceChildren($('checksList'), []);

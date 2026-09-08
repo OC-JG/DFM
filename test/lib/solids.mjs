@@ -141,3 +141,86 @@ export function stepTwoBodies() {
     expect: { bodyCount: 2, faceCountEach: 6, bbox: [30, 10, 10] },
   };
 }
+
+/*
+ * ── Cylindrical fixtures ───────────────────────────────────────────────────
+ *
+ * These exist because a radius cannot be read from the file — the reader
+ * returns a triangle range per face and nothing else — so it has to be fitted,
+ * and a fitted number is only worth anything against one that was authored.
+ *
+ * `revolve` is emitted by step-write.mjs as a whole solid: the lateral face,
+ * the end caps, and on a partial sweep the two flat walls left by cutting it
+ * short. A partial sweep is what produces a corner blend rather than a hole.
+ */
+
+/* A solid cylinder: one convex face all the way round. */
+export function stepRod(radius = 8, height = 20) {
+  return {
+    solid: { name: 'Rod', vertices: [], faces: [{ revolve: { origin: [0, 0, 0], axis: [0, 0, 1], rOuter: radius, zLo: 0, zHi: height } }] },
+    expect: { faceCount: 3, radius, kind: 'boss', extentDeg: 360, volume: Math.PI * radius * radius * height },
+  };
+}
+
+/* A tube: convex outside, concave bore. The bore is the fixture that proves
+   concavity is detected rather than assumed — it is the same shape as the rod,
+   inside out. */
+export function stepTube(rOuter = 10, rInner = 6, height = 20) {
+  return {
+    solid: { name: 'Tube', vertices: [], faces: [{ revolve: { origin: [0, 0, 0], axis: [0, 0, 1], rOuter, rInner, zLo: 0, zHi: height } }] },
+    expect: {
+      faceCount: 4, rOuter, rInner, extentDeg: 360,
+      volume: Math.PI * (rOuter * rOuter - rInner * rInner) * height,
+    },
+  };
+}
+
+/* Half a tube: a partial sweep, so the same two surfaces become corner blends
+   rather than a boss and a bore — an external round outside, an internal
+   fillet inside. Both partial branches in one fixture. */
+export function stepHalfTube(rOuter = 10, rInner = 6, height = 20) {
+  return {
+    solid: {
+      name: 'HalfTube', vertices: [],
+      faces: [{ revolve: { origin: [0, 0, 0], axis: [0, 0, 1], rOuter, rInner, zLo: 0, zHi: height, fromDeg: 0, toDeg: 180 } }],
+    },
+    expect: {
+      faceCount: 6, rOuter, rInner, extentDeg: 180,
+      volume: Math.PI * (rOuter * rOuter - rInner * rInner) * height / 2,
+    },
+  };
+}
+
+/* A quarter rod: the shape of a fillet on an outside edge, and a volume with
+   an exact closed form to check the tessellation against. */
+export function stepQuarterRod(radius = 4, height = 12) {
+  return {
+    solid: {
+      name: 'QuarterRod', vertices: [],
+      faces: [{ revolve: { origin: [0, 0, 0], axis: [0, 0, 1], rOuter: radius, zLo: 0, zHi: height, fromDeg: 0, toDeg: 90 } }],
+    },
+    expect: { faceCount: 5, radius, kind: 'round', extentDeg: 90, volume: Math.PI * radius * radius * height / 4 },
+  };
+}
+
+/* The same rod down a diagonal. Nothing in the fit may depend on the cylinder
+   being aligned to an axis, and this is what says so. */
+export function stepTiltedRod(radius = 7, height = 25) {
+  const k = 1 / Math.sqrt(3);
+  return {
+    solid: { name: 'TiltedRod', vertices: [], faces: [{ revolve: { origin: [0, 0, 0], axis: [k, k, k], rOuter: radius, zLo: 0, zHi: height } }] },
+    expect: { radius, axis: [k, k, k], volume: Math.PI * radius * radius * height },
+  };
+}
+
+/* A tube whose bore is a hair across: a real internal corner modelled far
+   too sharp, which the radius check must condemn rather than merely note. */
+export function stepSharpFillet(rInner = 0.2) {
+  return {
+    solid: {
+      name: 'SharpFillet', vertices: [],
+      faces: [{ revolve: { origin: [0, 0, 0], axis: [0, 0, 1], rOuter: 10, rInner, zLo: 0, zHi: 20, fromDeg: 0, toDeg: 180 } }],
+    },
+    expect: { rInner },
+  };
+}

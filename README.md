@@ -72,6 +72,7 @@ npm test               # build + unit tests + fixtures + browser smoke test
 
 npm run test:unit      # just the unit tests: no browser, no network, sub-second
 npm run test:step      # the STEP path, which is also the .ipt path
+npm run test:bridge    # the Inventor loop, against a fake InventorMCP
 npm run test:offline   # proves the --vendor build runs with no network at all
 npm run verify:build   # asserts the committed dfm-tool.html matches src/
 ```
@@ -87,6 +88,19 @@ analytic where the geometry gives one (a 2 mm hollow cylinder measures 2 mm, a
 brute-force implementation in `test/lib/reference.mjs` written from the
 definition rather than from the code under test. It imports the pure modules
 straight into Node, which is what the one-way dependency direction below buys.
+
+`test/bridge.mjs` covers the Inventor loop without an Inventor.
+`test/lib/fake-bridge.mjs` is a real HTTP server on its own origin speaking the
+real protocol, and it genuinely **rebuilds**: a parameter change regenerates the
+STEP from the analytic solid with the new value. So the loop is proved by
+measurement rather than by wiring — drive `wall` to 3 and the tool has to come
+back reading a 3 mm wall. A server returning a canned payload would pass a test
+that proved nothing. The three chip states are covered, so are the ways it goes
+wrong (a modal dialog in Inventor, a rebuild the part refuses, a model whose
+STEP body 404s, a request that never answers, and a rebuild that silently
+returns inches), and so is the route contract — InventorMCP is a separate
+repository on its own release cycle, and nothing else would notice a renamed
+route until a user did.
 
 `test/step.mjs` covers the STEP path, and therefore the `.ipt` path — an
 Inventor part is routed through the same `parseSTEP` a dropped `.step` uses, so
@@ -125,7 +139,9 @@ test/                  fixture generator, unit tests, browser smoke test
   lib/reference.mjs    slow, independent reference implementations
   lib/solids.mjs       the same discipline as shapes.mjs, but as B-rep faces
   lib/step-write.mjs   emits a real AP214 file from one of those solids
+  lib/fake-bridge.mjs  a stand-in InventorMCP that really rebuilds
   step.mjs             the STEP path: face groups, bodies, draft per face
+  bridge.mjs           the Inventor loop, its failure modes, its route contract
   contract.mjs         asserts every id src/app reaches for exists in markup
 .github/workflows/     CI: unit tests, artifact-sync check, browser suite
 legacy/                the original single-file v1, kept for reference
@@ -336,6 +352,43 @@ Both exports carry it, and both say **which** they measured: `measured_from` is
 — not contradictory ones — and anyone comparing two exports needs to know which
 they are holding.
 
+## Corner radii, fitted
+
+Radii are not in the file. The STEP reader hands back a triangle range per face
+and nothing else — no surface type, no radius, no axis — so a radius has to be
+**fitted** to the face's own triangles rather than read off it.
+
+A cylinder's outward normals all lie square to its axis, so they span a plane
+and the axis is the direction they never point in. Fit a circle to the face's
+vertices projected onto that plane and the radius falls out. Which way the
+normals lean tells convex from concave, and how far the face sweeps tells a
+whole feature from a corner blend:
+
+|            | sweeps the full turn | sweeps part of it |
+|------------|----------------------|-------------------|
+| **convex** | a boss               | an external round |
+| **concave**| a bore               | an internal fillet|
+
+Internal blends are judged against 0.5× wall and external ones against 1.5×
+wall, and the check names the face and the radius that fell short. Bores and
+bosses are not corners, so they are reported rather than judged — "three Ø8
+bores" is what someone wants before quoting a tool.
+
+**The check always states what it cannot see, including when it passes.** A
+corner modelled dead sharp has no cylindrical face to fit, so it cannot appear
+in the report at all. A clean result means every radius that exists is
+adequate; it never means every corner has one.
+
+The fit declines far more often than it succeeds, which is the point. A flat
+face is left flat, and so is a face whose "radius" comes out at five metres —
+that is a plane with rounding on it, not a fillet, and reporting it as one
+would fill the fillet list with fiction.
+
+Scored only where it can measure. On an STL there are no faces, so the check
+stays the advisory it always was and the score is unchanged; on a B-rep it adds
+8 points of exposure to the budget, the same way the FPC and wall-transition
+checks do. No existing export's score moves.
+
 ## Where to put the gate
 
 Flow length, and therefore the short-shot prediction, depends entirely on where
@@ -372,13 +425,48 @@ Cavity pressure is the one assumption in the chain, and it is printed next to th
 result. Mass is withheld when the mesh is not a closed solid rather than
 estimated from the bounding box.
 
-Cycle time is not included. The material table carries a cooling coefficient per
-grade, but its documented convention gives the theoretical cooling floor rather
-than a practical cooling time — the two readings differ by about 4× — and a
-cycle time is exactly the kind of number that gets quoted from. See
-`src/analysis/shot.js` for the detail.
+## Cycle time, and what a part costs to run
 
-## Comparing revisions
+Cycle time exists now that the coefficient behind it is settled — it is written
+for the **full wall**, established by re-deriving it rather than by asking
+(`docs/coolk.md`, asserted in `test/unit.mjs`). It is reported in three steps
+rather than as one opaque figure, because only the first is derived:
+
+- the **cooling floor**, `k · s²` on the measured nominal wall — the moment the
+  centre of the wall first reaches ejection temperature, with the mould held at
+  a fixed temperature and heat leaving in one dimension. A lower bound no tool
+  beats, and labelled as one;
+- **practical cooling**, taken as 1.3× that floor, because neither of those two
+  conditions is true of a real tool;
+- the **cycle**, practical cooling divided by cooling's share of it, taken as
+  50–80%. The rest is fill, pack, mould motion and ejection.
+
+Both factors are printed next to the answer. A reader who disagrees can
+disagree with the step rather than with the number.
+
+**Cost is material plus machine time, and only when the rates are given.** There
+are no default resin prices and no default machine rates, deliberately: a
+plausible-looking default is indistinguishable on screen from a real quotation
+and travels further than it should. Enter a price per kg and a rate per hour and
+the part is costed; leave either blank and the tool says which is missing rather
+than costing the part at nothing per kilo. The figure that results is material
+and machine only — no labour, packaging, overhead, secondary operations or
+margin — and it says so wherever it appears.
+
+**Tooling is a list of drivers, never a price.** What a tool costs depends on
+the toolmaker, the steel, the country and the lead time, none of which this tool
+knows. What it *can* say is what makes the tool expensive: every side action is
+a moving assembly, every cavity repeats everything, glass fill means hardened
+steel, a mirror finish is polishing hours. The moving-tooling counts come from
+the undercut check and inherit its flat-parting-line assumption, which is stated
+alongside them.
+
+None of this is scored. Cycle time and cost are not pass-or-fail properties of a
+part, so they carry no weight, appear as no check, and cannot move the score — a
+part scores the same whether or not anyone has entered a resin price. A test
+asserts it.
+
+## Comparing revisions## Comparing revisions
 
 **Compare with JSON** reads a previous export and says what moved: the score, the
 grade, which checks changed band, and which measurements shifted and in which
@@ -439,14 +527,19 @@ build.
   split runs well above its base, check that band by eye. Whether a face that
   *is* an undercut needs a slide or a lifter is decided properly, by whether a
   side-action core could physically reach it.
-- **Corner radii cannot be detected**, only advised on. That needs B-rep face
-  topology; STL does not carry it, and the STEP path does not yet plumb
-  through the face groups the parser already extracts. Those groups are
-  preserved in the geometry format and now have a fixture proving they survive
-  the merge intact — `test/step.mjs` asserts that every triangle in a face group
-  is coplanar with its face, and that a 3° taper reads exactly 3° per face — so
-  what remains is a consumer for them in the analysis. See `docs/ROADMAP.md`
-  R2.2.
+- **Corner radii can only be measured where a radius exists.** On a B-rep they
+  are fitted per face and judged (see above). On an STL there are no faces, so
+  the check stays advisory. And on either, a corner modelled with no radius at
+  all is invisible — there is nothing to fit — so a clean radius report is
+  never a statement that every corner is filleted.
+- **A finding cannot yet name the Inventor feature that caused it.** The
+  **Parameters** panel drives the part and the **History** panel records what
+  changed, but the feature tree is display-only: what the bridge returns is a
+  flat list of feature names, with nothing tying a face to the feature that
+  made it. Now that a finding can name a face, linking that face to a feature
+  and to the parameter behind it is the obvious next step — and it needs
+  InventorMCP to supply the mapping, so it is not work this repository can do
+  on its own.
 - **The bridge trusts its caller.** Its routes are unauthenticated and they open
   uploaded files in a local Inventor session, so the server binds to localhost
   and only accepts requests from `file://` and localhost origins. Do not expose

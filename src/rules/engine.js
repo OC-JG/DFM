@@ -648,10 +648,77 @@ export function runDFM(input) {
     });
   }
 
+  // ══ CORNER RADII, MEASURED ══════════════════════════════════════════════
+  // Where the part arrived as a B-rep, the blends can be fitted and judged
+  // rather than advised about. This check replaces the advisory below — the
+  // two are alternatives, never both, so the budget never carries a scored
+  // check and an unscoreable one for the same property.
+  const feats = mesh ? mesh.features : null;
+  const canMeasureRadii = !!(feats && (feats.fillets.length || feats.rounds.length));
+
+  if (input.runChecks.wall && canMeasureRadii) {
+    const wallT = input.wallThk || (judged && judged.stat.median) || 2.0;
+    const internalMin = wallT * 0.5;
+    const externalMin = wallT * 1.5;
+
+    const shortOf = (list, limit) => list.filter((c) => c.radius < limit - 1e-9);
+    const badFillets = shortOf(feats.fillets, internalMin);
+    const badRounds = shortOf(feats.rounds, externalMin);
+
+    /* Severity follows how far short the worst one falls, not how many fall
+       short: one corner at a tenth of the guideline is a stress riser that
+       will crack, and five at nine tenths is a note for the next revision. */
+    const worstRatio = Math.min(
+      ...badFillets.map((c) => c.radius / internalMin),
+      ...badRounds.map((c) => c.radius / externalMin),
+      Infinity);
+
+    let status = 'ok', severity = 'none';
+    if (badFillets.length || badRounds.length) {
+      status = 'warn';
+      severity = worstRatio < 0.5 ? 'major' : 'minor';
+      if (worstRatio < 0.25) { status = 'fail'; severity = 'critical'; }
+    }
+
+    const say = (list, limit, what) => list
+      .slice(0, 4)
+      .map((c) => `face ${c.faceId} R${c.radius.toFixed(2)} (needs ${limit.toFixed(2)})`)
+      .join('; ') + (list.length > 4 ? `, and ${list.length - 4} more ${what}` : '');
+
+    let detail;
+    if (status === 'ok') {
+      detail = `All ${feats.fillets.length + feats.rounds.length} fitted corner blends clear the guideline: internal ≥ ${internalMin.toFixed(2)} mm (0.5× wall), external ≥ ${externalMin.toFixed(2)} mm (1.5× wall).`;
+    } else {
+      const parts = [];
+      if (badFillets.length) parts.push(`${badFillets.length} internal — ${say(badFillets, internalMin, 'internal')}`);
+      if (badRounds.length) parts.push(`${badRounds.length} external — ${say(badRounds, externalMin, 'external')}`);
+      detail = `${parts.join('. ')}. Sharp internal corners concentrate stress and need EDM tooling; sharp external corners impede flow.`;
+    }
+
+    /* The limit of the measurement, stated every time and not only when
+       something is wrong: a corner modelled dead sharp has no cylindrical
+       face to fit, so it cannot appear here at all. A clean result means the
+       radii that exist are adequate — never that every corner has one. */
+    detail += ` Measured from ${feats.cylinderCount} fitted cylindrical face${feats.cylinderCount === 1 ? '' : 's'}. A corner modelled with no radius has no face to fit and cannot be seen here, so this does not confirm that every corner is filleted.`;
+
+    checks.push({
+      key: 'corner_radii', name: 'Corner radii', status, detail, severity,
+      metrics: [
+        ['Wall', `${wallT.toFixed(2)} mm`],
+        ['Min internal R', `${internalMin.toFixed(2)} mm`],
+        ['Min external R', `${externalMin.toFixed(2)} mm`],
+        feats.fillets.length ? ['Internal blends', `${feats.fillets.length} (smallest R${feats.fillets[0].radius.toFixed(2)})`] : null,
+        feats.rounds.length ? ['External blends', `${feats.rounds.length} (smallest R${feats.rounds[0].radius.toFixed(2)})`] : null,
+        feats.bores.length ? ['Bores', feats.bores.map((c) => `Ø${c.diameter.toFixed(1)}`).slice(0, 6).join(', ')] : null,
+        feats.bosses.length ? ['Bosses', feats.bosses.map((c) => `Ø${c.diameter.toFixed(1)}`).slice(0, 6).join(', ')] : null,
+      ].filter(Boolean),
+    });
+  }
+
   // ══ CORNER RADII (advisory) ═════════════════════════════════════════════
-  // Cannot be auto-detected: corner radii need B-rep topology, which STL does
-  // not carry. Fires off the declared wall thickness as a reminder.
-  if (input.runChecks.wall) {
+  // The fallback for geometry with no faces to fit — an STL, or a B-rep whose
+  // corners are all modelled sharp. Fires off the declared wall thickness.
+  if (input.runChecks.wall && !canMeasureRadii) {
     const wallT = input.wallThk || (judged && judged.stat.median) || 2.0;
     const internalMinR = (wallT * 0.5).toFixed(2);
     const externalMinR = (wallT * 1.5).toFixed(2);

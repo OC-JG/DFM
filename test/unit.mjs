@@ -26,9 +26,13 @@ import {
 import { buildExportJSON } from '../src/export/json.js';
 import { compareRuns } from '../src/rules/compare.js';
 import { estimateShot, nextMachineSize, CAVITY_PRESSURE_MPA } from '../src/analysis/shot.js';
+import {
+  estimateCycle, estimatePartCost, toolingDrivers,
+  PRACTICAL_COOLING_FACTOR, COOLING_SHARE,
+} from '../src/analysis/cost.js';
 import { searchGateCandidates, computeFlowLengths, buildAdjacency, geodesicFrom } from '../src/analysis/flow.js';
 import { effectiveMinDraft } from '../src/core/finishes.js';
-import { MATERIALS } from '../src/core/materials.js';
+import { MATERIALS, MATERIAL_ORDER } from '../src/core/materials.js';
 import { DEFAULT_SETTINGS } from '../src/app/state.js';
 
 // ── harness ────────────────────────────────────────────────────────────────
@@ -444,6 +448,232 @@ function meshFor(soup, finishKey = 'spi-a2') {
 }
 
 const DEFAULT_CHECK_KEYS = ['wall', 'draft', 'sink', 'flow', 'ribs', 'warp', 'undercut', 'finish_compat'];
+
+describe('materials — the cooling coefficient is written for the full wall');
+{
+  /* The question that blocked cycle time, kept answered.
+     Rearranging tc = k·s² through the plate-cooling solution, each coefficient
+     implies a thermal diffusivity:
+         α = ln[(4/π)·(Tmelt − Tmould)/(Teject − Tmould)] / (π²·k)
+     under the full-wall reading, and a quarter of that under the half-wall
+     one. Diffusivity is a measured property, so the two readings can be held
+     against physics rather than against opinion. See docs/coolk.md. */
+  const LOG_CONST = 4 / Math.PI;
+  const PROCESS = {
+    abs: [50, 90], pp: [30, 80], pc: [90, 130], pa6: [80, 120],
+    pa66gf: [90, 150], pom: [90, 120], hdpe: [30, 70], pe: [30, 65],
+    ps: [40, 80], pbt: [80, 130], petg: [20, 70], pmma: [70, 95],
+    tpu: [25, 60], asa: [50, 90], asa_n: [50, 90], pcasa: [70, 105],
+  };
+  /* Unfilled thermoplastics measure roughly 0.05–0.20 mm²/s. */
+  const DIFFUSIVITY_LO = 0.05, DIFFUSIVITY_HI = 0.20;
+
+  const impliedAlpha = (key) => {
+    const m = MATERIALS[key];
+    const [mould, eject] = PROCESS[key];
+    const L = Math.log(LOG_CONST * (m.meltC - mould) / (eject - mould));
+    return L / (Math.PI ** 2 * m.coolK);
+  };
+
+  it('every coefficient implies a diffusivity a real polymer has', () => {
+    for (const key of MATERIAL_ORDER) {
+      const a = impliedAlpha(key);
+      assert(a >= DIFFUSIVITY_LO && a <= DIFFUSIVITY_HI,
+        `${MATERIALS[key].name}: coolK ${MATERIALS[key].coolK} implies α = ${a.toFixed(4)} mm²/s, outside ${DIFFUSIVITY_LO}–${DIFFUSIVITY_HI}`);
+    }
+  });
+
+  it('the half-wall reading is impossible for every material, not merely unlikely', () => {
+    /* This is the assertion that pins the convention. If someone rewrites a
+       coefficient into the half-wall form — multiplying it by four — its
+       implied diffusivity lands in a range no thermoplastic occupies, and the
+       test above fails. This one states the other half: that the alternative
+       reading of the current numbers is not a close call. */
+    for (const key of MATERIAL_ORDER) {
+      const a = impliedAlpha(key) / 4;
+      assert(a < DIFFUSIVITY_LO,
+        `${MATERIALS[key].name}: the half-wall reading implies α = ${a.toFixed(4)} mm²/s, which is not obviously impossible — the convention is no longer settled by arithmetic alone`);
+    }
+  });
+
+  it('a 2 mm wall cools in seconds, not in a fraction of one', () => {
+    /* The sanity check a moulder would apply without any of the above: no
+       2 mm thermoplastic section leaves a tool in under a second. */
+    for (const key of MATERIAL_ORDER) {
+      const floor = MATERIALS[key].coolK * 2 * 2;   // full wall, so s = 2 mm
+      assert(floor >= 3 && floor <= 12,
+        `${MATERIALS[key].name}: a 2 mm wall would cool in ${floor.toFixed(1)} s`);
+    }
+  });
+}
+
+describe('cycle time — a derived floor and two stated assumptions');
+{
+  it('the cooling floor is k·s² on the full wall, and nothing else', () => {
+    /* The number the coolK derivation settled. If this ever disagrees with
+       coolK × wall², the convention has drifted again. */
+    const c = estimateCycle({ material: MATERIALS.abs, wallMm: 2 });
+    close(c.coolingFloorS, MATERIALS.abs.coolK * 4, 1e-9, 'cooling floor:');
+  });
+
+  it('the floor is a floor: practical cooling and the cycle are both longer', () => {
+    const c = estimateCycle({ material: MATERIALS.abs, wallMm: 2 });
+    assert(c.practicalCoolingS > c.coolingFloorS, 'practical cooling did not exceed the floor');
+    assert(c.cycleS.lo > c.practicalCoolingS, 'the cycle was shorter than the cooling inside it');
+    assert(c.cycleS.hi > c.cycleS.lo, 'the cycle band is inverted');
+  });
+
+  it('each step is the stated factor, not a hidden one', () => {
+    /* The point of publishing the factors is that a reader can check them. */
+    const c = estimateCycle({ material: MATERIALS.pc, wallMm: 3 });
+    close(c.practicalCoolingS, c.coolingFloorS * PRACTICAL_COOLING_FACTOR, 1e-9, 'practical cooling:');
+    close(c.cycleS.lo, c.practicalCoolingS / COOLING_SHARE.hi, 1e-9, 'cycle lo:');
+    close(c.cycleS.hi, c.practicalCoolingS / COOLING_SHARE.lo, 1e-9, 'cycle hi:');
+  });
+
+  it('cooling goes as the square of the wall', () => {
+    const thin = estimateCycle({ material: MATERIALS.abs, wallMm: 1 });
+    const thick = estimateCycle({ material: MATERIALS.abs, wallMm: 2 });
+    close(thick.coolingFloorS / thin.coolingFloorS, 4, 1e-9, 'doubling the wall:');
+  });
+
+  it('output scales with cavities but the cycle does not', () => {
+    const one = estimateCycle({ material: MATERIALS.abs, wallMm: 2, cavities: 1 });
+    const four = estimateCycle({ material: MATERIALS.abs, wallMm: 2, cavities: 4 });
+    close(four.cycleS.lo, one.cycleS.lo, 1e-9, 'cycle with more cavities:');
+    close(four.partsPerHour.lo, one.partsPerHour.lo * 4, 1e-6, 'parts per hour:');
+  });
+
+  it('an unmeasured part gets no cycle time and says why', () => {
+    const c = estimateCycle({ material: MATERIALS.abs, wallMm: null });
+    eq(c.coolingFloorS, null, 'cooling floor without a wall:');
+    assert(/needs a wall thickness/.test(c.notes.join(' ')), `no explanation given: ${c.notes}`);
+  });
+
+  it('every assumption is published with the number', () => {
+    const c = estimateCycle({ material: MATERIALS.abs, wallMm: 2 });
+    const text = c.assumptions.join(' ');
+    assert(/full-wall/.test(text), 'the convention is not stated');
+    assert(new RegExp(String(PRACTICAL_COOLING_FACTOR)).test(text), 'the cooling factor is not stated');
+    assert(/50–80%|50-80%/.test(text), 'cooling’s share of the cycle is not stated');
+  });
+}
+
+describe('cost — arithmetic on stated rates, and silence without them');
+{
+  const cycleS = { lo: 10, hi: 20 };
+
+  it('no rate, no cost — and the reason names what is missing', () => {
+    /* The rule the module exists to keep: a plausible-looking default resin
+       price would be indistinguishable on screen from a real quotation. */
+    const c = estimatePartCost({ shotMassG: 10, cycleS, cavities: 1 });
+    eq(c.totalCost, null, 'total without rates:');
+    eq(c.materialCost, null, 'material without a resin price:');
+    assert(c.missing.some((m) => /resin price/.test(m)), `missing did not name the resin price: ${c.missing}`);
+    assert(c.missing.some((m) => /machine rate/.test(m)), `missing did not name the machine rate: ${c.missing}`);
+  });
+
+  it('material is shot weight at the price given', () => {
+    const c = estimatePartCost({ shotMassG: 10, cycleS, resinPerKg: 2, machinePerHour: 60 });
+    close(c.materialCost, 0.02, 1e-9, '10 g at 2/kg:');
+  });
+
+  it('scrap is an allowance on material, not on machine time', () => {
+    const plain = estimatePartCost({ shotMassG: 10, cycleS, resinPerKg: 2, machinePerHour: 60 });
+    const scrap = estimatePartCost({ shotMassG: 10, cycleS, resinPerKg: 2, machinePerHour: 60, scrapPct: 10 });
+    close(scrap.materialCost, plain.materialCost * 1.1, 1e-9, 'material with 10% scrap:');
+    close(scrap.machineCost.lo, plain.machineCost.lo, 1e-9, 'machine cost with scrap:');
+  });
+
+  it('machine time is shared across the cavities', () => {
+    const one = estimatePartCost({ shotMassG: 10, cycleS, cavities: 1, resinPerKg: 2, machinePerHour: 3600 });
+    const four = estimatePartCost({ shotMassG: 10, cycleS, cavities: 4, resinPerKg: 2, machinePerHour: 3600 });
+    /* 3600/hour is 1 per second, so a 10 s cycle is 10 in one cavity. */
+    close(one.machineCost.lo, 10, 1e-9, 'machine cost, one cavity:');
+    close(four.machineCost.lo, 2.5, 1e-9, 'machine cost, four cavities:');
+  });
+
+  it('the total is material plus machine and nothing else', () => {
+    const c = estimatePartCost({ shotMassG: 10, cycleS, resinPerKg: 2, machinePerHour: 3600 });
+    close(c.totalCost.lo, c.materialCost + c.machineCost.lo, 1e-9, 'total lo:');
+    close(c.totalCost.hi, c.materialCost + c.machineCost.hi, 1e-9, 'total hi:');
+  });
+
+  it('it says out loud that it is not a piece price', () => {
+    /* The caveat is the point. A figure this shape gets pasted into a
+       spreadsheet, and the spreadsheet does not carry the tooltip. */
+    const c = estimatePartCost({ shotMassG: 10, cycleS, resinPerKg: 2, machinePerHour: 60 });
+    assert(/labour|margin|overhead/i.test(c.notes.join(' ')), `no caveat given: ${c.notes}`);
+  });
+}
+
+describe('cost — and the score, which must not notice it');
+{
+  it('nothing about cost or cycle time can move the score', () => {
+    /* The separation the milestone turned on: these are not pass-or-fail
+       properties of a part, so they must not appear as a check, carry a
+       weight, or widen the budget. A part scores the same whether or not
+       anyone has entered a resin price. */
+    const r = runDFM({ ...CLEAN_INPUT, mesh: meshFor(S.hollowBox([40, 30, 20], 2)) });
+    for (const c of r.checks) {
+      assert(!/cost|cycle|price|tooling_cost/i.test(c.key),
+        `${c.key} is a scored check about cost`);
+    }
+    for (const key of Object.keys(CHECK_RISK_PROFILES)) {
+      assert(!/cost|cycle|price/i.test(key), `${key} carries a weight for a cost figure`);
+    }
+    eq(r.budget, 100, 'budget with the default checks:');
+  });
+}
+
+describe('tooling — the drivers, never a price');
+{
+  const mat = MATERIALS.abs;
+
+  it('slides and lifters are counted the way the undercut check counts them', () => {
+    /* Same fields, same 1 mm² noise threshold, so the two can never disagree
+       about the same part. */
+    const analysis = {
+      undercutRegions: [
+        { type: 1, area: 40 }, { type: 1, area: 0.5 },   // one slide, one speck
+        { type: 2, area: 12 },                            // one lifter
+      ],
+    };
+    const t = toolingDrivers({ analysis, material: mat, cavities: 1 });
+    eq(t.slides, 1, 'slides:');
+    eq(t.lifters, 1, 'lifters:');
+  });
+
+  it('a part needing no moving tooling is told so', () => {
+    const t = toolingDrivers({ analysis: { undercutRegions: [] }, material: mat, cavities: 1 });
+    assert(t.drivers.some((d) => /No moving tooling/.test(d.driver)), 'the clean case went unsaid');
+  });
+
+  it('an abrasive material is a tool-life driver', () => {
+    const t = toolingDrivers({ analysis: { undercutRegions: [] }, material: MATERIALS.pa66gf, cavities: 1 });
+    assert(t.drivers.some((d) => /abrasive/i.test(d.driver)), 'glass fill was not flagged');
+  });
+
+  it('it never produces a currency figure', () => {
+    /* The deliberate omission. What a tool costs depends on the toolmaker,
+       the steel and the country, none of which is in the file. */
+    const t = toolingDrivers({
+      analysis: { undercutRegions: [{ type: 1, area: 40 }] },
+      material: mat, cavities: 8, finishName: 'SPI-A1', bboxMm: [40, 30, 20],
+    });
+    assert(!('cost' in t) && !('price' in t), 'tooling produced a cost');
+    assert(/not a price/i.test(t.note), 'the note does not disclaim a price');
+    assert(/parting line/i.test(t.partingCaveat), 'the parting-line caveat is missing');
+  });
+
+  it('the moving-tooling count inherits the parting-line assumption, and says so', () => {
+    const t = toolingDrivers({
+      analysis: { undercutRegions: [{ type: 1, area: 40 }] }, material: mat, cavities: 1,
+    });
+    assert(/features needing a decision/i.test(t.partingCaveat),
+      'the count is presented as a slide count rather than as features to decide');
+  });
+}
 
 describe('scoring — the weight table');
 {

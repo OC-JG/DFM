@@ -16,25 +16,28 @@
  */
 
 /*
- * Not here: cooling time, and therefore cycle time.
+ * Cycle time and cost live in cost.js, not here.
  *
- * The material table carries a `coolK` per grade, documented as the coefficient
- * in tc = k · s² with s the half-wall. Under that convention a 2 mm ABS wall
- * cools in 1.7 s, which is the theoretical floor — it is roughly what the
- * one-dimensional conduction solution gives for the centreline reaching
- * ejection temperature, and it is not a number any moulder would quote.
+ * They used to live nowhere at all. The material table carries a `coolK` per
+ * grade whose comment said it was the coefficient in tc = k·s² with s the
+ * *half*-wall — and under that reading a 2 mm ABS wall cools in 1.7 s, which
+ * is not a number any moulder would recognise. Read as a full-wall coefficient
+ * the same table gives 6.8 s, which is a credible theoretical floor. The two
+ * readings differ by four, someone would quote from whichever appeared, so
+ * nothing appeared.
  *
- * Read as a full-wall coefficient the same table gives 6.8 s for ABS, 4.0 s for
- * PP and 8.8 s for PC, which sit inside the practical bands and — more telling
- * — reproduce the right ordering. The analytical reading does not: run through
- * the conduction solution with real diffusivities, PC comes out cooling *faster*
- * than ABS, where the table has it 30% slower. So the coefficients look
- * empirical and full-wall, and the comment describing them looks wrong.
+ * That is settled: it is the full wall, established by re-deriving the
+ * coefficient rather than by asking. Rearranged, each value implies a thermal
+ * diffusivity, and the full-wall reading puts all sixteen materials inside the
+ * measured range for a thermoplastic while the half-wall reading puts every one
+ * of them three to seven times below any polymer that exists. Working in
+ * docs/coolk.md, asserted in test/unit.mjs.
  *
- * "Looks wrong" is not enough to ship a cycle time on. The two readings differ
- * by 4×, someone will quote from whichever appears, and the person who curated
- * those coefficients can settle it in one sentence. Until then the field stays
- * unused and this module reports only what it can stand behind.
+ * So cycle time exists now, in analysis/cost.js, along with the piece-part cost
+ * that sits on top of it. What stays out of *this* file is the reason it was
+ * split: everything here is arithmetic on measured geometry and tabulated data,
+ * and everything there rests on assumptions or on rates the user supplied. They
+ * are different kinds of claim and the split keeps them from being read as one.
  */
 
 /*

@@ -16,7 +16,8 @@
  * different build number than the installed Playwright expects.
  */
 import { createServer } from 'node:http';
-import { readFileSync, existsSync } from 'node:fs';
+import { startFakeBridge } from './lib/fake-bridge.mjs';
+import { writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
@@ -171,6 +172,52 @@ async function main() {
     check('part mass reported', /\d+\.\d\s*g/.test(shotText), shotText.slice(0, 160));
     check('projected area reported', /12\.0\s*cm²/.test(shotText), shotText.slice(0, 200));
     check('machine size reported', /Machine size\s*\d+\s*t/.test(shotText), shotText.slice(0, 220));
+
+    // ── cycle time and cost ───────────────────────────────────────────────
+    // Not scored, so this checks the figures appear, that they carry their
+    // assumptions, and that a rate typed in re-costs the part without anyone
+    // having to run the analysis again.
+    await page.click('.tab[data-tab="estimates"]');
+    check('cycle time is shown', (await page.textContent('#costBody')).includes('Cooling floor'),
+      (await page.textContent('#costBody')).slice(0, 120));
+    check('the cooling floor is labelled a lower bound',
+      /derived lower bound|no tool beats|lower bound/i.test(await page.locator('#costSection').innerHTML()),
+      '');
+    check('the cycle assumptions are printed with it',
+      /full-wall/.test(await page.textContent('#costBody'))
+      && /50–80%/.test(await page.textContent('#costBody')),
+      (await page.textContent('#costBody')).slice(-160));
+
+    const beforeRates = await page.textContent('#costBody');
+    check('no cost until a rate is given', /No cost until there is/.test(beforeRates),
+      beforeRates.slice(-120));
+
+    await page.fill('#resinPerKg', '2.20');
+    await page.fill('#machinePerHour', '45');
+    await page.waitForFunction(
+      () => /Material \+ machine/.test(document.getElementById('costBody').textContent),
+      null, { timeout: 15000 });
+    check('typing a rate costs the part without re-running the analysis',
+      /Material \+ machine/.test(await page.textContent('#costBody')),
+      (await page.textContent('#costBody')).slice(0, 140));
+    check('the cost says it is not a piece price',
+      /labour|margin|overhead/i.test(await page.textContent('#costBody')), '');
+
+    await page.fill('#cavities', '4');
+    await page.waitForFunction(
+      () => /4 cavities/.test(document.getElementById('costBody').textContent),
+      null, { timeout: 15000 });
+    check('cavities re-cost the part too',
+      /4 cavities/.test(await page.textContent('#costBody')), '');
+
+    check('what drives the tool is listed', /What drives the tool/.test(await page.textContent('#costSection')),
+      '');
+
+    /* Put the inputs back so the rest of the run is unaffected. */
+    await page.fill('#cavities', '1');
+    await page.fill('#resinPerKg', '');
+    await page.fill('#machinePerHour', '');
+    await page.click('.tab[data-tab="findings"]');
 
     // ── gate suggestion ───────────────────────────────────────────────────
     // With no gate set the flow check has nothing to compute, so it searches
@@ -357,6 +404,78 @@ async function main() {
     const fallbackScore = Number(await fallbackPage.textContent('#scoreValue'));
     check('fallback produces the same score', fallbackScore === score, `worker=${score} inline=${fallbackScore}`);
     await fallbackPage.close();
+
+    // ── the Inventor loop, in a real browser ──────────────────────────────
+    // The feature the tool exists for, driven the way a user drives it: open
+    // an .ipt, change the dimension that caused a finding, measure again. The
+    // bridge here is test/lib/fake-bridge.mjs — a real server on its own
+    // origin, speaking the real protocol and genuinely rebuilding, so the
+    // wall the page reports afterwards is the wall that was asked for.
+    const bridge = await startFakeBridge({});
+    const iptPath = join(FIXTURES, 'BridgePart.ipt');
+    writeFileSync(iptPath, Buffer.from([0xd0, 0xcf, 0x11, 0xe0]));   // an OLE header, as an .ipt has
+
+    const bridgePage = await browser.newPage({ viewport: { width: 1600, height: 1000 } });
+    await bridgePage.route(/^https:\/\/(cdnjs\.cloudflare\.com|cdn\.jsdelivr\.net)\//, serveVendored);
+    await bridgePage.route(/^https:\/\/fonts\./, (route) => route.fulfill({ status: 200, contentType: 'text/css', body: '' }));
+    /* Point the page at this server before any of its scripts run — the same
+       setting a user would type under the drop zone. */
+    await bridgePage.addInitScript((url) => {
+      try { localStorage.setItem('dfm.bridgeUrl', url); } catch { /* ignore */ }
+    }, bridge.url);
+    await bridgePage.goto(url, { waitUntil: 'networkidle' });
+
+    await bridgePage.waitForFunction(
+      () => document.getElementById('bridgeStatus').dataset.state === 'live', null, { timeout: 30000 });
+    check('bridge chip reports a live Inventor',
+      /Inventor/.test(await bridgePage.textContent('#bridgeStatus')),
+      await bridgePage.textContent('#bridgeStatus'));
+
+    await bridgePage.setInputFiles('#fileInput', iptPath);
+    await bridgePage.waitForFunction(
+      () => document.getElementById('statusPill').textContent.includes('LOADED'), null, { timeout: 90000 });
+    check('an .ipt opens through the bridge',
+      (await bridgePage.textContent('#fileInfo')).includes('BridgePart'),
+      (await bridgePage.textContent('#fileInfo')).slice(0, 100));
+
+    const paramCount = await bridgePage.locator('#paramsList .param-expr').count();
+    check('the driving parameters are listed', paramCount === 2, `rows=${paramCount}`);
+
+    await bridgePage.click('#runBtn');
+    await bridgePage.waitForFunction(
+      () => document.getElementById('resultStatus').textContent === 'complete', null, { timeout: 90000 });
+    const wallBefore = await bridgePage.locator('#checksList .check', { hasText: 'Wall thickness' }).first().textContent();
+    check('the part as opened measures its 2 mm wall',
+      /Nominal \(median\)2\.0\d mm/.test(wallBefore), wallBefore.slice(0, 110));
+
+    /* Drive the dimension that caused the finding, exactly as a user would:
+       type into the parameter and press Enter. */
+    const wallInput = bridgePage.locator('#paramsList .param-expr').first();
+    await wallInput.fill('3');
+    await wallInput.press('Enter');
+    await bridgePage.waitForFunction(
+      () => document.getElementById('statusPill').textContent.includes('REBUILT'), null, { timeout: 90000 });
+    check('Inventor rebuilds on a parameter change', true,
+      await bridgePage.textContent('#statusPill'));
+
+    /* The edit log: one entry, naming the parameter and carrying the score it
+       replaced, and the section actually on screen rather than merely present
+       in the markup. */
+    check('the change is recorded under History',
+      (await bridgePage.locator('#revisionsSection').getAttribute('hidden')) === null
+      && /1 change\b/.test(await bridgePage.textContent('#revisionCount'))
+      && /wall/.test(await bridgePage.textContent('#revisionsSection')),
+      `${await bridgePage.textContent('#revisionCount')} — ${(await bridgePage.textContent('#revisionsSection')).slice(0, 90)}`);
+
+    await bridgePage.click('#runBtn');
+    await bridgePage.waitForFunction(
+      () => document.getElementById('resultStatus').textContent === 'complete', null, { timeout: 90000 });
+    const wallAfter = await bridgePage.locator('#checksList .check', { hasText: 'Wall thickness' }).first().textContent();
+    check('the rebuilt part measures the wall that was asked for',
+      /Nominal \(median\)3\.0\d mm/.test(wallAfter), wallAfter.slice(0, 110));
+
+    await bridgePage.close();
+    await bridge.close();
 
     // ── the STEP path, in a real browser ──────────────────────────────────
     // An .ipt reaches parseSTEP by the same road a dropped .step does, so

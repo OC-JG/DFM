@@ -165,7 +165,7 @@ function stripMarkup(text) {
   return String(text).replace(/<[^>]+>/g, '');
 }
 
-export async function exportPDF({ sessionId, dfm, analysis, twoShot, validation, shot, settings }) {
+export async function exportPDF({ sessionId, dfm, analysis, twoShot, validation, shot, cycle, cost, tooling, settings }) {
   const jsPDF = await loadJsPDF();
   const doc = new jsPDF({ unit: 'mm', format: 'a4' });
   const r = dfm.result;
@@ -304,6 +304,38 @@ export async function exportPDF({ sessionId, dfm, analysis, twoShot, validation,
       ['Machine clamp', shot.machineTonnes ? `${shot.machineTonnes} tonnes` : '—'],
     ], 50);
     for (const note of shot.notes) cur.paragraph(note);
+  }
+
+  // ── cycle time and cost ──────────────────────────────────────────────────
+  // Every assumption printed under the figures it produced. These are the
+  // numbers most likely to be read out of this page and into a quotation, and
+  // a reader who cannot see what they rest on will treat them as a price.
+  if (cycle && cycle.coolingFloorS != null) {
+    cur.heading('CYCLE TIME AND COST');
+    const money = (n) => n.toFixed(n < 1 ? 3 : 2);
+    const rows = [
+      ['Nominal wall', `${cycle.wallMm.toFixed(2)} mm`],
+      ['Cooling floor', `${cycle.coolingFloorS.toFixed(1)} s (derived lower bound)`],
+      ['Cycle time', `${cycle.cycleS.lo.toFixed(0)}–${cycle.cycleS.hi.toFixed(0)} s (estimate)`],
+      ['Cavities', String(cycle.cavities)],
+      ['Parts per hour', `${cycle.partsPerHour.lo.toFixed(0)}–${cycle.partsPerHour.hi.toFixed(0)}`],
+    ];
+    if (cost && cost.materialCost != null) rows.push(['Material per part', money(cost.materialCost)]);
+    if (cost && cost.machineCost) rows.push(['Machine per part', `${money(cost.machineCost.lo)}–${money(cost.machineCost.hi)}`]);
+    if (cost && cost.totalCost) rows.push(['Material + machine', `${money(cost.totalCost.lo)}–${money(cost.totalCost.hi)}`]);
+    cur.pairs(rows, 50);
+    for (const line of cycle.assumptions) cur.paragraph(line);
+    for (const line of (cost ? cost.assumptions : [])) cur.paragraph(line);
+    for (const line of cycle.notes) cur.paragraph(line);
+    for (const line of (cost ? cost.notes : [])) cur.paragraph(line);
+  }
+
+  // ── what drives the tool ─────────────────────────────────────────────────
+  if (tooling && tooling.drivers.length) {
+    cur.heading('WHAT DRIVES THE TOOL');
+    for (const d of tooling.drivers) cur.paragraph(`${d.driver} — ${d.effect}`);
+    cur.paragraph(tooling.note);
+    if (tooling.slides || tooling.lifters) cur.paragraph(tooling.partingCaveat);
   }
 
   // ── tooling actions ──────────────────────────────────────────────────────

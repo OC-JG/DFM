@@ -86,9 +86,9 @@ in — those ran roughly to estimate, which is the only reason to trust these.
 | | Milestone | Effort | Blocks / blocked by |
 |---|---|---|---|
 | R2.1 | Trust the STEP path | ~~3–5 d~~ done | Unblocked R2.2, R2.3 |
-| R2.2 | Features, not triangles | draft done | radii re-planned |
-| R2.3 | The Inventor loop under test | 4–6 d | Needs R2.1 |
-| R2.4 | Numbers that get quoted | 1 wk + a decision | Needs a moulding engineer |
+| R2.2 | Features, not triangles | ~~1–2 wk~~ done | unblocked nothing further |
+| R2.3 | The Inventor loop under test | ~~4–6 d~~ done | one part blocked upstream |
+| R2.4 | Numbers that get quoted | ~~1 wk~~ done | — |
 | R2.5 | Two-shot and FPC earn their weights | 1–2 wk | Needs R2.2 for the FPC region |
 | R2.6 | Findings that survive leaving the tool | 4–6 d | Independent |
 | R2.7 | Navigation for people who navigate for a living | 1–2 wk | Independent |
@@ -142,13 +142,13 @@ three, and a body range off by one fails one. The body fixture puts its two
 boxes 20 mm apart along x specifically so a wrong offset lands a triangle in
 the neighbouring solid and cannot be mistaken for rounding.
 
-**Still open from this milestone.** Nothing blocking, but two things were
-deliberately not done: curved surfaces (a cylindrical face needs a seam and a
-`CYLINDRICAL_SURFACE`, and no test wants one until R2.2 measures radii), and
-`BREP_WITH_VOIDS` (the shelled fixture is an open-topped cup, one closed shell,
-which is what a moulded part looks like anyway).
+**Still open from this milestone.** `BREP_WITH_VOIDS` — the shelled fixture is
+an open-topped cup, one closed shell, which is what a moulded part looks like
+anyway. Curved surfaces were the other omission and R2.2 closed it: the writer
+now emits `CYLINDRICAL_SURFACE` faces, full turns with a seam and partial
+sweeps with arc-bounded caps.
 
-### R2.2 — Features, not triangles
+### R2.2 — Features, not triangles *(done)*
 
 **Why now.** This is the largest single capability unlock in the repo, the data
 is already being computed and discarded (gap 2), the documentation already
@@ -176,28 +176,52 @@ something trustworthy to assert a per-face measurement against.
   check's own metrics and in the JSON export. The same part through the two
   doors produces different records — not contradictory ones — and a consumer
   comparing two exports needs to know which it holds.
-- **Corner radii, measured.** *Still open, and the plan for it was wrong.* This
+- **Corner radii, measured.** *(done — and the plan for it was wrong.)* This
   section said cylindrical and toroidal faces in the STEP data give radii
-  directly. They do not, through this reader: `occt-import-js` returns
-  `{first, last, color}` per face and nothing else — no surface type, no radius,
-  no axis. So a radius cannot be read, it has to be **fitted** to the
-  tessellated triangles of a face group. That is more work and, as it turns out,
-  better: it works on any B-rep source, it degrades to an honest "not
-  measurable" on a face that fits nothing, and what it needs — an axis, a radius
-  and an extent per face — is exactly what holes and bosses need, so one piece
-  of work unlocks both remaining deliverables.
+  directly. They do not: `occt-import-js` returns `{first, last, color}` per
+  face and nothing else — no surface type, no radius, no axis. So a radius is
+  **fitted** rather than read. A cylinder's outward normals all lie square to
+  its axis, so they span a plane and the axis is the direction they never point
+  in — the eigenvector of their covariance with the smallest eigenvalue. A
+  circle fitted to the face's vertices projected onto that plane gives the
+  radius; which way the normals lean gives convex against concave; how far the
+  face sweeps separates a whole feature from a corner blend.
 
-  It also needs a fixture with a curved face, which means `step-write.mjs`
-  learning `CYLINDRICAL_SURFACE` and a seam — the thing R2.1 deliberately left
-  out because nothing wanted one yet. Something wants one now.
-- **Holes and bosses as features.** *Still open*, and behind the fitting above
-  rather than behind anything else.
+  This turned out better than reading a field would have been. It works on any
+  B-rep source rather than on one reader's metadata, it fails honestly — a face
+  that fits nothing is reported unmeasured rather than as a number — and it is
+  orientation-free: a rod down the (1,1,1) diagonal fits its axis to 1e-3, and
+  a test says so.
 
-**Exit criteria.** The drafted-frustum fixture reporting its draft exactly per
-face rather than as an area distribution is **met**: a 3° taper reads 3.000° on
-each of its four side faces and a box reads 0.00° on each of its. The fillet
-fixture's radius being measured, and `corners` carrying a non-zero weight, are
-**not** met and wait on the fitting work above.
+  The fit declines far more often than it succeeds, which took as much care as
+  making it succeed. A flat face is left flat; so is a face whose radius comes
+  out at five metres, which is a plane with rounding on it rather than a
+  fillet. That guard was the one a mutation test caught unprotected — removing
+  it broke nothing, because the fixtures never reached it — and it now has a
+  test built from the numerical edge it defends rather than from a shape.
+- **Holes and bosses as features.** *(done)* The same fit, read differently: a
+  full sweep is a bore or a boss rather than a blend. Reported, never judged —
+  a hole is not a corner — because "three Ø8 bores and a Ø12 boss" is what
+  someone wants before quoting a tool.
+- **`corners` off `weight: 0`.** *(done, and this is the decision the milestone
+  had to make.)* Neither of the two answers the roadmap offered was taken.
+  Rather than moving weight between the eight checks that sum to 100, or
+  widening the default budget for every part, the scored check is a **separate
+  key** — `corner_radii` — that is pushed only when there were faces to fit. An
+  STL keeps the advisory, the old budget and the old score, so no existing
+  export moves; a B-rep gains 8 points of exposure, exactly as the FPC and
+  wall-transition checks do. Eight rather than eleven for a reason worth
+  repeating: the check can only judge the radii that *exist*, and a corner
+  modelled dead sharp has no face to fit, so a check that cannot see the worst
+  version of its own defect should not carry the weight of one that can.
+
+**Exit criteria, all met.** A 3° taper reads 3.000° on each of its four side
+faces and a box reads 0.00° on each of its. A rod fits R8.000, a bore R6.000, a
+half-tube gives an external round and an internal fillet from one fixture, and a
+quarter rod reads 90°. Radii are measured rather than advised on, and
+`corner_radii` carries a weight — asserted as a budget of 108 on a part that can
+be measured and 100 on one that cannot, so the decision is in a test rather than
+only in a comment.
 
 **Risk.** Scope — and the mitigation held. "Feature recognition" can absorb a
 quarter with nothing shipped, so the deliverables were taken in the order given
@@ -205,75 +229,139 @@ and the first shipped on its own. Taking them in that order is also what
 surfaced the radius problem early, while it was still a re-plan rather than a
 half-built feature.
 
-### R2.3 — The Inventor loop under test
+### R2.3 — The Inventor loop under test *(done)*
 
 **Why now.** It is the differentiator (gap 3), it is unverified, and it has an
 external dependency that will change underneath it.
 
 **What ships.**
 
-- A fake InventorMCP server in `test/`: a small Node HTTP server speaking the
-  same routes `src/app/bridge.js` calls, returning a recorded STEP payload and a
-  parameter table. This is a fixture, not a mock of the network layer — it lets
-  the smoke test drive connect, export, parameter edit, rebuild and the History
-  entry as one flow.
-- Coverage of the three chip states the README promises — connected to Inventor,
-  connected to the simulator, nothing listening — plus the failure modes that
-  are not currently handled anywhere visible: a request that never returns, an
-  Inventor sitting on a modal dialog, a parameter edit rejected by the rebuild,
-  and a rebuild that succeeds but returns geometry at a different scale.
-- A recorded contract for the bridge protocol, so an InventorMCP release that
-  renames a route fails a test here rather than in front of a user. The bridge
-  talks to a separate repository on a separate release cycle; nothing currently
-  detects a drift between them.
-- Findings linked back to the feature that caused them. The feature tree already
-  arrives and is rendered (`src/app/panels-input.js:501-509`) but is
-  display-only. Once R2.2 gives findings a face, and the bridge gives faces a
-  feature, a finding can name the Inventor feature and the driving parameter
-  responsible — which is the difference between "fix this dimension" and "here
-  is a heatmap".
+- **A fake InventorMCP server.** *(done)* `test/lib/fake-bridge.mjs` — a real
+  HTTP server on its own origin speaking the real protocol, so `bridge.js` runs
+  its actual fetch calls against it. The part that matters is that it
+  **rebuilds**: a parameter change regenerates the STEP from the analytic solid
+  with the new value, so the loop is proved by measurement rather than by
+  wiring. Drive `wall` to 3 and the tool has to come back reading a 3 mm wall.
+  A server returning a canned payload would pass a test that proved nothing.
+- **The three chip states, and the failure modes.** *(done)* Connected to
+  Inventor, connected to the simulator, nothing listening — and then the ones
+  that were handled nowhere visible: a modal dialog in Inventor, a rebuild the
+  part refuses, a value Inventor cannot evaluate, a model whose STEP body 404s,
+  a request that never answers, and the quiet one — a rebuild that comes back
+  in inches, which errors nowhere and is caught by the unit check instead.
+- **A recorded contract for the protocol.** *(done)* The routes, methods and
+  headers the bridge actually calls, asserted as a sequence. InventorMCP is a
+  separate repository on its own release cycle and nothing would have noticed a
+  renamed route until a user did; renaming one now fails three assertions here.
+- **The loop in a browser too.** *(done)* The smoke suite drives it the way a
+  user does: the chip goes live, an `.ipt` opens through the bridge, the
+  driving parameters are listed, the analysis reads 2 mm, the parameter is
+  typed and committed with Enter, Inventor rebuilds, History records the
+  change, and the re-run reads 3 mm.
+- **Findings linked back to the feature that caused them.** *Still open, and
+  not this repository's to close.* This assumed the bridge "gives faces a
+  feature". It does not: what arrives is a flat list of `{kind, name,
+  suppressed}` with nothing tying a face to the feature that made it. R2.2 gave
+  findings a face, so the remaining half is a mapping only InventorMCP can
+  supply — a protocol change there, not work here. Worth asking for: with it, a
+  finding could name the feature and the driving parameter responsible, which
+  is the difference between "fix this dimension" and "here is a heatmap".
 
-**Exit criteria.** `npm test` covers the bridge with no Inventor installed. Each
-failure mode above produces a specific message rather than a generic one. The
-protocol contract fails on a renamed route.
+**Exit criteria, met.** `npm test` covers the bridge with no Inventor installed
+and no browser — 17 assertions in Node, 7 more in the browser suite. Each
+failure mode produces a specific message carrying its own fix rather than a
+status code, asserted on the text. The protocol contract fails on a renamed
+route: four mutations were checked, and renaming `/bridge/health` fails three
+assertions, dropping the `x-filename` header fails one, ignoring the server's
+`ok: false` convention fails three, and returning stale geometry from a rebuild
+fails one.
 
-**Risk.** A fixture server can drift from the real InventorMCP and give false
-confidence. Mitigate by recording the fixture payloads from a real session and
-dating them in the file.
+**Risk, and it is real.** A fixture server can drift from the real InventorMCP
+and give false confidence. The payloads are dated in the file against the routes
+`bridge.js` called on 2026-09-07, and the contract test is what should fail
+first if either side moves — but nothing here can detect the real server
+changing shape while the fake one stays still. Recording the fixture payloads
+from a live session, rather than shaping them from the client code as these
+were, would close that gap.
 
-### R2.4 — Numbers that get quoted
+### R2.4 — Numbers that get quoted *(done)*
 
 **Why now.** Because cycle time and cost are what someone asks for first, and
 because the tool is deliberately silent on both — correctly, until one question
 is answered.
 
-**The decision that gates it.** `coolK` in `src/core/materials.js` is documented
-as `tc = k × s²` with `s = half-wall` (materials.js:7). If that convention is
-wrong — if the tabulated values were written for full wall — every cycle time
-the tool could print is out by a factor of four. This has been the single open
-question since Phase 3 and it needs a moulding engineer, or a re-derivation from
-a source that states its convention explicitly, or calibration against a part
-with a known measured cycle. Two of those three are available without waiting
-for anybody.
+**The decision that gated it is made.** *(answered — see `docs/coolk.md`.)*
+`coolK` is written for the **full wall**, not the half-wall its comment claimed.
+Re-derived rather than asked, which was one of the three routes open and the one
+that needed nobody: rearranged through the plate-cooling solution, each
+coefficient implies a thermal diffusivity, and diffusivity is a measured
+property with a known range. The full-wall reading puts all sixteen materials
+inside 0.088–0.168 mm²/s; the half-wall reading puts every one of them three to
+seven times below any polymer that exists. For ABS to be half-wall *and*
+physical, the part would have to eject at 155 °C — 57 °C above its own HDT,
+still soft. The comment is corrected and `test/unit.mjs` asserts the convention,
+so it cannot drift back.
 
-**What ships, once that is settled.**
+Two things the answer does **not** settle, and the first is the one that still
+needs a judgement before a number goes on screen:
 
-- Cycle time, with the convention it assumes printed beside it, in the same
-  style as the cavity-pressure assumption already printed next to clamp force
-  (`src/analysis/shot.js`).
-- Piece-part cost: material mass at a price per kg, machine rate against the
-  machine size `nextMachineSize` already selects, cycle time and a cavity count.
-  Every input user-editable and every input shown, because a cost figure whose
-  assumptions are hidden is worse than no cost figure.
-- A tooling-cost band — not a number. Tooling depends on the undercut and slide
-  count the tool already computes, cavity count and finish, and a point estimate
-  would be false precision. A band, with the drivers listed, is defensible.
-- Cost in the JSON export and the PDF, clearly separated from the score. These
-  are not manufacturability verdicts and must not move the number.
+- The formula gives the **theoretical cooling floor** — centre plane first
+  reaching ejection temperature, mould wall held fixed, heat leaving in one
+  dimension. A real cycle runs longer; practice is commonly 1.5–2×. On a 2 mm
+  ABS wall that is 6.8 s against nearer 10–14 s. Whichever is printed has to say
+  which it is.
+- The polyolefins imply the *highest* diffusivities in the table (PP 0.160,
+  HDPE 0.166, PE 0.168) where a semi-crystalline's effective value should sit
+  lowest, because latent heat of crystallisation has to come out before the part
+  is rigid. Both readings share this, so it does not affect the convention — but
+  it does suggest `coolK` for the polyolefins is optimistic, and they would be
+  the first numbers argued with. Worth a datasheet check before any of this
+  reaches a quotation.
 
-**Exit criteria.** No unqualified cycle time appears anywhere until `coolK` is
-settled and the resolution is written down in `src/core/materials.js` next to
-the field. Cost figures state every assumption on the same page they appear on.
+**What shipped.**
+
+- **Cycle time, in three steps rather than one multiplier.** *(done)* The
+  cooling floor `k·s²` on the measured nominal wall — derived, and labelled a
+  lower bound; practical cooling at 1.3× it, because the floor assumes a mould
+  wall held at a fixed temperature and one-dimensional heat flow and a tool is
+  neither; and the cycle, practical cooling over cooling's 50–80% share. Both
+  factors are printed with the answer and exported with it, so a reader can
+  disagree with a step instead of with the number. Judged on the sphere-fit
+  nominal wall — the same conservative measure the checks are judged on — so a
+  cycle time cannot come out shorter than the wall the part was passed on.
+- **Piece-part cost, and silence without rates.** *(done)* Material at the
+  resin price entered plus machine time at the rate entered, shared across the
+  cavities. **No default prices**, which was the important decision: a
+  plausible-looking default is indistinguishable on screen from a real
+  quotation and travels further than it should. A missing rate produces no
+  cost and a sentence naming which rate is missing. What it produces is
+  labelled material-and-machine, not a piece price — no labour, packaging,
+  overhead, secondary operations or margin.
+- **Tooling as drivers, not a band.** *(done, and narrower than planned.)* The
+  roadmap wanted a currency band with the drivers listed. On reflection a band
+  is still currency, and what a tool costs depends on the toolmaker, the steel,
+  the country and the lead time — none of which is in this repository. So it
+  ships as the drivers alone: side actions, lifters, cavitation, abrasive
+  material, finish, envelope, each with what it does to the tool. The
+  moving-tooling counts read the same fields and the same 1 mm² threshold the
+  undercut check uses, so the two can never disagree about one part, and they
+  inherit its flat-parting-line caveat, which is printed with them.
+- **In both exports, and not in the score.** *(done)* The JSON and the PDF
+  carry the figures with every assumption attached. Nothing here is scored:
+  cycle time and cost are not pass-or-fail properties of a part, so they carry
+  no weight, appear as no check and cannot move the number. A test asserts a
+  part scores the same whether or not anyone has entered a resin price.
+
+**The judgement the derivation left open, made.** `docs/coolk.md` settled the
+convention but not whether a printed figure should be the floor or a practical
+time. Both are printed, labelled, and the factor between them is shown — which
+is the answer that does not require anyone to trust a single number.
+
+**Exit criteria, met.** `coolK` settled and written down next to the field. No
+unqualified cycle time appears anywhere — the floor is labelled a floor, the
+cycle is labelled an estimate, and both factors between them are on screen. Cost
+figures state every assumption on the same page they appear on, in the panel, in
+the PDF and in the JSON.
 
 **Risk.** This is the milestone most likely to be quoted from and least likely to
 be checked. It is also the one where being wrong is most expensive, which is why
@@ -464,10 +552,10 @@ for, and it has no automated coverage today.
 Release discipline first, because it is cheap and because a tagged build is what
 makes every later change traceable.
 
-R2.1 is done, which unblocks the two milestones after it. R2.2 and R2.3 can now
-run in parallel — they touch different directories and share only the STEP
-fixture, which exists — with R2.6 as filler for either, since it depends on
-nothing.
+R2.1, R2.2, R2.3 and R2.4 are done. What remains is independent of everything
+and of each other: R2.5 (two-shot registration, the FPC region, Vicat data),
+R2.6 (stable finding ids, build identity, the findings package) and R2.7
+(SpaceMouse) can be taken in any order.
 
 R2.7 depends on nothing and competes with nothing — it is viewer code, and the
 only file it shares with any other milestone is `src/app/camera.js`, which none
@@ -480,17 +568,19 @@ is much cheaper once R2.2 has made faces and bodies first-class.
 
 ## Decisions that need a human
 
-1. **`coolK`: half-wall or full wall?** Factor-of-four consequence. Gates cycle
-   time and everything costed from it.
+1. ~~**`coolK`: half-wall or full wall?**~~ *Answered: the full wall. Derived,
+   not asked — `docs/coolk.md`. What remains is a judgement rather than a fact:
+   whether a printed cycle time is the theoretical floor or a practical time,
+   and saying which on screen.*
 2. ~~**The OpenCascade module: vendor it for tests, or not?**~~ *Settled in
    R2.1: neither. It is an npm package, so it is a pinned devDependency and
    nothing was committed to git.*
 3. **`--vendor` as the committed default?** Trades 900 kB of file size for two
    fewer third-party runtime loads and the SRI question.
-4. **Does `corners`, once measurable, take weight from the other checks or widen
-   the budget?** The eight default checks sum to exactly 100 today; both answers
-   are defensible and the choice should be recorded, not discovered. Still open:
-   radii are not measurable yet, so `corners` still carries `weight: 0`.
+4. ~~**Does `corners`, once measurable, take weight from the other checks or
+   widen the budget?**~~ *Settled in R2.2: neither. The scored check is a
+   separate key that appears only where there are faces to fit, so an STL keeps
+   the budget and the score it always had.*
 
 ## Deliberately not on this roadmap
 
