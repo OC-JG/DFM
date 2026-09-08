@@ -25,6 +25,9 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, '..');
+/* The version the built file should be claiming, read from the same place
+   build.js reads it, so the check cannot pass by agreeing with itself. */
+const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
 const BUILT = join(ROOT, 'dfm-tool.html');
 const FIXTURES = join(HERE, 'fixtures');
 
@@ -150,6 +153,21 @@ async function main() {
     check('grade rendered', (await page.textContent('#scoreGrade')).trim().length > 0);
     check('checks rendered', (await page.locator('#checksList .check').count()) >= 6,
       `count=${await page.locator('#checksList .check').count()}`);
+    /* Build identity and finding references, on the page. Both are only
+       useful if a person can read them off the screen and quote them, which
+       is the one thing a unit test cannot check. */
+    check('the header names the build rather than a hardcoded version',
+      (await page.textContent('#buildLabel')).trim().length > 0
+      && (await page.textContent('#buildLabel')).includes(pkg.version),
+      await page.textContent('#buildLabel'));
+
+    const firstRef = await page.locator('#checksList .check .check-ref').first().textContent();
+    check('every finding shows the reference a DFM response is written against',
+      (await page.locator('#checksList .check .check-ref').count())
+        === (await page.locator('#checksList .check').count())
+      && /^[A-Z0-9-]+$/.test(firstRef.trim()),
+      `first=${firstRef}, refs=${await page.locator('#checksList .check .check-ref').count()}`);
+
     check('score strips match checks',
       (await page.locator('#scoreBars .score-strip').count()) === (await page.locator('#checksList .check').count()));
     check('run counter incremented', (await page.textContent('#runCount')) === '001');

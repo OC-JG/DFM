@@ -55,6 +55,24 @@ const missing = [...wanted]
 const SLOTS = ['<!--@VENDOR@-->', '/*@CSS@*/', '/*@APP@*/'];
 const lostSlots = SLOTS.filter((slot) => !html.includes(slot));
 
+/*
+ * Slots that live in source modules rather than in the markup, each with the
+ * file that must carry it. build.js fails loudly if one is missing, which is
+ * the right behaviour and also means nobody finds out until they build — and
+ * the ones below fail *silently* in a different way: a build-identity token
+ * left unsubstituted makes every export claim to be an unbuilt source tree.
+ */
+const MODULE_SLOTS = [
+  ["/*@VERSION@*/'dev'", 'core/build-info.js'],
+  ["/*@FINGERPRINT@*/'source'", 'core/build-info.js'],
+  ["/*@STAMP@*/''", 'core/build-info.js'],
+  ['/*@VENDORED@*/false', 'export/pdf.js'],
+  ['/*@WORKER_SRC@*/', 'app/analysis-runner.js'],
+];
+const lostModuleSlots = MODULE_SLOTS
+  .filter(([slot, file]) => !readFileSync(path.join(SRC, file), 'utf8').includes(slot))
+  .map(([slot, file]) => `  ${slot}  (expected in ${file})`);
+
 let failed = false;
 
 if (missing.length) {
@@ -65,6 +83,10 @@ if (lostSlots.length) {
   failed = true;
   console.error(`\n  build slot(s) missing from index.html: ${lostSlots.join(', ')}`);
 }
+if (lostModuleSlots.length) {
+  failed = true;
+  console.error(`\n  build slot(s) missing from src/:\n${lostModuleSlots.join('\n')}`);
+}
 
 if (failed) {
   console.error('');
@@ -72,5 +94,5 @@ if (failed) {
 }
 
 console.log(`  ok    ${wanted.size} scripted ids all present in ${declared.size} declared`);
-console.log(`  ok    all ${SLOTS.length} build slots intact`);
+console.log(`  ok    all ${SLOTS.length + MODULE_SLOTS.length} build slots intact`);
 console.log('\n  contract holds\n');

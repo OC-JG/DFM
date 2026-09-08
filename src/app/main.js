@@ -1,4 +1,5 @@
 import { MATERIALS } from '../core/materials.js';
+import { buildLabel, BUILD_FINGERPRINT } from '../core/build-info.js';
 import { effectiveMinDraft, SURFACE_FINISHES } from '../core/finishes.js';
 import { parseSTL } from '../geometry/stl.js';
 import { parseSTEP } from '../geometry/step.js';
@@ -961,6 +962,12 @@ function boot() {
   panel.bindForm(onFieldChange);
 
   $('sessionId').textContent = runtime.sessionId;
+  /* Which build this is, where someone can read it off the screen and quote
+     it — the same string the PDF footer and the JSON export carry. */
+  $('buildLabel').textContent = buildLabel();
+  $('buildLabel').title = BUILD_FINGERPRINT === 'source'
+    ? 'Running from source, not from a build'
+    : `Source fingerprint ${BUILD_FINGERPRINT}`;
   startClock();
 
   const hasThree = checkDependencies();

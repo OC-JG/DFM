@@ -25,7 +25,10 @@
 <header>
   <div class="brand">
     <img src="data:image/png;base64,@LOGO@" alt="OnlyCat" class="brand-logo">
-    <div class="brand-sub">Injection&nbsp;Moulding&nbsp;Analyser&nbsp;//&nbsp;v2.0</div>
+    <!-- The version was hardcoded here and read v2.0 regardless of what the
+         file actually was. Set from build-info at boot instead, so the number
+         on screen is the number in the exports. -->
+    <div class="brand-sub">Injection&nbsp;Moulding&nbsp;Analyser&nbsp;//&nbsp;<span id="buildLabel">dev</span></div>
   </div>
 
   <!-- Whether a local Inventor can be reached. Separate from the run status

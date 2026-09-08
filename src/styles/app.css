@@ -643,6 +643,18 @@ details.step > .step-body { animation: revealDown 0.16s ease; }
   text-overflow: ellipsis;
 }
 .body-row .body-tris { font-family: var(--mono); font-size: 9px; opacity: 0.55; flex-shrink: 0; }
+
+/* Finding references — the code a factory's DFM response is written against.
+   Quiet enough not to compete with the finding's name, monospaced so it reads
+   as something to be copied. */
+.check-ref, .tooling-ref {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  opacity: 0.45;
+  flex-shrink: 0;
+  cursor: help;
+}
 .body-swatch {
   width: 10px; height: 10px;
   border-radius: 2px;

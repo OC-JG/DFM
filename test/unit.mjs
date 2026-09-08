@@ -25,6 +25,8 @@ import {
 } from '../src/rules/scoring.js';
 import { buildExportJSON } from '../src/export/json.js';
 import { compareRuns } from '../src/rules/compare.js';
+import { buildIdentity, buildLabel, TOOL_VERSION, BUILD_FINGERPRINT } from '../src/core/build-info.js';
+import { featureId, checkRef, FEATURE_GRID_MM, FEATURE_KINDS } from '../src/rules/findings.js';
 import { estimateShot, nextMachineSize, CAVITY_PRESSURE_MPA } from '../src/analysis/shot.js';
 import {
   estimateCycle, estimatePartCost, toolingDrivers,
@@ -1485,6 +1487,43 @@ describe('revision comparison');
     assert(d.caveats.some((c) => /Material changed/.test(c)), `caveats: ${d.caveats.join(' | ')}`);
   });
 
+  it('says when the rules may have moved between the two runs', () => {
+    /*
+     * The caveat the comparison could not carry until exports named their
+     * build. Three states, and each is its own sentence: a version change, a
+     * source change at the same version — the normal state between releases,
+     * and exactly when thresholds move most — and a record from before builds
+     * were named at all, which is a gap rather than a match.
+     */
+    const stamp = (rec, build) => ({ ...rec, build });
+    const here = buildIdentity();
+
+    const olderVersion = compareRuns(
+      stamp(drafted, { ...here, tool_version: '1.9.0', source_fingerprint: 'aaaaaaaaaaaa' }),
+      stamp(drafted, here));
+    assert(olderVersion.caveats.some((c) => /tool changed between these runs: 1\.9\.0/.test(c)),
+      `caveats: ${olderVersion.caveats.join(' | ')}`);
+
+    const sameVersion = compareRuns(
+      stamp(drafted, { ...here, tool_version: '2.0.0', source_fingerprint: 'aaaaaaaaaaaa' }),
+      stamp(drafted, { ...here, tool_version: '2.0.0', source_fingerprint: 'bbbbbbbbbbbb' }));
+    assert(sameVersion.caveats.some((c) => /different sources/.test(c)),
+      `caveats: ${sameVersion.caveats.join(' | ')}`);
+
+    /* An export from before builds were named. `drafted` carries one now, so
+       the old shape has to be reconstructed rather than assumed. */
+    const { build: _dropped, ...unstamped } = drafted;
+    const unnamed = compareRuns(unstamped, stamp(drafted, here));
+    assert(unnamed.caveats.some((c) => /does not name the build/.test(c)),
+      `caveats: ${unnamed.caveats.join(' | ')}`);
+
+    /* And silence when the two agree — a caveat on every comparison is a
+       caveat nobody reads. */
+    const same = compareRuns(stamp(drafted, here), stamp(drafted, here));
+    assert(!same.caveats.some((c) => /build|tool changed|different sources/i.test(c)),
+      `an identical build should raise no build caveat: ${same.caveats.join(' | ')}`);
+  });
+
   it('notices when the same geometry is compared with itself', () => {
     const d = compareRuns(drafted, drafted);
     assert(d.caveats.some((c) => /same geometry twice/.test(c)), `caveats: ${d.caveats.join(' | ')}`);
@@ -2621,6 +2660,174 @@ describe('FPC — what the located insert changes in the rules');
     const c = find(runDFM({ ...FPC_ON, mesh: goodMesh, fpcRegion: goodRegion }), 'fpc');
     assert(/Pick a gate location and re-run/.test(c.detail), 'must ask for a gate');
     assert(!c.metrics.some((m) => m[0] === 'Gate to insert'), 'and quote no distance');
+  });
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('finding references');
+{
+  it('a check is quoted by its key, not by a second identifier', () => {
+    /* A run emits at most one finding per key, so the key already identifies
+       it permanently. Anything derived from it would be a second thing to keep
+       in step with the first. */
+    eq(checkRef('wall'), 'WALL', 'plain key:');
+    eq(checkRef('corner_radii'), 'CORNER-RADII', 'underscores read as hyphens:');
+    eq(checkRef('ts_coverage'), 'TS-COVERAGE', 'two-shot key:');
+    for (const key of Object.keys(CHECK_RISK_PROFILES)) {
+      assert(/^[A-Z0-9-]+$/.test(checkRef(key)), `${key} → "${checkRef(key)}" is not quotable`);
+    }
+    /* Distinct keys must stay distinct once upper-cased and hyphenated. */
+    const refs = Object.keys(CHECK_RISK_PROFILES).map(checkRef);
+    eq(new Set(refs).size, refs.length, 'two checks share a reference:');
+  });
+
+  it('a located feature is identified by where it is, not by its index', () => {
+    const a = featureId(FEATURE_KINDS.slide, [12.4, 30.1, 5.0]);
+    eq(a, featureId(FEATURE_KINDS.slide, [12.4, 30.1, 5.0]), 'the same place twice:');
+    assert(a.startsWith('UCS-'), `the kind should be readable: ${a}`);
+    assert(a.length <= 12, `too long to write in an email: ${a}`);
+    /* A slide and a lifter at the same place are different findings, and the
+       prefix is what says so. */
+    const lifter = featureId(FEATURE_KINDS.lifter, [12.4, 30.1, 5.0]);
+    assert(lifter !== a, 'kind must discriminate');
+    eq(lifter.split('-')[1], a.split('-')[1],
+      'the same place should hash the same whichever action it needs:');
+  });
+
+  it('survives a move smaller than the grid, and not one larger', () => {
+    /*
+     * This is the property the id exists for and the one worth stating: a
+     * response written against last month's revision still matches a boss
+     * that moved a tenth, and does not match one that moved across the part.
+     * The consequence is intended, and documented at the grid constant.
+     */
+    /* Stated in millimetres rather than in grid cells, so the assertion is
+       about the behaviour someone gets and not about whatever the constant
+       happens to be: a quarter of a millimetre is a revision tweak and must
+       survive, twenty millimetres is somewhere else and must not. */
+    const base = [20, 20, 20];
+    eq(featureId('UCS', [20.25, 19.75, 20]), featureId('UCS', base),
+      'a quarter-millimetre move:');
+    assert(featureId('UCS', [40, 20, 20]) !== featureId('UCS', base),
+      'a twenty-millimetre move must produce a different reference');
+    assert(FEATURE_GRID_MM >= 0.5 && FEATURE_GRID_MM <= 5,
+      `the grid is ${FEATURE_GRID_MM} mm, which is outside what those two statements can both hold for`);
+  });
+
+  it('does not depend on the sign of zero, or on how the number was reached', () => {
+    /* -0 and 0 stringify differently, which would give one physical place two
+       references depending on which way a centroid was averaged into it. */
+    eq(featureId('WT', [-0, 0, -0]), featureId('WT', [0, 0, 0]), 'negative zero:');
+    eq(featureId('WT', [0.1 + 0.2, 0, 0]), featureId('WT', [0.3, 0, 0]),
+      'floating-point noise well inside the grid:');
+  });
+
+  it('a wall transition carries one too', () => {
+    /* The other located finding. Same requirement, and the same measurement
+       rather than an assertion about the helper: two analyses of one part
+       must agree transition for transition. */
+    const soup = S.subdivideSoup(S.hollowBox([40, 30, 20], 2), 1);
+    const step = S.toSoup([
+      ...soup.positions,
+      ...S.subdivideSoup(S.box([10, 10, 26]), 1).positions,
+    ]);
+    const first = analyse(weld(step), { suggestGate: false });
+    const second = analyse(weld(step), { suggestGate: false });
+    const ids = (a) => (a.wallTransitions || []).map((t) => t.id);
+    assert(ids(first).length > 0, 'the fixture should produce wall transitions to identify');
+    eq(ids(first).join(','), ids(second).join(','), 'transition references across two runs:');
+    for (const id of ids(first)) assert(/^WT-[A-Z0-9]+$/.test(id), `malformed reference ${id}`);
+  });
+
+  it('two runs of the same part give every region the same reference', () => {
+    /* The exit criterion, measured rather than asserted about the helper: two
+       analyses of the same geometry, and the ids have to agree region for
+       region — including across the sort, which orders by area. */
+    const soup = S.internalLedgeCup();
+    const first = analyse(weld(soup), { suggestGate: false });
+    const second = analyse(weld(soup), { suggestGate: false });
+    const ids = (a) => (a.undercutRegions || []).filter((r) => r.area > 1).map((r) => r.id);
+    const one = ids(first);
+    assert(one.length > 0, 'the fixture should produce undercut regions to identify');
+    eq(one.join(','), ids(second).join(','), 'region references across two runs:');
+    eq(new Set(one).size, one.length, `two regions share a reference: ${one.join(', ')}`);
+    for (const id of one) assert(/^UC[SL]-[A-Z0-9]+$/.test(id), `malformed reference ${id}`);
+  });
+
+  it('a region reference does not move when another region appears', () => {
+    /*
+     * The defect this replaces. Regions are sorted by area, so adding one
+     * elsewhere on the part used to renumber the rest — and a factory's "point
+     * 3" then pointed at something else entirely.
+     */
+    const plain = analyse(weld(S.internalLedgeCup()), { suggestGate: false });
+    const more = analyse(weld(S.internalLedgeCup({ ledgeZ: [8, 2] })), { suggestGate: false });
+    const byId = (a) => new Map((a.undercutRegions || [])
+      .filter((r) => r.area > 1).map((r) => [r.id, r]));
+    const before = byId(plain);
+    const after = byId(more);
+    const shared = [...before.keys()].filter((id) => after.has(id));
+    assert(shared.length > 0,
+      `no region survived the addition: ${[...before.keys()].join(',')} vs ${[...after.keys()].join(',')}`);
+    for (const id of shared) {
+      close(after.get(id).centroid[2], before.get(id).centroid[2], FEATURE_GRID_MM,
+        `${id} kept its reference but moved:`);
+    }
+  });
+}
+
+describe('build identity');
+{
+  it('an unbuilt source tree says so rather than claiming a version', () => {
+    /* These tests run against src/, which build.js has not substituted. The
+       honest answer is "not a build", and every artifact made here has to
+       carry that rather than a version number it did not come from. */
+    eq(TOOL_VERSION, 'dev', 'version from source:');
+    eq(BUILD_FINGERPRINT, 'source', 'fingerprint from source:');
+    eq(buildIdentity().built, false, 'built:');
+    eq(buildIdentity().release, null, 'release:');
+    assert(buildLabel().includes('dev'), `label: ${buildLabel()}`);
+  });
+
+  it('the export carries every reference a response could be written against', () => {
+    /* An export that omits the references is an export nobody can answer
+       point by point, which is the whole reason they exist. */
+    const mesh = analyse(weld(S.internalLedgeCup()), { suggestGate: false });
+    const r = runDFM({ ...CLEAN_INPUT, mesh });
+    const json = buildExportJSON({
+      sessionId: 'TEST', dfm: { input: CLEAN_INPUT, result: r },
+      analysis: mesh, twoShot: null, interface: null, validation: null,
+      settings: { analysisMode: 'single', windowType: 'none' },
+    });
+    for (const c of json.checks) {
+      eq(c.ref, checkRef(c.key), `check ${c.key} reference:`);
+    }
+    const regions = json.mesh_summary.undercut_regions;
+    assert(regions.length > 0, 'the fixture should export undercut regions');
+    for (const region of regions) {
+      assert(/^UC[SL]-[A-Z0-9]+$/.test(region.id || ''),
+        `exported region has no usable reference: ${JSON.stringify(region.id)}`);
+    }
+    /* Same references the analysis produced, not a second set minted here. */
+    const fromAnalysis = mesh.undercutRegions.filter((x) => x.area > 1).map((x) => x.id);
+    eq(regions.map((x) => x.id).join(','), fromAnalysis.join(','), 'exported vs measured:');
+  });
+
+  it('every export carries the same identity, from one place', () => {
+    const r = runDFM({ ...CLEAN_INPUT, mesh: meshFor(S.hollowBox([40, 30, 20], 2)) });
+    const json = buildExportJSON({
+      sessionId: 'TEST', dfm: { input: CLEAN_INPUT, result: r },
+      analysis: null, twoShot: null, interface: null, validation: null,
+      settings: { analysisMode: 'single', windowType: 'none' },
+    });
+    /* Not a copy of the block, but the block: a second description of the
+       build is a second thing that can be wrong. */
+    eq(JSON.stringify(json.build), JSON.stringify(buildIdentity()), 'export build block:');
+    for (const k of ['tool_version', 'source_fingerprint', 'release', 'built']) {
+      assert(k in json.build, `the export is missing build.${k}`);
+    }
   });
 }
 
