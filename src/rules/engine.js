@@ -71,12 +71,22 @@ export function runDFM(input) {
 
     const matLo = m.wallLo, matHi = m.wallHi;
 
-    /* An FPC insert raises the effective floor: the overmould has to contain
-       the flex plus cover on both faces. We cannot yet locate the FPC region
-       on the mesh, so the stricter floor is applied to the part as a whole. */
+    /*
+     * An FPC insert raises the effective floor: the overmould has to contain
+     * the flex plus cover on both faces. Where the insert cannot be located
+     * the stricter floor has to be applied to the part as a whole, which
+     * over-reports — most of a part is nowhere near the flex.
+     *
+     * Where it *can* be located, it is not applied here at all. The FPC check
+     * measures the cover over the insert directly, and applying a part-wide
+     * floor as well would fail a perfectly good part twice: once on a wall
+     * that never sees the flex, and once on a figure that was measured
+     * properly.
+     */
+    const fpcLocated = !!(input.fpcRegion && input.fpcRegion.located);
     let effectiveMinWall = matLo;
     let fpcFloor = null;
-    if (input.fpc && input.fpc.enabled) {
+    if (input.fpc && input.fpc.enabled && !fpcLocated) {
       fpcFloor = input.fpc.thickness + 2 * input.fpc.cover;
       if (fpcFloor > matLo) effectiveMinWall = fpcFloor;
     }
@@ -790,18 +800,75 @@ export function runDFM(input) {
       notes.push(`${m.name} at ${m.meltC}°C is FPC-safe.`);
     }
 
-    // 2. Wall vs FPC floor
-    let nominalWall = input.wallThk;
-    if (judged) nominalWall = judged.stat.median;
-    if (nominalWall < fpcFloor) {
-      status = 'fail'; severity = escalate(severity, 'critical');
-      notes.push(`Nominal wall ${nominalWall.toFixed(2)} mm < required ${fpcFloor.toFixed(2)} mm (FPC ${fpc.thickness.toFixed(2)} + 2×${fpc.cover.toFixed(2)} cover) — FPC will sit at or above the part surface in overmoulded regions.`);
-    } else if (nominalWall < fpcFloor + 0.4) {
-      if (status === 'ok') status = 'warn';
-      severity = escalate(severity, 'minor');
-      notes.push(`Nominal wall ${nominalWall.toFixed(2)} mm has only ${(nominalWall - fpcFloor).toFixed(2)} mm margin above FPC floor — verify shrinkage doesn't bring polymer below FPC plane.`);
+    // 2. Cover over the insert
+    /*
+     * Two versions of the same question, and which one runs depends on
+     * whether anyone has said where the flex is.
+     *
+     * Located: the cover is measured — a ray from the insert surface outward
+     * to the polymer, at two thousand sampled points — so the check can say
+     * how thin it gets and over how much of the insert, which is what a
+     * moulder needs. Cover that is missing entirely is reported separately
+     * from cover that is thin: a contact pad or a connector tail is meant to
+     * reach daylight, and folding a deliberate opening into the minimum would
+     * report zero cover on a part that is fine.
+     *
+     * Not located: the old comparison, the part's nominal wall against the
+     * floor. It over-reports — most of a part is nowhere near the flex — and
+     * it now says so.
+     */
+    const regionMeasured = input.fpcRegion && input.fpcRegion.located;
+    if (regionMeasured) {
+      const reg = input.fpcRegion;
+      const cs = reg.coverStats;
+      if (!cs || !cs.n) {
+        status = 'fail'; severity = escalate(severity, 'critical');
+        notes.push(`No polymer covers the designated insert anywhere: every one of ${reg.samples} sampled points on it reaches open air. Either the wrong body is marked as the flex, or it is not inside the moulding.`);
+      } else {
+        const need = fpc.cover;
+        if (cs.min < need) {
+          status = 'fail'; severity = escalate(severity, 'critical');
+          notes.push(`Cover over the insert falls to ${cs.min.toFixed(2)} mm against the ${need.toFixed(2)} mm specified, over ${reg.belowRequiredPct.toFixed(0)}% of its area (median ${cs.median.toFixed(2)} mm). Thin cover is where the flex prints through the surface, and where a trace sits close enough to the melt front to be damaged.`);
+        } else if (cs.min < need * 1.5) {
+          if (status === 'ok') status = 'warn';
+          severity = escalate(severity, 'minor');
+          notes.push(`Cover over the insert is ${cs.min.toFixed(2)} mm at its thinnest against the ${need.toFixed(2)} mm specified (median ${cs.median.toFixed(2)} mm) — inside the specification, with little to give. Check that shrinkage does not draw the surface down onto the flex.`);
+        } else {
+          notes.push(`Cover over the insert is ${cs.min.toFixed(2)} mm at its thinnest, median ${cs.median.toFixed(2)} mm, against the ${need.toFixed(2)} mm specified.`);
+        }
+
+        /*
+         * Exposed area is a question, not a verdict, and it is asked rather
+         * than noted: whether an opening in the overmould is a contact pad, a
+         * connector tail or a mistake is intent, and nothing in the geometry
+         * carries intent. A part with a legitimate tail therefore keeps a
+         * minor finding for as long as it exists — which is the right cost,
+         * because the alternative is a flex circuit reaching daylight in a
+         * finished part and nobody being asked about it.
+         */
+        if (reg.uncoveredPct > 0.5) {
+          if (status === 'ok') status = 'warn';
+          severity = escalate(severity, 'minor');
+          notes.push(`${reg.uncoveredPct.toFixed(0)}% of the insert's area has no polymer over it: those points on it reach open air. Confirm that is the contact pad or connector tail you intended — this check cannot tell an opening from an oversight, and unintended exposure is flex circuit on the outside of a finished part.`);
+        }
+        if (reg.indeterminatePct > 1) {
+          notes.push(`Cover could not be established over ${reg.indeterminatePct.toFixed(0)}% of the insert: rays through that area cross more surfaces than the measurement follows. The figures above describe the rest of it.`);
+        }
+      }
     } else {
-      notes.push(`Wall margin above FPC: ${(nominalWall - fpcFloor).toFixed(2)} mm.`);
+      let nominalWall = input.wallThk;
+      if (judged) nominalWall = judged.stat.median;
+      const wideCaveat = ' Judged on the part\u2019s nominal wall, because nothing says where the flex is: mark its body in the Solid bodies list and the cover over it is measured instead of inferred. Applied part-wide this over-reports, since most of a part is nowhere near the insert.';
+      if (nominalWall < fpcFloor) {
+        status = 'fail'; severity = escalate(severity, 'critical');
+        notes.push(`Nominal wall ${nominalWall.toFixed(2)} mm < required ${fpcFloor.toFixed(2)} mm (FPC ${fpc.thickness.toFixed(2)} + 2×${fpc.cover.toFixed(2)} cover) — FPC will sit at or above the part surface in overmoulded regions.${wideCaveat}`);
+      } else if (nominalWall < fpcFloor + 0.4) {
+        if (status === 'ok') status = 'warn';
+        severity = escalate(severity, 'minor');
+        notes.push(`Nominal wall ${nominalWall.toFixed(2)} mm has only ${(nominalWall - fpcFloor).toFixed(2)} mm margin above FPC floor — verify shrinkage doesn't bring polymer below FPC plane.${wideCaveat}`);
+      } else {
+        notes.push(`Wall margin above FPC: ${(nominalWall - fpcFloor).toFixed(2)} mm.${wideCaveat}`);
+      }
     }
 
     // 3. Anchor strategy
@@ -826,10 +893,40 @@ export function runDFM(input) {
       notes.push(`Shrinkage differential acceptable for FPC retention (${m.name} ${m.shrinkLo}–${m.shrinkHi}%).`);
     }
 
-    // 5. Gate proximity (advisory — the FPC region is not yet located on the mesh)
-    notes.push(mesh && mesh.flowAnalysis
-      ? 'Verify gate is at least one wall thickness away from the FPC region — direct gate impingement can displace or wrinkle the insert. Re-pick gate if it sits over the FPC area.'
-      : 'Pick a gate location and re-run to evaluate flow-front impingement on the FPC region.');
+    // 5. Gate proximity
+    /*
+     * Measured once the insert is located and a gate has been picked: the
+     * shortest distance from the gate to the insert, against the wall it has
+     * to fill through. The threshold is the one the advisory it replaces
+     * named — one wall thickness — and the reason is the flow front's speed
+     * at the gate rather than anything about the flex: a jet arriving
+     * straight onto a thin insert lifts or wrinkles it before the cavity
+     * packs, and a wall's worth of travel is what lets the front spread and
+     * slow first.
+     */
+    const gateWall = (judged && judged.stat.median) || input.wallThk || 2;
+    if (regionMeasured && input.fpcRegion.gateDistance != null) {
+      const d = input.fpcRegion.gateDistance;
+      if (d <= 0.01) {
+        status = 'fail'; severity = escalate(severity, 'critical');
+        notes.push(`The gate sits on the insert (${d.toFixed(2)} mm from it). The melt front will arrive on the flex at full injection speed and displace it. Move the gate.`);
+      } else if (d < gateWall) {
+        status = 'fail'; severity = escalate(severity, 'critical');
+        notes.push(`The gate is ${d.toFixed(1)} mm from the insert, inside the ${gateWall.toFixed(2)} mm wall it fills through — close enough for the front to still be a jet when it reaches the flex, which is what wrinkles or displaces it. Move the gate at least a wall away.`);
+      } else if (d < gateWall * 3) {
+        if (status === 'ok') status = 'warn';
+        severity = escalate(severity, 'minor');
+        notes.push(`The gate is ${d.toFixed(1)} mm from the insert — clear of the ${gateWall.toFixed(2)} mm wall, without much to spare. Worth confirming on a short-shot trial that the front has spread before it arrives.`);
+      } else {
+        notes.push(`The gate is ${d.toFixed(1)} mm from the insert, comfortably clear of the ${gateWall.toFixed(2)} mm wall it fills through.`);
+      }
+    } else if (regionMeasured) {
+      notes.push('Pick a gate location and re-run: with the insert marked, the distance from the gate to it is measured rather than left to you to check.');
+    } else {
+      notes.push(mesh && mesh.flowAnalysis
+        ? 'Verify gate is at least one wall thickness away from the FPC region — direct gate impingement can displace or wrinkle the insert. Re-pick gate if it sits over the FPC area. Mark the flex in the Solid bodies list and this distance is measured instead.'
+        : 'Pick a gate location and re-run to evaluate flow-front impingement on the FPC region.');
+    }
 
     checks.push({
       key: 'fpc', name: 'FPC overmoulding', status, detail: notes.join(' '), severity,
@@ -838,9 +935,20 @@ export function runDFM(input) {
         ['Material melt', `${m.meltC}°C`],
         ['FPC thickness', `${fpc.thickness.toFixed(2)} mm`],
         ['Cover each side', `${fpc.cover.toFixed(2)} mm`],
-        ['Effective wall floor', `${fpcFloor.toFixed(2)} mm`],
         ['Anchors', fpc.anchors.toUpperCase()],
-      ],
+        /* Which of the two versions of this check ran, beside its numbers:
+           a measured cover and an inferred one are not the same claim. */
+        ['Insert', regionMeasured ? 'Located — cover measured' : 'Not located — judged part-wide'],
+        regionMeasured && input.fpcRegion.coverStats
+          ? ['Min cover measured', `${input.fpcRegion.coverStats.min.toFixed(2)} mm`] : null,
+        regionMeasured && input.fpcRegion.coverStats
+          ? ['Median cover', `${input.fpcRegion.coverStats.median.toFixed(2)} mm`] : null,
+        regionMeasured && input.fpcRegion.uncoveredPct > 0.5
+          ? ['Insert area uncovered', `${input.fpcRegion.uncoveredPct.toFixed(0)}%`] : null,
+        regionMeasured && input.fpcRegion.gateDistance != null
+          ? ['Gate to insert', `${input.fpcRegion.gateDistance.toFixed(1)} mm`] : null,
+        regionMeasured ? null : ['Effective wall floor', `${fpcFloor.toFixed(2)} mm`],
+      ].filter(Boolean),
     });
   }
 

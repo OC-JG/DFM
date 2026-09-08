@@ -515,6 +515,55 @@ async function main() {
       await stepPage.locator('#bodiesSection').count() > 0
       && (await stepPage.locator('#bodiesList .body-row, #bodiesList > *').count()) >= 2,
       `rows=${await stepPage.locator('#bodiesList > *').count()}`);
+
+    /*
+     * The FPC designation, end to end. Everything about it is unit-tested
+     * except the part that matters here: that a click in the body list
+     * reaches the analysis at all. The fixture is a 4 mm housing with a
+     * 0.2 mm flex on its mid-plane, so the cover the check must report is
+     * 1.90 mm — a number that cannot come from anywhere else on the page.
+     */
+    await stepPage.setInputFiles('#fileInput', join(FIXTURES, 'part-fpc.step'));
+    await stepPage.waitForFunction(
+      () => document.getElementById('statusPill').textContent.includes('LOADED'), null, { timeout: 90000 });
+
+    check('the FPC column is absent until the check is switched on',
+      (await stepPage.locator('#bodiesList .body-fpc').count()) === 0
+      && await stepPage.locator('#bodiesFpcHint').isHidden(),
+      `buttons=${await stepPage.locator('#bodiesList .body-fpc').count()}`);
+
+    /* The control lives in a collapsed section, so open it the way a user
+       would rather than reaching past the fact that it is closed. */
+    await stepPage.locator('summary', { hasText: 'Overmoulded inserts' }).click();
+    await stepPage.check('#fpcEnabled');
+    await stepPage.fill('#fpcCover', '0.5');
+    await stepPage.locator('#fpcCover').blur();
+    check('switching on FPC overmoulding offers the designation',
+      (await stepPage.locator('#bodiesList .body-fpc').count()) === 2
+      && await stepPage.locator('#bodiesFpcHint').isVisible(),
+      `buttons=${await stepPage.locator('#bodiesList .body-fpc').count()}`);
+
+    await stepPage.click('#runBtn');
+    await stepPage.waitForFunction(
+      () => document.getElementById('resultStatus').textContent === 'complete', null, { timeout: 90000 });
+    const beforeMark = await stepPage.locator('#checksList .check', { hasText: 'FPC overmoulding' }).first().textContent();
+    check('with nothing marked the FPC check says it is judging part-wide',
+      /Not located/.test(beforeMark), beforeMark.slice(0, 160));
+
+    /* The second body is the flex. */
+    await stepPage.locator('#bodiesList .body-row').nth(1).locator('.body-fpc').click();
+    check('the marked body is shown as marked',
+      await stepPage.locator('#bodiesList .body-row').nth(1).locator('.body-fpc').getAttribute('aria-pressed') === 'true'
+      && (await stepPage.textContent('#bodiesCount')).includes('marked FPC'),
+      await stepPage.textContent('#bodiesCount'));
+
+    await stepPage.click('#runBtn');
+    await stepPage.waitForFunction(
+      () => document.getElementById('resultStatus').textContent === 'complete', null, { timeout: 90000 });
+    const afterMark = await stepPage.locator('#checksList .check', { hasText: 'FPC overmoulding' }).first().textContent();
+    check('marking the flex makes the check measure the cover over it',
+      /Located/.test(afterMark) && /1\.90 mm/.test(afterMark), afterMark.slice(0, 200));
+
     await stepPage.close();
   } finally {
     await browser.close();

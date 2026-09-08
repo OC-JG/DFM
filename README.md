@@ -544,7 +544,24 @@ build.
   uploaded files in a local Inventor session, so the server binds to localhost
   and only accepts requests from `file://` and localhost origins. Do not expose
   it on a network interface.
+- **The FPC insert has to be pointed at.** Where a multi-body import carries
+  the flex as its own solid, marking it in the Solid bodies list turns two
+  advisories into measurements: the polymer over the insert, sampled along the
+  outward normal at two thousand points, and the distance from the gate to it.
+  Where nothing is marked — an STL, a single-body export, or an assembly the
+  flex was never modelled in — the check falls back to comparing the part's
+  nominal wall against thickness plus twice cover, applied part-wide, which
+  over-reports because most of a part is nowhere near the insert. Both versions
+  say which one they are.
+
 - **Wall transitions remain advisory on STL.** Thickness sampling is genuinely
   unreliable at corners and rim edges; the check is off by default and says so.
-- **Two-shot alignment is assumed.** The interface pass expects both meshes to
-  be exported in a shared coordinate system; there is no registration step.
+- **Two-shot alignment is corrected, not diagnosed.** Where shot 2's mating
+  surface sits more than 1% of the part's size off shot 1, the tool searches
+  for the rigid transform that puts them together, applies it if it finds one,
+  and reports how far it moved shot 2 and what residual is left. What it cannot
+  do is say *why* they were apart: a part exported in its own coordinate system
+  and an overmould that genuinely misses its substrate produce the identical
+  gap. The finding names both readings and leaves the choice with the reader,
+  which is also why it carries no score. Scale is not fitted — a pair 25.4×
+  apart is a units mistake and correcting it silently would hide one.

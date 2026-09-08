@@ -369,7 +369,7 @@ export function clearFileInfo() {
 
 // ── multi-body STEP selector ───────────────────────────────────────────────
 
-export function renderBodiesList(bodies, onToggle) {
+export function renderBodiesList(bodies, onToggle, onToggleFpc) {
   const section = $('bodiesSection');
   if (!bodies || bodies.length < 2) {
     section.hidden = true;
@@ -377,26 +377,51 @@ export function renderBodiesList(bodies, onToggle) {
   }
   section.hidden = false;
 
+  /* The FPC column only appears where it can do something: the designation is
+     what the FPC check reads, and offering it with the check switched off
+     invites marking a body and seeing nothing happen. */
+  const fpcMode = settings.fpcEnabled && settings.checks.fpc;
+  $('bodiesFpcHint').hidden = !fpcMode;
+
   const rows = bodies.map((b, i) => {
     const swatch = b.color
       ? `rgb(${Math.round(b.color[0] * 255)},${Math.round(b.color[1] * 255)},${Math.round(b.color[2] * 255)})`
       : '#8a8f9a';
-    return el('button', {
-      type: 'button',
-      class: `body-row${b.visible ? '' : ' hidden'}`,
-      'aria-pressed': String(b.visible),
-      title: b.name,
-      onclick: () => onToggle(i),
-    }, [
-      el('span', { class: 'body-eye', 'aria-hidden': 'true', text: b.visible ? '●' : '○' }),
-      el('span', { class: 'body-swatch', style: `background:${swatch}` }),
-      el('span', { class: 'body-name', text: b.name }),
-      el('span', { class: 'body-tris', text: b.triCount.toLocaleString() }),
-    ]);
+    const parts = [
+      el('button', {
+        type: 'button',
+        class: 'body-vis',
+        'aria-pressed': String(b.visible),
+        title: `${b.name} — show or hide`,
+        onclick: () => onToggle(i),
+      }, [
+        el('span', { class: 'body-eye', 'aria-hidden': 'true', text: b.visible ? '●' : '○' }),
+        el('span', { class: 'body-swatch', style: `background:${swatch}` }),
+        el('span', { class: 'body-name', text: b.name }),
+        el('span', { class: 'body-tris', text: b.triCount.toLocaleString() }),
+      ]),
+    ];
+    if (fpcMode) {
+      parts.push(el('button', {
+        type: 'button',
+        class: `body-fpc${b.isFpc ? ' on' : ''}`,
+        'aria-pressed': String(!!b.isFpc),
+        title: b.isFpc
+          ? `${b.name} is the flex — click to unmark it`
+          : `Mark ${b.name} as the flex insert`,
+        onclick: () => onToggleFpc(i),
+      }, [el('span', { text: 'FPC' })]));
+    }
+    return el('div', {
+      class: `body-row${b.visible ? '' : ' hidden'}${b.isFpc ? ' is-fpc' : ''}`,
+    }, parts);
   });
 
   replaceChildren($('bodiesList'), rows);
-  $('bodiesCount').textContent = `${bodies.filter((b) => b.visible).length} of ${bodies.length} visible`;
+  const marked = bodies.filter((b) => b.isFpc).length;
+  $('bodiesCount').textContent = marked
+    ? `${bodies.filter((b) => b.visible).length} of ${bodies.length} visible · ${marked} marked FPC`
+    : `${bodies.filter((b) => b.visible).length} of ${bodies.length} visible`;
 }
 
 // ── part summary + onboarding ──────────────────────────────────────────────

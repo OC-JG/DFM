@@ -144,3 +144,31 @@ export function referenceSignedVolume(geom) {
 export function bvhFor(geom) {
   return { bvh: buildBVH(geom), bounds: computeBounds(geom.vertices) };
 }
+
+/*
+ * Nearest point on the surface, by brute force over every triangle.
+ *
+ * Written from the definition — minimise |p − x| subject to x lying in the
+ * triangle — and solved by sampling the triangle densely rather than by the
+ * region test the shipped version uses. A dense barycentric grid can only
+ * over-estimate the true distance, so the shipped answer must land at or
+ * slightly below this: any *larger* answer is a triangle it failed to find.
+ */
+export function referenceClosestPoint(geom, px, py, pz, gridN = 24) {
+  const { vertices, indices, triCount } = geom;
+  let best = Infinity;
+  for (let t = 0; t < triCount; t++) {
+    const a = indices[t * 3] * 3, b = indices[t * 3 + 1] * 3, c = indices[t * 3 + 2] * 3;
+    for (let i = 0; i <= gridN; i++) {
+      for (let j = 0; j <= gridN - i; j++) {
+        const wa = i / gridN, wb = j / gridN, wc = 1 - wa - wb;
+        const x = wa * vertices[a] + wb * vertices[b] + wc * vertices[c];
+        const y = wa * vertices[a + 1] + wb * vertices[b + 1] + wc * vertices[c + 1];
+        const z = wa * vertices[a + 2] + wb * vertices[b + 2] + wc * vertices[c + 2];
+        const d = Math.hypot(x - px, y - py, z - pz);
+        if (d < best) best = d;
+      }
+    }
+  }
+  return best;
+}

@@ -119,15 +119,76 @@ export function runTwoShotDFM(input) {
     });
   }
 
-  // ── 4. Interface coverage and overmould thickness ───────────────────────
+  // ── 4. Registration ─────────────────────────────────────────────────────
+  /*
+   * Reported before coverage, because every interface figure below is measured
+   * in whichever frame this check settled on and a reader needs to know which.
+   *
+   * The fork this check exists to name: two meshes that do not touch look
+   * identical whether one was exported in the wrong coordinate system or the
+   * overmould genuinely misses the substrate. Geometry cannot tell them apart
+   * — the same rigid transform explains both — so the tool does not choose.
+   * It measures the transform, reports it, and says what each reading would
+   * mean. That is also why it carries no weight: a file error is nothing and a
+   * design error is fatal, and averaging the two into a deduction would be a
+   * number with no meaning behind it.
+   */
+  const reg = input.registration;
+  if (reg && reg.applied) {
+    const shift = reg.offsetMm >= 0.05 ? `${reg.offsetMm.toFixed(1)} mm` : 'under 0.1 mm';
+    const spin = reg.rotationDeg >= 0.5 ? ` and turned ${reg.rotationDeg.toFixed(1)}°` : '';
+    checks.push({
+      key: 'ts_registration', name: 'Shot alignment', status: 'warn', severity: 'major',
+      detail: `Shot 2's mating surface sat ${reg.residualBefore.toFixed(2)} mm off shot 1 as the two files arrived — outside the ${reg.engageTol.toFixed(2)} mm this part's size allows. Shot 2 has been moved ${shift}${spin} onto shot 1, which brings the mating surface to ${reg.residualRms.toFixed(3)} mm RMS (95th percentile ${reg.residualP95.toFixed(3)} mm) over ${reg.inlierCount} of ${reg.samples} sampled points, from a ${reg.coarse} start. <b>Every interface figure below is measured after that move.</b> <b>Which of two things this is, geometry cannot say.</b> If the two files were exported in one coordinate system then that ${shift} is real: the overmould does not reach the substrate, and no process will close it. If shot 2 was exported in its own frame — a part saved outside its assembly, which is the ordinary way this happens — then the move is the correction and the figures below are the right ones. Re-export both from the same assembly to settle it. Not scored, because the two readings are worth nothing and everything respectively.`,
+      metrics: [
+        ['Offset applied', `${reg.offsetMm.toFixed(2)} mm`],
+        ['Rotation applied', `${reg.rotationDeg.toFixed(2)}°`],
+        ['Interface gap, as loaded', `${reg.residualBefore.toFixed(2)} mm`],
+        ['Residual after (RMS)', `${reg.residualRms.toFixed(3)} mm`],
+        ['Residual after (p95)', `${reg.residualP95.toFixed(3)} mm`],
+        ['Mating tolerance', `${reg.engageTol.toFixed(2)} mm`],
+        ['Coarse start', reg.coarse],
+      ],
+    });
+  } else if (reg && reg.attempted) {
+    checks.push({
+      key: 'ts_registration', name: 'Shot alignment', status: 'info', severity: 'none',
+      detail: `Shot 2's mating surface sat ${reg.residualBefore.toFixed(2)} mm off shot 1, so an alignment was attempted: ${reg.candidatesTried} starting poses, refined by ICP over the surfaces that face each other. The best of them reached ${reg.residualRms.toFixed(2)} mm, still outside the ${reg.engageTol.toFixed(2)} mm mating tolerance, so <b>no transform was applied and the figures below are measured as loaded</b>. Two shapes that no rigid move brings into contact are not a coordinate-system problem: check that shot 2 is the overmould for this substrate, and that both were exported in millimetres — a part exported in inches is out by a factor of 25.4, which this will not correct and should not.`,
+      metrics: [
+        ['Poses tried', String(reg.candidatesTried)],
+        ['Interface gap, as loaded', `${reg.residualBefore.toFixed(2)} mm`],
+        ['Best achievable', `${reg.residualRms.toFixed(2)} mm`],
+        ['Mating tolerance', `${reg.engageTol.toFixed(2)} mm`],
+        ['Result', 'NOT APPLIED'],
+      ],
+    });
+  } else if (reg && reg.reason === 'already-mated') {
+    /* Reported rather than left silent: otherwise there is no way to tell a
+       pair that arrived in one coordinate system from one nobody looked at. */
+    checks.push({
+      key: 'ts_registration', name: 'Shot alignment', status: 'ok', severity: 'none',
+      detail: `The two meshes arrived in one coordinate system — shot 2's mating surface sits ${reg.residualBefore.toFixed(3)} mm off shot 1, inside the ${reg.engageTol.toFixed(2)} mm this part's size allows — so nothing was moved and the figures below are measured as loaded.`,
+      metrics: [
+        ['Interface gap, as loaded', `${reg.residualBefore.toFixed(3)} mm`],
+        ['Mating tolerance', `${reg.engageTol.toFixed(2)} mm`],
+        ['Result', 'AS LOADED'],
+      ],
+    });
+  }
+
+  // ── 5. Interface coverage and overmould thickness ───────────────────────
   if (iface) {
     {
       let status = 'ok', detail = '', severity = 'none';
+      const frame = (reg && reg.applied) ? ' This is measured after the alignment above.' : '';
       if (iface.coverPct < 10) {
         status = 'warn'; severity = 'major';
-        detail = `Only ${iface.coverPct.toFixed(0)}% of shot 2 surface area contacts the shot 1 substrate within the search distance. Check that both meshes are correctly aligned and overlapping.`;
+        const tried = reg && reg.attempted && !reg.applied
+          ? ' Alignment was tried and did not help, so this is the geometry rather than the export — see Shot alignment above.'
+          : ' Check that both meshes are correctly aligned and overlapping.';
+        detail = `Only ${iface.coverPct.toFixed(0)}% of shot 2 surface area contacts the shot 1 substrate within the search distance.${tried}`;
       } else {
-        detail = `${iface.coverPct.toFixed(0)}% of shot 2 surface area detected as overmoulded layer. Interface area ${iface.coverArea.toFixed(0)} mm².`;
+        detail = `${iface.coverPct.toFixed(0)}% of shot 2 surface area detected as overmoulded layer. Interface area ${iface.coverArea.toFixed(0)} mm².${frame}`;
       }
       checks.push({
         key: 'ts_coverage', name: 'Interface coverage', status, detail, severity,
@@ -189,7 +250,7 @@ export function runTwoShotDFM(input) {
     }
   }
 
-  // ── 5. Shot order ───────────────────────────────────────────────────────
+  // ── 6. Shot order ───────────────────────────────────────────────────────
   {
     /* Convention is rigid first, soft second. */
     const r1 = MATERIAL_RIGIDITY[input.mat1] || 3;
@@ -215,5 +276,9 @@ export function runTwoShotDFM(input) {
   return {
     checks, score, grade, totalDeduction, budget, criticalCount,
     mat1: m1, mat2: m2, compat, iface,
+    /* Carried on the result so a report can label the interface figures with
+       the frame they were measured in without being handed the registration
+       separately. */
+    registration: reg || null,
   };
 }

@@ -589,25 +589,50 @@ details.step > .step-body { animation: revealDown 0.16s ease; }
   padding: 4px 6px !important;
   margin-top: 0 !important;
 }
+/* A row is a container rather than a button: it holds two of them, since a
+   body can be hidden and marked as the flex independently. */
 .body-row {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  align-items: stretch;
   width: 100%;
-  padding: 6px 8px;
   border: 1px solid var(--hairline);
   border-left: 3px solid var(--accent);
   margin-bottom: 4px;
+  transition: background 0.1s, opacity 0.1s;
+}
+.body-row .body-vis {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 0;
   cursor: pointer;
   background: transparent;
   color: inherit;
   font-family: inherit;
   font-size: 11px;
   text-align: left;
-  transition: background 0.1s, opacity 0.1s;
 }
 .body-row:hover { background: var(--paper-2); }
 .body-row.hidden { opacity: 0.4; border-left-color: var(--rule); }
+.body-row.is-fpc { border-left-color: var(--warn, #e6c244); }
+.body-row .body-fpc {
+  flex-shrink: 0;
+  padding: 0 8px;
+  border: 0;
+  border-left: 1px solid var(--hairline);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  opacity: 0.45;
+}
+.body-row .body-fpc:hover { opacity: 0.8; background: var(--paper-2); }
+.body-row .body-fpc.on { opacity: 1; font-weight: 700; color: var(--warn, #e6c244); }
 .body-row .body-eye { font-size: 12px; flex-shrink: 0; width: 14px; text-align: center; }
 .body-row .body-name {
   flex: 1;

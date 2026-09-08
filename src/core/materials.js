@@ -23,7 +23,15 @@
  *             few seconds of contact with a hot melt against a cold mould is
  *             not that. Vicat softening point (ISO 306) is the property that
  *             would carry a verdict; it is not in this table. Do not restore
- *             a melt-versus-HDT threshold without adding Vicat first.
+ *             a melt-versus-HDT threshold without adding Vicat first — and
+ *             that is now a test rather than a request: `ts_thermal`'s weight
+ *             is locked to the presence of a `vicatC` column here, in both
+ *             directions, so entering the data without switching the check on
+ *             fails and switching it on without the data fails. Add both, or
+ *             neither. Each value wants the grade's own datasheet behind it;
+ *             sixteen numbers off a search engine's summary of a datasheet
+ *             nobody opened would be the same guess-dressed-as-a-threshold
+ *             this check was rescued from.
  *   density   g/cm³
  */
 

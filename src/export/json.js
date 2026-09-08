@@ -6,7 +6,7 @@ import { formatPullAxis } from '../analysis/stats.js';
  * Includes the two-shot block, which the original omitted: running an
  * overmould analysis and then exporting produced a file with no trace of it.
  */
-export function buildExportJSON({ sessionId, dfm, analysis, twoShot, interface: iface, validation, shot, cycle, cost, tooling, settings }) {
+export function buildExportJSON({ sessionId, dfm, analysis, twoShot, interface: iface, registration, fpcRegion, validation, shot, cycle, cost, tooling, settings }) {
   const out = {
     tool: 'OnlyCat DFM',
     session: sessionId,
@@ -40,6 +40,29 @@ export function buildExportJSON({ sessionId, dfm, analysis, twoShot, interface: 
        derived from an inch-scaled or open mesh is arithmetic, not a
        manufacturability judgement. */
     mesh_health: validation ? meshHealth(validation) : null,
+
+    /* The insert, when a body was designated as one. Carried in full because
+       the FPC check reads differently depending on whether it exists: with it,
+       the cover is measured over the flex; without it, the same check is
+       judging the part's nominal wall against a floor, which over-reports. A
+       record that omitted this would not say which. */
+    fpc_insert: fpcRegion && fpcRegion.located ? {
+      located: true,
+      insert_area_mm2: fpcRegion.regionArea,
+      part_area_mm2: fpcRegion.partArea,
+      sample_points: fpcRegion.samples,
+      required_cover_mm: fpcRegion.requiredCover,
+      cover_min_mm: fpcRegion.coverStats ? fpcRegion.coverStats.min : null,
+      cover_median_mm: fpcRegion.coverStats ? fpcRegion.coverStats.median : null,
+      cover_max_mm: fpcRegion.coverStats ? fpcRegion.coverStats.max : null,
+      /* Three different states, and collapsing any two of them would lose the
+         distinction the check is built on: covered but thin, not covered at
+         all, and not measurable. */
+      area_below_required_pct: fpcRegion.belowRequiredPct,
+      area_uncovered_pct: fpcRegion.uncoveredPct,
+      area_indeterminate_pct: fpcRegion.indeterminatePct,
+      gate_to_insert_mm: fpcRegion.gateDistance,
+    } : { located: false },
     /* What it takes to mould the part, as distinct from whether it can be:
        arithmetic on measured geometry and tabulated material data, with the
        one process assumption stated. */
@@ -110,10 +133,33 @@ export function buildExportJSON({ sessionId, dfm, analysis, twoShot, interface: 
       adhesion: twoShot.compat.adhesion,
       adhesion_notes: twoShot.compat.notes,
       interface: iface ? {
+        /* Which frame these were measured in, alongside the numbers rather
+           than only in the finding text: an export travels, and a coverage
+           figure means something different depending on whether shot 2 was
+           moved to produce it. */
+        measured_in: (registration && registration.applied) ? 'registered' : 'as_loaded',
         coverage_pct: iface.coverPct,
         interface_area_mm2: iface.coverArea,
         min_thickness_mm: iface.minThk,
         avg_thickness_mm: iface.avgThk,
+      } : null,
+      registration: registration ? {
+        applied: registration.applied,
+        reason: registration.reason,
+        interface_gap_as_loaded_mm: registration.residualBefore,
+        mating_tolerance_mm: registration.engageTol,
+        residual_rms_mm: registration.residualRms,
+        residual_p95_mm: registration.residualP95,
+        offset_applied_mm: registration.applied ? registration.offsetMm : null,
+        rotation_applied_deg: registration.applied ? registration.rotationDeg : null,
+        /* The transform itself, so a reader can reproduce the pose the
+           figures above were measured in rather than take them on trust. */
+        transform: registration.transform
+          ? { rotation_row_major: Array.from(registration.transform.r), translation_mm: Array.from(registration.transform.t) }
+          : null,
+        coarse_start: registration.coarse || null,
+        poses_tried: registration.candidatesTried || null,
+        sample_points: registration.samples,
       } : null,
       checks: twoShot.checks.map((c) => ({
         key: c.key, name: c.name, status: c.status, detail: c.detail,
