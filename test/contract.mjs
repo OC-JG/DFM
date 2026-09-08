@@ -55,7 +55,7 @@ const missing = [...wanted]
   .map(([id, file]) => `  ${id}  (wanted by ${file})`);
 
 /* Build slots the bundler fills; index.html is not valid output without them. */
-const SLOTS = ['<!--@VENDOR@-->', '/*@CSS@*/', '/*@APP@*/'];
+const SLOTS = ['<!--@VENDOR@-->', '/*@CSS@*/', '/*@APP@*/', '/*@FONTS@*/'];
 const lostSlots = SLOTS.filter((slot) => !html.includes(slot));
 
 /*

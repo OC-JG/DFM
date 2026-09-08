@@ -6,15 +6,18 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="description" content="Injection moulding design-for-manufacture analyser for Inventor .ipt, STEP and STL parts.">
 <meta name="color-scheme" content="light dark">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Archivo:wght@400;500;700;900&display=swap" rel="stylesheet">
+<!-- The two webfonts are embedded by build.js as data URIs rather than
+     fetched. They used to come from fonts.googleapis.com, which meant the tool
+     rendered in its own typography with a connection and in whatever the
+     machine had without one, silently — and the offline build reached out for
+     them too. See src/fonts/README.md. -->
 <!-- three.js is required for the viewer. jsPDF and the OpenCascade STEP
      reader are loaded on demand, so a session that never exports a PDF or
      opens a STEP file never pays for them. -->
 <!--@VENDOR@-->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <style>
+/*@FONTS@*/
 /*@CSS@*/
 </style>
 </head>

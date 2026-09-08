@@ -94,6 +94,11 @@ until it was settled.
 - **6-DoF navigation.** A quaternion camera, and a WebHID transport that reads
   a 3Dconnexion device's axis layout from its own report descriptor rather than
   from a table of offsets per model.
+- **The webfonts are embedded**, in every build rather than only the offline
+  one. Archivo and JetBrains Mono as woff2 data URIs — the latin subset, one
+  variable file per family, about 100 kB — so the tool renders in the
+  typography it was designed in whether or not the machine has a connection.
+  Both are OFL-1.1 and the artifact carries their notices and the licence.
 - **An offline build.** `node build.js --vendor` inlines three.js and jsPDF —
   about 1.4 MB instead of 500 kB, and nothing to fetch.
 - **A release name in the build.** `node build.js --stamp v2.0.1`.

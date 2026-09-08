@@ -19,6 +19,35 @@ Loaded at runtime from a CDN by the default build
                                        STEP files
                                        https://github.com/kovacsv/occt-import-js
 
+Built into the file by every build
+---------------------------------
+
+  Archivo                      OFL-1.1  Copyright 2020 The Archivo Project
+                                        Authors
+                                        https://github.com/Omnibus-Type/Archivo
+  JetBrains Mono               OFL-1.1  Copyright 2020 The JetBrains Mono
+                                        Project Authors
+                                        https://github.com/JetBrains/JetBrainsMono
+
+Both are embedded as woff2 data URIs — the latin subset, one variable file per
+family — because a `<link>` to Google Fonts meant the tool rendered in its own
+typography with a connection and in the machine's fallback without one, and
+because the offline build cannot reach a CDN at all. About 100 kB of the
+output.
+
+The SIL Open Font License requires the copyright notice and the licence to
+accompany any copy of the font software, and this artifact contains the font
+software, so `build.js` puts both notices and the licence text into the banner
+at the top of `dfm-tool.html`. The licence body is identical for the two
+families, so it appears once with both notices above it. The upstream licence
+files are in `src/fonts/`, and `src/fonts/README.md` records where the woff2
+files came from and how to refresh them. Neither family declares a Reserved
+Font Name, so a subset keeping the family name is within the licence.
+
+`npm run test:smoke` asserts both faces actually load and that nothing was
+requested from a font host; `npm run test:offline` asserts no off-origin
+request is made at all.
+
 Built into the file by `node build.js --vendor`
 ----------------------------------------------
 

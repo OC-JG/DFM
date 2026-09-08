@@ -761,12 +761,53 @@ mouse — **unverified**, for want of hardware.
   normalises on read now, so this is belt to that braces — nothing in the index
   currently has a CR in it, and this keeps a machine with `core.autocrlf` set
   from reopening the question.
-- **The webfonts.** `test/offline.mjs:106` explicitly tolerates blocked requests
-  to `fonts.` — so the `--vendor` build, whose whole purpose is needing no
-  network, still reaches for Google Fonts and silently falls back to system
-  faces. A report handed to a supplier renders in a different typeface depending
-  on their connection. Either vendor the two families or drop them for a system
-  stack; either is better than a difference nobody notices until it is in a PDF.
+- **The webfonts.** *(done — vendored, in every build)* Archivo and JetBrains
+  Mono as woff2 data URIs, embedded by `build.js` rather than fetched.
+
+  One correction to this item first: **the PDF was never affected.** `pdf.js`
+  draws in jsPDF's built-in Helvetica, so a report handed to a supplier
+  rendered identically either way. What differed was the tool on screen —
+  which still matters, and for a reason the item understated: the difference
+  was *invisible*. A machine with no connection got the fallback stack with
+  nothing to say it had, so the typography looked like a choice rather than a
+  failure.
+
+  Vendored rather than dropped, and the numbers made that easy. Both families
+  are variable fonts, so the latin subset is **one file each** covering every
+  weight the stylesheet asks for — 34.9 kB and 40.4 kB, about 100 kB of the
+  output once base64'd, on a file that was already 825 kB. Latin only: the
+  interface is English and latin-ext, Cyrillic, Greek and Vietnamese would
+  triple that for glyphs nothing here renders. The CSS keeps a real fallback
+  stack, so a character outside the subset still draws.
+
+  In **every** build, not behind `--vendor`. The flag is for the two libraries,
+  which are a megabyte; a font that changes how the tool looks depending on the
+  network is not a size trade-off, it is a defect in both builds.
+
+  The obligation that came with it is discharged rather than noted. Both are
+  OFL-1.1, which requires the copyright notice and the licence to accompany
+  any copy of the font software — and this artifact *contains* the font
+  software. So the banner carries both notices and the licence text, next to
+  the MIT notice for the tool's own code; the body is byte-identical between
+  the two upstream files, which `build.js` asserts, so it appears once with
+  both notices above it. Neither family declares a Reserved Font Name, so a
+  subset keeping the family name is within the licence.
+
+  Three things now hold it in place. `test/offline.mjs`'s tolerance for
+  `fonts.` is **gone**, and its absence is what keeps the fonts embedded. The
+  smoke test's font route is a **tripwire** rather than a stub — it used to
+  answer the request with an empty stylesheet, which is precisely how the
+  silent fallback survived — and any request landing there fails the suite. And
+  the faces are asserted to have actually loaded, read off `document.fonts`
+  rather than asked with `document.fonts.check`, which was the first thing
+  tried and is vacuous: `check` answers "can this be rendered without
+  waiting", and with no `@font-face` at all the fallback renders immediately,
+  so it returned true for a build that embedded nothing. Caught by removing
+  the fonts from the build and watching the test pass.
+
+  One thing fell out: `--vendor`'s preconnect strip is gone, because there are
+  no preconnects left to strip. It was the line whose existence once let a
+  length-based check pass while leaving the three.js tag in place.
 - **The CDN question.** SRI hashes were considered and deliberately not added
   blind — a wrong `integrity` attribute kills the page and the hashes must come
   from the bytes the CDN actually serves. Whoever has network access should

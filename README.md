@@ -44,7 +44,9 @@ the score it replaced.
 
 Three things load from a CDN at runtime and therefore need a connection:
 three.js (the 3D viewer), the OpenCascade WASM reader (STEP files only), and
-jsPDF (PDF export only). Only three.js loads up front; the other two are
+jsPDF (PDF export only). The typography is not among them — both webfonts are
+embedded in the file, so the tool looks the same on a shop-floor PC with the
+internet blocked as it does on a desk with fibre. Only three.js loads up front; the other two are
 fetched the first time you actually need them. If a load fails the tool says
 so and keeps working with what remains — STL parsing, all the analysis, and
 JSON export are entirely local.
