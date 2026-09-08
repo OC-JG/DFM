@@ -1,6 +1,7 @@
 import { analyseMesh } from '../analysis/mesh.js';
 import { analyseInterface } from '../analysis/interface.js';
 import { registerShots } from '../analysis/register.js';
+import { analyseFpcRegion } from '../analysis/fpc.js';
 
 /*
  * Analysis worker.
@@ -25,6 +26,19 @@ export function runAnalysisJob(job, onProgress) {
     ...job.opts1,
     onProgress: (p, label) => report(0.05 + p * (job.geom2 ? 0.6 : 0.9), label),
   });
+
+  /* Where the flex is, when the user has said which body it is. Measured on
+     shot 1: the insert is overmoulded by the part being analysed, and in
+     two-shot mode it is the substrate that carries it. */
+  const fpcRegion = job.fpcRegion && job.fpcRegion.length
+    ? analyseFpcRegion({
+      geom: job.geom1,
+      shot: shot1,
+      region: job.fpcRegion,
+      requiredCover: job.fpcCover,
+      gateLocation: job.opts1 ? job.opts1.gateLocation : null,
+    })
+    : null;
 
   let shot2 = null;
   let iface = null;
@@ -57,7 +71,7 @@ export function runAnalysisJob(job, onProgress) {
   }
 
   report(1, 'Done');
-  return { shot1, shot2, iface, registration };
+  return { shot1, shot2, iface, registration, fpcRegion };
 }
 
 /*

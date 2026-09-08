@@ -526,3 +526,103 @@ export function transformSoup(soup, { axis = [0, 0, 1], deg = 0, translate = [0,
   }
   return { positions: out, triCount: soup.triCount, xform: { r, t: translate.slice() } };
 }
+
+/*
+ * Two soups concatenated, with the triangle ranges each occupies.
+ *
+ * A multi-body STEP arrives as one merged buffer plus per-body triangle
+ * ranges (see step.js), and the FPC designation is one of those ranges. This
+ * builds the same shape from analytic parts, and returns the ranges, so a test
+ * can mark a body without needing a real assembly file.
+ *
+ * Welding preserves triangle order — it merges vertices, not faces — so the
+ * ranges survive weldGeometry. The test asserts that rather than assuming it.
+ */
+export function joinBodies(soups) {
+  const list = [];
+  const bodies = [];
+  let tOff = 0;
+  for (const s of soups) {
+    for (let i = 0; i < s.positions.length; i++) list.push(s.positions[i]);
+    bodies.push({ triStart: tOff, triEnd: tOff + s.triCount, triCount: s.triCount });
+    tOff += s.triCount;
+  }
+  return { ...toSoup(list), bodies };
+}
+
+/*
+ * A flex insert buried in a polymer slab, with an exact answer for cover.
+ *
+ * The slab is `size` and solid; the insert is a plate of `flex` thickness on
+ * its mid-plane, so the polymer over each face is (thickness − flex) / 2 and
+ * that is the cover everywhere on the two large faces.
+ *
+ *   opts.pocket   model a clearance pocket around the insert, as an assembly
+ *                 drawn properly would. The cover is unchanged; what changes
+ *                 is that the nearest surface along the ray is now the pocket
+ *                 wall rather than the outside of the part.
+ *   opts.proud    lift the insert so it breaks the top surface, leaving part
+ *                 of it exposed.
+ */
+export function slabWithInsert(size = [40, 30, 4], flex = 0.2, opts = {}) {
+  const [w, h, d] = size;
+  const iw = opts.insertSize ? opts.insertSize[0] : 20;
+  const ih = opts.insertSize ? opts.insertSize[1] : 10;
+  const x0 = (w - iw) / 2, y0 = (h - ih) / 2;
+  const zMid = opts.proud
+    ? d - flex / 2 + (opts.proud === true ? flex : opts.proud)
+    : (opts.insertZ != null ? opts.insertZ : d / 2);
+  const zLo = zMid - flex / 2, zHi = zMid + flex / 2;
+
+  /* opts.taper = [thickAt0, thickAtW] slopes the top face in x, so cover over
+     the insert's two large facets varies across each of them — which is the
+     only way to tell a sampler that takes a point inside each triangle from
+     one that takes its centroid. z = a + bx is planar, so the top stays one
+     quad and the sides stay trapezia. */
+  const top = opts.taper ? (x) => opts.taper[0] + (opts.taper[1] - opts.taper[0]) * (x / w) : () => d;
+
+  const slab = [];
+  if (opts.taper) {
+    const [t0, t1] = [top(0), top(w)];
+    const a = [0, 0, 0], b = [w, 0, 0], c = [w, h, 0], e = [0, h, 0];
+    const a2 = [0, 0, t0], b2 = [w, 0, t1], c2 = [w, h, t1], e2 = [0, h, t0];
+    quad(slab, a, e, c, b);           // bottom, normal −z
+    quad(slab, a2, b2, c2, e2);       // top, normal +z
+    quad(slab, a, b, b2, a2);         // y = 0
+    quad(slab, c, e, e2, c2);         // y = h
+    quad(slab, b, c, c2, b2);         // x = w
+    quad(slab, e, a, a2, e2);         // x = 0
+  } else {
+    for (const v of Object.values(boxFaces([0, 0, 0], [w, h, d]))) quad(slab, v[0], v[1], v[2], v[3]);
+  }
+  if (opts.pocket) {
+    const c = opts.pocket === true ? 0.05 : opts.pocket;
+    const inner = boxFaces([x0 - c, y0 - c, zLo - c], [x0 + iw + c, y0 + ih + c, zHi + c]);
+    /* Cavity normals point into the void. */
+    for (const v of Object.values(inner)) quad(slab, v[0], v[3], v[2], v[1]);
+  }
+
+  const insert = [];
+  for (const v of Object.values(boxFaces([x0, y0, zLo], [x0 + iw, y0 + ih, zHi]))) {
+    quad(insert, v[0], v[1], v[2], v[3]);
+  }
+
+  const joined = joinBodies([toSoup(slab), toSoup(insert)]);
+  /* Cover over the insert's top facet, at the two ends of its footprint. On an
+     untapered slab both are the same and equal `cover`. */
+  const topCoverAt = (x) => top(x) - zHi;
+  return {
+    ...joined,
+    /* The closed-form answers, so a test asserts against the fixture's
+       definition rather than against what the code produced. */
+    cover: opts.taper ? Math.min(zLo, topCoverAt(x0), topCoverAt(x0 + iw)) : (d - flex) / 2,
+    coverMax: opts.taper ? Math.max(zLo, topCoverAt(x0), topCoverAt(x0 + iw)) : (d - flex) / 2,
+    /* Where a centroid sampler would stop, for the test that needs the
+       difference: the two triangles of a quad have their centroids a third of
+       the way in from each end. */
+    topCoverAt,
+    insertFootprint: [x0, x0 + iw],
+    insertArea: 2 * iw * ih + 2 * (iw + ih) * flex,
+    insertFaceArea: 2 * iw * ih,
+  };
+}

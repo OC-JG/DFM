@@ -247,6 +247,16 @@ export async function exportPDF({ sessionId, dfm, analysis, twoShot, validation,
     ['Mould type', inp.moldType],
     ['Surface finish', inp.surfaceFinish],
     ['FPC overmould', inp.fpc && inp.fpc.enabled ? `Yes (${inp.fpc.thickness} mm, ${inp.fpc.anchors})` : 'No'],
+    /* Whether the cover over the flex was measured or inferred from the
+       part's nominal wall. The two are not the same claim, and the finding
+       that carries them is pages away from this table. */
+    ...(inp.fpc && inp.fpc.enabled
+      ? [['FPC insert', inp.fpcRegion && inp.fpcRegion.located
+        ? (inp.fpcRegion.coverStats
+          ? `Located — cover ${inp.fpcRegion.coverStats.min.toFixed(2)} mm min`
+          : 'Located — no cover found')
+        : 'Not located — judged part-wide']]
+      : []),
   ]);
 
   // ── mesh health ──────────────────────────────────────────────────────────

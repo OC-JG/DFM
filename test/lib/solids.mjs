@@ -143,6 +143,35 @@ export function stepTwoBodies() {
 }
 
 /*
+ * A flex insert buried in a polymer slab: the two-body assembly the FPC
+ * designation exists for.
+ *
+ * Answers: cover over the insert's two large faces is (slabZ − flex) / 2, the
+ * same everywhere, and its four edges sit `inset` from the slab's own so they
+ * are covered too rather than coincident with the outside — coincident
+ * surfaces are the one configuration a ray cast cannot resolve, and a fixture
+ * should not lean on the answer to that.
+ */
+export function stepSlabWithInsert(slab = [40, 30, 4], flex = 0.2, inset = 1) {
+  const [w, h, d] = slab;
+  const iw = 20, ih = 10;
+  const x0 = (w - iw) / 2, y0 = (h - ih) / 2;
+  const zLo = d / 2 - flex / 2, zHi = d / 2 + flex / 2;
+  return {
+    solids: [
+      { name: 'Housing', vertices: boxCorners([0, 0, 0], [w, h, d]), faces: boxLoops(0) },
+      { name: 'Flex', vertices: boxCorners([x0, y0, zLo], [x0 + iw, y0 + ih, zHi]), faces: boxLoops(0) },
+    ],
+    expect: {
+      bodyCount: 2,
+      cover: (d - flex) / 2,
+      insertEdgeCover: Math.min(x0, y0),
+      inset,
+    },
+  };
+}
+
+/*
  * ── Cylindrical fixtures ───────────────────────────────────────────────────
  *
  * These exist because a radius cannot be read from the file — the reader

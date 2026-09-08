@@ -7,7 +7,7 @@ import { writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { writeStepSolids } from './lib/step-write.mjs';
-import { stepCup, stepTwoBodies } from './lib/solids.mjs';
+import { stepCup, stepTwoBodies, stepSlabWithInsert } from './lib/solids.mjs';
 
 const OUT_DIR = join(dirname(fileURLToPath(import.meta.url)), 'fixtures');
 
@@ -93,6 +93,10 @@ console.log('part-open.stl   ', writeBinarySTL(join(OUT_DIR, 'part-open.stl'), o
 for (const [name, solids] of [
   ['part.step', [stepCup([40, 30, 20], 2)]],
   ['part-twobody.step', stepTwoBodies().solids],
+  /* A housing with a flex insert inside it, for the FPC designation: marking
+     the second body must turn the cover from an inference about the part's
+     nominal wall into a measurement of 1.90 mm. */
+  ['part-fpc.step', stepSlabWithInsert().solids],
 ]) {
   const text = writeStepSolids(solids, name.replace('.step', ''));
   writeFileSync(join(OUT_DIR, name), text);

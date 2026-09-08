@@ -408,3 +408,75 @@ export function closestPoint(bvh, geom, px, py, pz, maxDist, out) {
   if (out) { out[0] = bx; out[1] = by; out[2] = bz; out[3] = bestTri; }
   return Math.sqrt(bestSq);
 }
+
+/* Its own traversal scratch: the other two are each entered from callers that
+   also use this one, and a shared stack only stays safe while no two of them
+   are ever in flight together. */
+const ALL_STACK = new Int32Array(MAX_DEPTH * 2 + 8);
+
+/*
+ * Every crossing of the surface along a ray, ascending, written into `out`.
+ *
+ * `castRay` answers "what is the nearest thing in this direction", which is
+ * the wrong question when what is wanted is how much *material* lies along a
+ * ray. An assembly that models a clearance pocket around an insert puts a
+ * surface immediately in front of the insert's own, so the nearest hit is the
+ * pocket wall and the cover reads as the clearance. Every crossing, with
+ * parity, gives the polymer actually traversed — see materialAlongRay in
+ * analysis/fpc.js, which is the only caller and explains the arithmetic.
+ *
+ * Hits within `eps` of each other are merged: a ray through an edge, a vertex
+ * or a facet diagonal is reported by every incident triangle, and a duplicated
+ * crossing inverts the parity for the rest of the ray. Because that merge
+ * happens after collection, duplicates spend the buffer — so `out` needs room
+ * for raw hits, of which there can be two or three per crossing, not for
+ * crossings.
+ *
+ * Returns the number of distinct crossings, or **−1** when `out` filled up.
+ * A truncated list is not a short list: the crossings missing from the end
+ * flip the parity of everything a caller would infer from it, and after the
+ * merge the count alone cannot show that anything was dropped — four raw hits
+ * on a diagonal collapse to two, which looks exactly like a ray that crossed
+ * twice. So truncation is its own answer rather than a number to be
+ * second-guessed.
+ */
+export function castRayAll(bvh, geom, ox, oy, oz, dx, dy, dz, eps, out, maxDist) {
+  const { bounds, meta, triIdx } = bvh;
+  const { vertices, indices } = geom;
+  const idx = 1 / dx, idy = 1 / dy, idz = 1 / dz;
+  const limit = maxDist > 0 ? maxDist : Infinity;
+
+  const stack = ALL_STACK;
+  let sp = 0;
+  stack[sp++] = 0;
+  let n = 0;
+
+  while (sp > 0) {
+    const ni = stack[--sp];
+    const b6 = ni * 6, m3 = ni * 3;
+    const tBox = rayAABB(ox, oy, oz, idx, idy, idz, bounds, b6);
+    if (tBox < 0 || tBox > limit) continue;
+
+    if (meta[m3 + 2] === 1) {
+      const first = meta[m3];
+      const count = meta[m3 + 1];
+      for (let k = 0; k < count; k++) {
+        const hit = rayTriIdx(ox, oy, oz, dx, dy, dz, vertices, indices, triIdx[first + k]);
+        if (!(hit > eps) || hit > limit) continue;
+        if (n >= out.length) return -1;
+        out[n++] = hit;
+      }
+    } else {
+      stack[sp++] = meta[m3];
+      stack[sp++] = meta[m3 + 1];
+    }
+  }
+
+  if (n < 2) return n;
+  const sorted = out.subarray(0, n).sort();
+  let w = 1;
+  for (let i = 1; i < n; i++) {
+    if (sorted[i] - sorted[w - 1] > eps) sorted[w++] = sorted[i];
+  }
+  return w;
+}

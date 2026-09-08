@@ -37,6 +37,8 @@ import {
   ENGAGE_FRACTION, ENGAGE_FLOOR_MM, RESIDUAL_IMPROVE, REGISTER_TRIM,
 } from '../src/analysis/register.js';
 import { analyseInterface } from '../src/analysis/interface.js';
+import { analyseFpcRegion, FPC_SAMPLES, MAX_CROSSINGS } from '../src/analysis/fpc.js';
+import { castRayAll } from '../src/geometry/bvh.js';
 import { effectiveMinDraft } from '../src/core/finishes.js';
 import { MATERIALS, MATERIAL_ORDER } from '../src/core/materials.js';
 import { DEFAULT_SETTINGS } from '../src/app/state.js';
@@ -2192,6 +2194,403 @@ describe('two-shot registration — how it is reported');
     eq(c.status, 'warn', 'status:');
     assert(/did not help/.test(c.detail), 'must say alignment was tried');
     assert(/Shot alignment above/.test(c.detail), 'must point at the alignment finding');
+  });
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('crossings along a ray');
+{
+  const geom = weld(S.box([10, 10, 10]));
+  const bvh = buildBVH(geom);
+  const hits = new Float64Array(32);
+
+  it('reports both faces of a solid it passes through', () => {
+    eq(castRayAll(bvh, geom, 5, 5, -3, 0, 0, 1, 1e-4, hits), 2, 'crossings:');
+    close(hits[0], 3, 1e-6, 'entry:');
+    close(hits[1], 13, 1e-6, 'exit:');
+  });
+
+  it('reports one crossing from inside, which is what fixes the parity', () => {
+    /* The parity of the count is how the cover measurement knows which side
+       of the surface a ray started on. */
+    eq(castRayAll(bvh, geom, 5, 5, 4, 0, 0, 1, 1e-4, hits), 1, 'crossings from inside:');
+    close(hits[0], 6, 1e-6, 'exit:');
+  });
+
+  it('merges the duplicate a ray through an edge produces', () => {
+    /* Straight along the +x face at z = 10, which both triangles of the top
+       face and both of the +z... the shared edge is reported by every
+       incident triangle, and a duplicated crossing inverts the parity for the
+       rest of the ray. */
+    const n = castRayAll(bvh, geom, -5, 5, 10, 1, 0, 0, 1e-4, hits);
+    for (let i = 1; i < n; i++) {
+      assert(hits[i] - hits[i - 1] > 1e-4, `crossings ${i - 1} and ${i} were not merged`);
+    }
+  });
+
+  it('finds nothing along a ray that misses', () => {
+    eq(castRayAll(bvh, geom, 5, 5, -3, 0, 0, -1, 1e-4, hits), 0, 'crossings:');
+  });
+
+  {
+    /* Three boxes in a row: six crossings, on a ray placed off the facet
+       diagonals so each is reported once. */
+    const three = weld(S.joinBodies([
+      S.box([10, 10, 10]),
+      S.transformSoup(S.box([10, 10, 10]), { translate: [20, 0, 0] }),
+      S.transformSoup(S.box([10, 10, 10]), { translate: [40, 0, 0] }),
+    ]));
+    const threeBvh = buildBVH(three);
+    const shoot = (out) => castRayAll(threeBvh, three, -5, 5, 4, 1, 0, 0, 1e-4, out);
+
+    it('reports every crossing of a ray through several solids', () => {
+      const wide = new Float64Array(16);
+      eq(shoot(wide), 6, 'crossings:');
+      for (let i = 0; i < 6; i++) close(wide[i], 5 + i * 10, 1e-6, `crossing ${i}:`);
+    });
+
+    it('refuses to answer at all once the buffer fills', () => {
+      /*
+       * A truncated list is not a short list — the crossings dropped from the
+       * end flip the parity of anything inferred from it — and the count
+       * cannot show that it happened, because the merge collapses raw hits:
+       * four hits on a facet diagonal come back as two, which looks exactly
+       * like a ray that crossed twice. So it is −1, not a number to be
+       * second-guessed.
+       */
+      eq(shoot(new Float64Array(4)), -1, 'four slots for six crossings:');
+      eq(shoot(new Float64Array(6)), 6, 'exactly enough:');
+    });
+
+    it('a ray down a facet diagonal spends the buffer twice over', () => {
+      /* Which is why the budget is stated in raw hits. z = 5 puts the ray on
+         the diagonal of every face it crosses, so each crossing is reported
+         by both triangles. */
+      const wide = new Float64Array(16);
+      eq(castRayAll(threeBvh, three, -5, 5, 5, 1, 0, 0, 1e-4, wide), 6, 'crossings after merging:');
+      /* Twelve raw hits for six crossings, so twelve slots are needed. */
+      eq(castRayAll(threeBvh, three, -5, 5, 5, 1, 0, 0, 1e-4, new Float64Array(11)), -1,
+        'eleven slots is not enough for six crossings on a diagonal:');
+    });
+  }
+}
+
+describe('FPC — a located insert');
+{
+  /*
+   * A polymer slab with a flex plate on its mid-plane. Cover is
+   * (slab − flex) / 2 by construction, on both large faces, so every figure
+   * below has a closed-form answer.
+   */
+  const REQUIRED = 0.5;
+
+  function measure(fx, { gate = null, required = REQUIRED, region } = {}) {
+    const geom = weld(fx);
+    const shot = analyse(geom, { material: MATERIALS.pp, suggestGate: false, gateLocation: gate });
+    return {
+      geom,
+      region: analyseFpcRegion({
+        geom, shot, region: region || [fx.bodies[1]], requiredCover: required, gateLocation: gate,
+      }),
+    };
+  }
+
+  it('welding leaves the body ranges intact, which the designation depends on', () => {
+    /* A body is a contiguous triangle range from the STEP reader, and the
+       designation is that range. If welding reordered triangles the range
+       would point at someone else's geometry. */
+    const fx = S.slabWithInsert();
+    const geom = weld(fx);
+    eq(geom.triCount, fx.triCount, 'triangle count:');
+    const insert = fx.bodies[1];
+    /* Every vertex of every triangle in the insert's range must lie inside
+       the insert's own bounding box, and none of the slab's may. */
+    const zLo = 4 / 2 - 0.1, zHi = 4 / 2 + 0.1;
+    for (let t = insert.triStart; t < insert.triEnd; t++) {
+      for (let k = 0; k < 3; k++) {
+        const z = geom.vertices[geom.indices[t * 3 + k] * 3 + 2];
+        assert(z >= zLo - 1e-4 && z <= zHi + 1e-4, `triangle ${t} is not the insert (z=${z})`);
+      }
+    }
+  });
+
+  it('measures the cover the fixture was built with', () => {
+    const fx = S.slabWithInsert();
+    const { region } = measure(fx);
+    assert(region && region.located, 'the insert should be located');
+    close(region.coverStats.min, fx.cover, 0.01, 'min cover:');
+    close(region.coverStats.median, fx.cover, 0.01, 'median cover:');
+    close(region.uncoveredPct, 0, 0.01, 'nothing should be exposed:');
+    close(region.belowRequiredPct, 0, 0.01, 'nothing below the requirement:');
+    eq(region.samples, FPC_SAMPLES, 'samples:');
+    /* Area, not triangle count: the two large faces plus the four edges. */
+    within(region.regionArea, fx.insertArea, 1, 'insert area:');
+  });
+
+  it('reads the same cover whether or not a clearance pocket was modelled', () => {
+    /*
+     * The reason cover is the polymer along the ray rather than the nearest
+     * hit. With a 0.05 mm pocket drawn around the insert, the nearest surface
+     * is the pocket wall — a first-hit measurement reports 0.05 mm of cover on
+     * a part that has 1.85 mm.
+     */
+    const CLEAR = 0.05;
+    const fx = S.slabWithInsert([40, 30, 4], 0.2, { pocket: CLEAR });
+    const { region } = measure(fx);
+    close(region.coverStats.min, fx.cover - CLEAR, 0.01, 'min cover through the pocket:');
+    close(region.uncoveredPct, 0, 0.01, 'the pocket is not exposure:');
+    assert(region.coverStats.min > CLEAR * 10,
+      `a first-hit measurement would report about ${CLEAR} mm; got ${region.coverStats.min}`);
+  });
+
+  it('reports thin cover as thin, and over how much of the insert', () => {
+    const fx = S.slabWithInsert([40, 30, 0.9], 0.2);
+    const { region } = measure(fx);
+    close(region.coverStats.min, fx.cover, 0.01, 'min cover:');
+    assert(region.coverStats.min < REQUIRED, 'the fixture should be under-covered');
+    /* The two large faces are almost all of the insert's area, and both are
+       thin, so nearly all of it is below the requirement. */
+    assert(region.belowRequiredPct > 90,
+      `expected nearly all of the insert under-covered, got ${region.belowRequiredPct.toFixed(1)}%`);
+  });
+
+  it('separates area with no cover from area with thin cover', () => {
+    /* An insert standing above the surface. Its top face and edges reach open
+       air, which is exposure rather than a small cover — folding the two
+       together would report zero cover on a part with a deliberate pad. */
+    const fx = S.slabWithInsert([40, 30, 4], 0.2, { proud: true });
+    const { region } = measure(fx);
+    within(region.uncoveredPct, 100 * (fx.insertArea - fx.insertFaceArea / 2) / fx.insertArea, 5,
+      'exposed area:');
+    assert(region.coverStats.min > 1, 'what cover remains should not read as thin');
+    close(region.belowRequiredPct, 0, 0.01, 'exposure is not thin cover:');
+  });
+
+  it('samples inside each facet, not only at its centre', () => {
+    /*
+     * A tapered slab, so the cover over the insert's two large facets varies
+     * across each of them — from 0.17 mm at one end of the footprint to
+     * 2.83 mm at the other. A sampler that takes each triangle's centroid can
+     * only ever report the values a third of the way in from each end, and so
+     * reports neither the thinnest cover on the part nor the thickest. The
+     * thinnest is the figure this check fails on.
+     */
+    const fx = S.slabWithInsert([40, 30, 4], 0.2, {
+      taper: [1.2, 4.0], insertZ: 1.0, insertSize: [38, 28],
+    });
+    const { region } = measure(fx);
+    const [xLo, xHi] = fx.insertFootprint;
+    close(region.coverStats.min, fx.cover, 0.03, 'thinnest cover:');
+    close(region.coverStats.max, fx.coverMax, 0.03, 'thickest cover:');
+
+    /* Where a centroid sampler would have stopped, from the fixture's own
+       formula rather than from anything the code did. */
+    const centroidHi = fx.topCoverAt(xLo + (xHi - xLo) * 2 / 3);
+    assert(region.coverStats.max > centroidHi + 0.3,
+      `centroids cap the maximum at about ${centroidHi.toFixed(2)} mm; got ${region.coverStats.max.toFixed(2)}`);
+    assert(region.coverStats.min < 0.5,
+      `the thinnest cover on this part is ${fx.cover.toFixed(2)} mm and must be found`);
+  });
+
+  it('measures the distance from the gate to the insert', () => {
+    const fx = S.slabWithInsert();
+    /* A corner of the slab. The insert is centred, so the nearest point of it
+       is the near corner of the plate: 10 mm in x, 10 mm in y, 1.9 in z. */
+    const gate = [0, 0, 0];
+    const { region } = measure(fx, { gate });
+    close(region.gateDistance, Math.hypot(10, 10, 1.9), 0.05, 'gate to insert:');
+  });
+
+  it('reports no gate distance until a gate is picked', () => {
+    const { region } = measure(S.slabWithInsert());
+    eq(region.gateDistance, null, 'gate distance:');
+  });
+
+  it('declines to measure what has not been designated', () => {
+    const fx = S.slabWithInsert();
+    const geom = weld(fx);
+    const shot = analyse(geom, { material: MATERIALS.pp, suggestGate: false });
+    const call = (region) => analyseFpcRegion({ geom, shot, region, requiredCover: REQUIRED });
+    eq(call(null), null, 'no designation:');
+    eq(call([]), null, 'an empty designation:');
+    /* Everything designated leaves no part to measure the cover against, and
+       nothing designated leaves nothing to measure. Both must decline rather
+       than produce a verdict from an empty set. */
+    eq(call([{ triStart: 0, triEnd: geom.triCount }]), null, 'the whole part:');
+    eq(call([{ triStart: 5, triEnd: 5 }]), null, 'an empty range:');
+  });
+
+  it('reports cover it could not follow as unknown, not as zero', () => {
+    /*
+     * A ray with more crossings than the budget holds has its parity in doubt,
+     * so the material along it is unknowable — and unknowable is not the same
+     * claim as uncovered. Reached by shrinking the budget rather than by a
+     * fixture of sixty-five nested walls: every ray off this insert crosses
+     * the pocket wall and then the outside of the part, so a budget of one
+     * truncates all of them.
+     */
+    const fx = S.slabWithInsert([40, 30, 4], 0.2, { pocket: 0.05 });
+    const geom = weld(fx);
+    const shot = analyse(geom, { material: MATERIALS.pp, suggestGate: false });
+    const capped = analyseFpcRegion({
+      geom, shot, region: [fx.bodies[1]], requiredCover: REQUIRED, maxCrossings: 1,
+    });
+    close(capped.indeterminatePct, 100, 0.01, 'every sample should be unknown:');
+    close(capped.uncoveredPct, 0, 0.01, 'and none of it called uncovered:');
+    eq(capped.coverStats, null, 'with no distribution to report:');
+
+    /* The same fixture with the real budget measures it. */
+    const full = analyseFpcRegion({
+      geom, shot, region: [fx.bodies[1]], requiredCover: REQUIRED, maxCrossings: MAX_CROSSINGS,
+    });
+    close(full.indeterminatePct, 0, 0.01, 'nothing unknown at the shipped budget:');
+    assert(full.coverStats && full.coverStats.n > 0, 'and a distribution to report');
+  });
+
+  it('gives the same answer twice', () => {
+    const fx = S.slabWithInsert();
+    const a = measure(fx).region;
+    const b = measure(fx).region;
+    close(b.coverStats.min, a.coverStats.min, 0, 'min cover:');
+    close(b.coverStats.median, a.coverStats.median, 0, 'median cover:');
+    close(b.uncoveredPct, a.uncoveredPct, 0, 'exposed area:');
+  });
+}
+
+describe('FPC — what the located insert changes in the rules');
+{
+  const FPC_ON = {
+    ...CLEAN_INPUT,
+    fpc: { enabled: true, thickness: 0.2, cover: 0.5, anchors: 'holes' },
+    runChecks: { ...CLEAN_INPUT.runChecks, fpc: true, wall: true },
+  };
+  const find = (r, key) => r.checks.find((c) => c.key === key);
+
+  /* A 4 mm slab with a 0.2 mm insert on its mid-plane: 1.9 mm of cover, which
+     is far above the 0.5 mm asked for, on a part whose 4 mm wall is thicker
+     than PP's 3.8 mm maximum — so the wall check has something of its own to
+     say either way and cannot be confused with the FPC floor. */
+  const good = S.slabWithInsert();
+  const goodGeom = weld(good);
+  const goodMesh = analyse(goodGeom, { material: MATERIALS.pp, suggestGate: false });
+  const goodRegion = analyseFpcRegion({
+    geom: goodGeom, shot: goodMesh, region: [good.bodies[1]], requiredCover: 0.5,
+  });
+
+  it('the part-wide FPC floor stands down once the insert is located', () => {
+    /* A wall floor of thickness + 2 × cover applied to the whole part is the
+       thing being replaced: with a 3 mm cover requirement the floor is 6.2 mm
+       and every part fails it, insert or no insert. */
+    const strict = {
+      ...FPC_ON,
+      fpc: { enabled: true, thickness: 0.2, cover: 3, anchors: 'holes' },
+      mesh: meshFor(S.hollowBox([40, 30, 20], 2)),
+    };
+    const wide = find(runDFM(strict), 'wall');
+    assert(/FPC-overmould floor/.test(wide.detail),
+      'without a designation the part-wide floor should still apply');
+
+    const located = find(runDFM({ ...strict, fpcRegion: { located: true, coverStats: { n: 1, min: 3.5, median: 3.5 }, uncoveredPct: 0, indeterminatePct: 0, belowRequiredPct: 0, samples: 2000, gateDistance: null } }), 'wall');
+    assert(!/FPC-overmould floor/.test(located.detail),
+      'with the insert located the wall check should judge the wall, not the floor');
+  });
+
+  it('judges the measured cover, and says that is what it did', () => {
+    const c = find(runDFM({ ...FPC_ON, mesh: goodMesh, fpcRegion: goodRegion }), 'fpc');
+    assert(/Cover over the insert is/.test(c.detail), 'must report the measured cover');
+    assert(c.detail.includes('1.90 mm'), `must state the figure, got: ${c.detail.slice(0, 400)}`);
+    const insert = c.metrics.find((m) => m[0] === 'Insert');
+    eq(insert[1], 'Located — cover measured', 'metric:');
+    assert(!c.metrics.some((m) => m[0] === 'Effective wall floor'),
+      'the part-wide floor should not be quoted once the cover is measured');
+  });
+
+  it('and admits the part-wide version for what it is when it has to use it', () => {
+    const c = find(runDFM({ ...FPC_ON, mesh: goodMesh, fpcRegion: null }), 'fpc');
+    assert(/over-reports/.test(c.detail), 'must own the over-reporting');
+    assert(/Solid bodies/.test(c.detail), 'must say how to get the measurement instead');
+    eq(c.metrics.find((m) => m[0] === 'Insert')[1], 'Not located — judged part-wide', 'metric:');
+  });
+
+  it('fails a part whose cover is under what was asked for', () => {
+    const thin = S.slabWithInsert([40, 30, 0.9], 0.2);
+    const thinGeom = weld(thin);
+    const thinMesh = analyse(thinGeom, { material: MATERIALS.pp, suggestGate: false });
+    const region = analyseFpcRegion({
+      geom: thinGeom, shot: thinMesh, region: [thin.bodies[1]], requiredCover: 0.5,
+    });
+    const c = find(runDFM({ ...FPC_ON, mesh: thinMesh, fpcRegion: region }), 'fpc');
+    eq(c.status, 'fail', 'status:');
+    eq(c.severity, 'critical', 'severity:');
+    assert(c.scoreDeduction > 0, 'a critical FPC finding must cost points');
+    assert(/falls to 0\.3\d mm against the 0\.50 mm/.test(c.detail),
+      `must name both figures, got: ${c.detail.slice(0, 300)}`);
+  });
+
+  it('asks about exposed insert area rather than passing over it', () => {
+    const proud = S.slabWithInsert([40, 30, 4], 0.2, { proud: true });
+    const proudGeom = weld(proud);
+    const proudMesh = analyse(proudGeom, { material: MATERIALS.tpu, suggestGate: false });
+    const region = analyseFpcRegion({
+      geom: proudGeom, shot: proudMesh, region: [proud.bodies[1]], requiredCover: 0.5,
+    });
+    /* TPU rather than PP, and deliberately: PP is high-warp, so the FPC check
+       warns about shrinkage on its own and the status would read the same
+       whether or not exposure raised it. TPU passes every other branch of
+       this check, which leaves the exposure as the only thing that can. */
+    const c = find(runDFM({ ...FPC_ON, material: 'tpu', mesh: proudMesh, fpcRegion: region }), 'fpc');
+    const clean = find(runDFM({
+      ...FPC_ON, material: 'tpu', mesh: proudMesh,
+      fpcRegion: { ...region, uncoveredPct: 0 },
+    }), 'fpc');
+    eq(clean.status, 'ok', 'the same part with nothing exposed:');
+    assert(/reach open air/.test(c.detail), 'must report the exposure');
+    assert(/cannot tell an opening from an oversight/.test(c.detail),
+      'must say why it is a question rather than a verdict');
+    assert(c.status === 'warn' || c.status === 'fail', `status was "${c.status}"`);
+  });
+
+  it('measures gate proximity instead of asking the reader to check it', () => {
+    const near = { ...goodRegion, gateDistance: 0.4 };
+    const c = find(runDFM({ ...FPC_ON, mesh: goodMesh, fpcRegion: near }), 'fpc');
+    eq(c.status, 'fail', 'a gate inside one wall of the insert:');
+    assert(/0\.4 mm from the insert/.test(c.detail), 'must state the distance');
+    assert(!/Verify gate is at least/.test(c.detail),
+      'the advisory it replaces should be gone once the distance is known');
+    eq(c.metrics.find((m) => m[0] === 'Gate to insert')[1], '0.4 mm', 'metric:');
+
+    const clear = { ...goodRegion, gateDistance: 40 };
+    const ok = find(runDFM({ ...FPC_ON, mesh: goodMesh, fpcRegion: clear }), 'fpc');
+    assert(/comfortably clear/.test(ok.detail), 'a distant gate should read as clear');
+  });
+
+  it('the export says whether the cover was measured or inferred', () => {
+    const r = runDFM({ ...FPC_ON, mesh: goodMesh, fpcRegion: goodRegion });
+    const base = {
+      sessionId: 'TEST', dfm: { input: { ...FPC_ON, fpcRegion: goodRegion }, result: r },
+      analysis: null, twoShot: null, interface: null, validation: null,
+      settings: { analysisMode: 'single', windowType: 'none' },
+    };
+    const located = buildExportJSON({ ...base, fpcRegion: goodRegion });
+    eq(located.fpc_insert.located, true, 'located:');
+    close(located.fpc_insert.cover_min_mm, good.cover, 0.01, 'min cover:');
+    close(located.fpc_insert.required_cover_mm, 0.5, 0, 'required cover:');
+    /* Three states, kept apart: thin, absent, unmeasurable. */
+    for (const k of ['area_below_required_pct', 'area_uncovered_pct', 'area_indeterminate_pct']) {
+      eq(typeof located.fpc_insert[k], 'number', `${k}:`);
+    }
+
+    const not = buildExportJSON({ ...base, fpcRegion: null });
+    eq(not.fpc_insert.located, false, 'not located:');
+    eq(not.fpc_insert.cover_min_mm, undefined, 'and no cover figures to mistake for measured ones:');
+  });
+
+  it('keeps the advisory when the insert is located but no gate is picked', () => {
+    const c = find(runDFM({ ...FPC_ON, mesh: goodMesh, fpcRegion: goodRegion }), 'fpc');
+    assert(/Pick a gate location and re-run/.test(c.detail), 'must ask for a gate');
+    assert(!c.metrics.some((m) => m[0] === 'Gate to insert'), 'and quote no distance');
   });
 }
 

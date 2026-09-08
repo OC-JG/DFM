@@ -81,6 +81,7 @@ export const runtime = {
   analysis2: null,             // shot 2 mesh analysis
   interface: null,             // two-shot interface measurement
   registration: null,          // how shot 2 was aligned onto shot 1, if at all
+  fpcRegion: null,             // cover over the body marked as the flex insert
   dfm: null,                   // { input, result }
   shot: null,                  // shot weight / clamp force estimate
   cycle: null,                 // cooling floor and cycle band
@@ -181,6 +182,7 @@ export function resetRuntime() {
   runtime.analysis2 = null;
   runtime.interface = null;
   runtime.registration = null;
+  runtime.fpcRegion = null;
   runtime.dfm = null;
   runtime.shot = null;
   runtime.cycle = null;

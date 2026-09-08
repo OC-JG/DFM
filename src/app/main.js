@@ -89,7 +89,7 @@ function installGeometry(geom, file) {
   viewer.clearGateMarker();
 
   runtime.bodies = viewer.loadGeometry(geom);
-  panel.renderBodiesList(runtime.bodies, toggleBody);
+  renderBodies();
   if (file) panel.setFileInfo(1, file, geom);
   panel.renderMeshHealth(runtime.validation, applyMeshFix);
   panel.updatePartSummary();
@@ -295,8 +295,36 @@ function toggleBody(i) {
      obvious way back. */
   if (bodies[i].visible && bodies.filter((b) => b.visible).length === 1) return;
   bodies[i].visible = !bodies[i].visible;
-  panel.renderBodiesList(bodies, toggleBody);
+  renderBodies();
   viewer.setBodyVisibility(bodies);
+}
+
+/*
+ * Mark, or unmark, a body as the flex insert.
+ *
+ * Kept on the body rather than in `settings` because it is a fact about this
+ * file: a body index means nothing once a different part is loaded, and
+ * settings persist to localStorage.
+ *
+ * The designation changes what the FPC check measures, so the results on
+ * screen were computed against the old one. Rather than silently re-scoring or
+ * silently going stale, it says a re-run is needed — the same treatment a
+ * changed material gets.
+ */
+function toggleBodyFpc(i) {
+  const bodies = runtime.bodies;
+  if (!bodies || !bodies[i]) return;
+  bodies[i].isFpc = !bodies[i].isFpc;
+  renderBodies();
+  if (runtime.dfm) {
+    toast(bodies[i].isFpc
+      ? `${bodies[i].name} marked as the flex — run the analysis again to measure the cover over it`
+      : `${bodies[i].name} unmarked — run the analysis again`);
+  }
+}
+
+function renderBodies() {
+  panel.renderBodiesList(runtime.bodies, toggleBody, toggleBodyFpc);
 }
 
 function setAllBodies(state) {
@@ -304,7 +332,7 @@ function setAllBodies(state) {
   if (!bodies) return;
   bodies.forEach((b) => { b.visible = state; });
   if (!bodies.some((b) => b.visible)) bodies[0].visible = true;
-  panel.renderBodiesList(bodies, toggleBody);
+  renderBodies();
   viewer.setBodyVisibility(bodies);
 }
 
@@ -313,7 +341,7 @@ function invertBodies() {
   if (!bodies) return;
   bodies.forEach((b) => { b.visible = !b.visible; });
   if (!bodies.some((b) => b.visible)) bodies[0].visible = true;
-  panel.renderBodiesList(bodies, toggleBody);
+  renderBodies();
   viewer.setBodyVisibility(bodies);
 }
 
@@ -516,7 +544,22 @@ function buildRuleInput() {
     },
     runChecks: { ...settings.checks },
     mesh: null,
+    fpcRegion: null,
   };
+}
+
+/*
+ * Triangle ranges of the bodies marked as the flex insert.
+ *
+ * Empty unless the FPC check is on and something is marked, which is what
+ * keeps the located and the part-wide versions of that check from both
+ * claiming to be in force.
+ */
+function fpcRegionRanges() {
+  if (!settings.fpcEnabled || !settings.checks.fpc || !runtime.bodies) return null;
+  const marked = runtime.bodies.filter((b) => b.isFpc);
+  if (!marked.length) return null;
+  return marked.map((b) => ({ triStart: b.triStart, triEnd: b.triEnd }));
 }
 
 /* Options for analyseMesh, with each shot getting its own material. The
@@ -555,18 +598,26 @@ async function doRunAnalysis() {
         /* 20 mm search distance is generous enough to catch even thick
            overmould layers without wandering across the part. */
         interfaceMaxDist: 20,
+        /* Triangle ranges of the bodies marked as the flex, if any. Sent as
+           ranges rather than body objects: the worker needs the geometry, not
+           the visibility state or the colour. */
+        fpcRegion: fpcRegionRanges(),
+        fpcCover: settings.fpcCover,
       };
-      const { shot1, shot2, iface, registration } = await runAnalysis(job, updateProgress);
+      const { shot1, shot2, iface, registration, fpcRegion } = await runAnalysis(job, updateProgress);
       runtime.analysis = shot1;
       runtime.analysis2 = shot2;
       runtime.interface = iface;
       runtime.registration = registration;
+      runtime.fpcRegion = fpcRegion;
       input.mesh = shot1;
+      input.fpcRegion = fpcRegion;
     } else {
       runtime.analysis = null;
       runtime.analysis2 = null;
       runtime.interface = null;
       runtime.registration = null;
+      runtime.fpcRegion = null;
     }
 
     updateProgress(1, 'Scoring');
@@ -677,6 +728,7 @@ function currentRecord() {
     twoShot: runtime.twoShot,
     interface: runtime.interface,
     registration: runtime.registration,
+    fpcRegion: runtime.fpcRegion,
     validation: runtime.validation,
     shot: runtime.shot,
     cycle: runtime.cycle,
@@ -760,7 +812,7 @@ function startOver() {
   panel.populateSelects();
   panel.syncFormFromSettings();
   panel.clearFileInfo();
-  panel.renderBodiesList(null, toggleBody);
+  panel.renderBodiesList(null, toggleBody, toggleBodyFpc);
   panel.setFromMeshBadge(false);
   panel.updatePartSummary();
   panel.updateOnboarding();
@@ -852,6 +904,11 @@ function onFieldChange(key) {
     panel.updateFpcInfo();
     panel.updateMaterialInfo();
   }
+  /* The FPC column in the body list appears and disappears with the check that
+     reads it, so switching either of them re-renders the list. Without this
+     the designation is offered only to whoever had the checkbox on before they
+     opened the file. */
+  if (key === 'fpcEnabled' || key === 'check:fpc') renderBodies();
   if (key === 'material') panel.updateOnboarding();
 }
 
