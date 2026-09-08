@@ -12,8 +12,19 @@ import { nextFrame } from './dom.js';
  * progress bar still moves.
  */
 
-/* Replaced at build time with the bundled worker source. */
-const WORKER_SOURCE = /*@WORKER_SRC@*/;
+/*
+ * Replaced at build time with the bundled worker source.
+ *
+ * A token beside a literal, which is the same shape as the slots in
+ * build-info.js and export/pdf.js — and for the same reason: the source has to
+ * be valid JavaScript before the build touches it, or nothing that reads
+ * src/ without building it (a linter, an editor, a test importing this
+ * module) can parse the file. It read `= /*@WORKER_SRC@*\/;` until a linter
+ * pointed out that this was the one file in the repository it could not read.
+ * Unbuilt, the worker source is empty and the runner falls back to running
+ * the analysis inline, which is a first-class path rather than a safety net.
+ */
+const WORKER_SOURCE = /*@WORKER_SRC@*/'';
 
 let activeWorker = null;
 let workerUnavailable = false;

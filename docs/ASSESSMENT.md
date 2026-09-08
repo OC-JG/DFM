@@ -984,6 +984,12 @@ environment cannot reach those hosts to compute them, and deriving them from the
 are byte-identical. Guessing wrong takes the viewer out entirely. Whoever adds
 them should fetch the real files and check the tool still boots afterwards.
 
+*Since this was written, `npm run sri` does the fetching, the hashing and the
+saying-where — three URLs across three files, one of which also needs
+`crossorigin="anonymous"` or the check fails whatever the hash says. It still
+needs a machine that can reach the two CDNs; this one answers 403 to both,
+which is now measured rather than assumed.*
+
 ### Costs
 
 A run on a 96k-triangle part has gone from 1,469 ms to 2,531 ms — about +72%,
@@ -1001,6 +1007,12 @@ All of it is inside the worker, so the page stays responsive. If a part ever fee
 slow, `SPHERE_SAMPLE_BUDGET` and `CONE_RINGS_DEG` in `src/analysis/mesh.js` are
 the two levers, and the measurements justifying their current values are in the
 comments beside them.
+
+*Since this was written, `test/perf.mjs` holds both levers still. Not by timing
+the run — the numbers above are a 1.8× spread away from being a threshold — but
+by counting the work: rays cast, BVH nodes visited, triangles tested, which are
+the same integers on every machine. Both levers are ray counts, so both are
+covered.*
 
 ### Still open, in priority order
 

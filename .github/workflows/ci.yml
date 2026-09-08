@@ -21,6 +21,15 @@ jobs:
       # The unit tests need neither a browser nor a network, so they run first
       # and fail fast — a broken thickness calculation should not wait on a
       # Chromium download to report itself.
+      #
+      # Lint first of all, because it is the only one of these that finishes
+      # before you have finished reading its name. --error-on-warnings is
+      # load-bearing: biome exits 0 on warnings, and the rules that matter here
+      # report as warnings, so without it this step is decoration. The contract
+      # test asserts the flag is still there.
+      - name: Lint
+        run: npm run lint
+
       # Cheapest check in the suite and the one a restyle is most likely to
       # trip: every id src/app reaches for must still exist in the markup.
       - name: Markup/script contract
@@ -40,6 +49,12 @@ jobs:
       # the only one with no test at all.
       - name: Inventor bridge
         run: npm run test:bridge
+
+      # Budgets the work the analysis asks for — rays, BVH nodes, triangles —
+      # rather than the time it takes, because the time is too noisy on a
+      # shared runner to fail a build on and the work is not noisy at all.
+      - name: Performance budget
+        run: npm run test:perf
 
       # dfm-tool.html is the deliverable and is committed to the repository. A
       # source-only commit would otherwise ship a stale one, silently.

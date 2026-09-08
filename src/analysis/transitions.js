@@ -25,7 +25,7 @@ export function detectWallTransitions(geom, triThickness, triCentroid, triCount,
   const valid = [];
   for (let t = 0; t < triCount; t++) {
     const th = triThickness[t];
-    if (!isNaN(th) && th > 0.05) valid.push(th);
+    if (Number.isFinite(th) && th > 0.05) valid.push(th);
   }
   if (valid.length < 10) return transitions;
 
@@ -56,7 +56,7 @@ export function detectWallTransitions(geom, triThickness, triCentroid, triCount,
     if (!Array.isArray(entry) || entry.length !== 2) continue; // boundary or non-manifold edge
     const [t1, t2] = entry;
     const th1 = triThickness[t1], th2 = triThickness[t2];
-    if (isNaN(th1) || isNaN(th2)) continue;
+    if (!Number.isFinite(th1) || !Number.isFinite(th2)) continue;
     if (th1 < lowerBound || th1 > upperBound) continue;
     if (th2 < lowerBound || th2 > upperBound) continue;
 

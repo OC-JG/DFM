@@ -60,7 +60,7 @@ async function main() {
     'a comment before the doctype puts browsers into quirks mode');
   check('built file names the runtime dependencies it does not contain',
     /fetched from a CDN/.test(source) && /NOTICE/.test(source));
-  const server = createServer((req, res) => {
+  const server = createServer((_req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(html);
   });
@@ -96,10 +96,17 @@ async function main() {
     });
   };
   await page.route(/^https:\/\/(cdnjs\.cloudflare\.com|cdn\.jsdelivr\.net)\//, serveVendored);
-  /* Fonts are decoration. Answer them with an empty stylesheet rather than
-     aborting, so a blocked request does not masquerade as an app error. */
-  await page.route(/^https:\/\/fonts\.(googleapis|gstatic)\.com\//, (route) =>
-    route.fulfill({ status: 200, contentType: 'text/css', body: '' }));
+  /* A tripwire, not a stub. The fonts are embedded as data URIs, so nothing
+     should ask for one — and this used to answer the request with an empty
+     stylesheet, which is how the tool came to render in a system font
+     whenever it had no connection without anything noticing. Any request that
+     lands here is a regression, and it is asserted after the page has
+     settled. */
+  const fontRequests = [];
+  await page.route(/^https:\/\/fonts\./, (route) => {
+    fontRequests.push(route.request().url());
+    return route.abort();
+  });
 
   const consoleErrors = [];
   page.on('console', (m) => { if (m.type() === 'error') consoleErrors.push(m.text()); });
@@ -134,6 +141,27 @@ async function main() {
     check('material list populated', (await page.locator('#material option').count()) === 16);
     check('finish list populated', (await page.locator('#surfaceFinish option').count()) === 16);
     check('heat mode buttons built', (await page.locator('.heat-btn').count()) === 6);
+
+    /* ── the typography is the file's, not the machine's ──
+       Two properties, and both matter. Nothing was fetched: the tripwire above
+       recorded no request, so a machine with no internet gets the same page.
+       And the embedded faces actually loaded: a data URI that fails to decode
+       falls back silently to the system stack, which looks like a design
+       choice rather than a broken build. */
+    const faces = await page.evaluate(async () => {
+      await document.fonts.ready;
+      return [...document.fonts].map((f) => ({ family: f.family, weight: f.weight, status: f.status }));
+    });
+    /* Read off the FontFaceSet rather than asked with `document.fonts.check`,
+       which was the first thing tried and is vacuous here: check() answers
+       "can this be rendered without waiting", and with no @font-face at all
+       the fallback renders immediately, so it returns true for a build that
+       embedded nothing. Verified by removing the fonts from the build. */
+    const loaded = faces.filter((f) => f.status === 'loaded').map((f) => f.family);
+    const detail = faces.map((f) => `${f.family} ${f.weight} ${f.status}`).join('; ') || 'no @font-face on the page';
+    check('no webfont was requested off-origin', fontRequests.length === 0, fontRequests.join(', ') || 'none');
+    check('the embedded webfonts loaded',
+      loaded.includes('Archivo') && loaded.includes('JetBrains Mono'), detail);
 
     // ── load the part ─────────────────────────────────────────────────────
     await page.setInputFiles('#fileInput', join(FIXTURES, 'part.stl'));
@@ -480,7 +508,6 @@ async function main() {
     // page so it cannot be confused with the state the run above left behind.
     const healthPage = await browser.newPage({ viewport: { width: 1600, height: 1000 } });
     await healthPage.route(/^https:\/\/(cdnjs\.cloudflare\.com|cdn\.jsdelivr\.net)\//, serveVendored);
-    await healthPage.route(/^https:\/\/fonts\./, (route) => route.fulfill({ status: 200, contentType: 'text/css', body: '' }));
     await healthPage.goto(url, { waitUntil: 'networkidle' });
 
     const loadInto = async (name) => {
@@ -534,9 +561,12 @@ async function main() {
     // edge case, so it gets asserted: same inputs, same score.
     const fallbackPage = await browser.newPage({ viewport: { width: 1600, height: 1000 } });
     await fallbackPage.route(/^https:\/\/(cdnjs\.cloudflare\.com|cdn\.jsdelivr\.net)\//, serveVendored);
-    await fallbackPage.route(/^https:\/\/fonts\./, (route) => route.fulfill({ status: 200, contentType: 'text/css', body: '' }));
     await fallbackPage.addInitScript(() => {
-      window.Worker = function () { throw new Error('workers blocked (simulating file:// origin)'); };
+      /* A class, not an arrow — `new Worker(url)` has to fail the way it
+         fails on file://, which is a constructor throwing. An arrow function
+         fails earlier and differently ("not a constructor"), which would
+         exercise a path the real browser never takes. */
+      window.Worker = class { constructor() { throw new Error('workers blocked (simulating file:// origin)'); } };
     });
     await fallbackPage.goto(url, { waitUntil: 'networkidle' });
 
@@ -562,7 +592,6 @@ async function main() {
 
     const bridgePage = await browser.newPage({ viewport: { width: 1600, height: 1000 } });
     await bridgePage.route(/^https:\/\/(cdnjs\.cloudflare\.com|cdn\.jsdelivr\.net)\//, serveVendored);
-    await bridgePage.route(/^https:\/\/fonts\./, (route) => route.fulfill({ status: 200, contentType: 'text/css', body: '' }));
     /* Point the page at this server before any of its scripts run — the same
        setting a user would type under the drop zone. */
     await bridgePage.addInitScript((url) => {
@@ -630,7 +659,6 @@ async function main() {
     // in the viewer with its bodies and its measurements intact.
     const stepPage = await browser.newPage({ viewport: { width: 1600, height: 1000 } });
     await stepPage.route(/^https:\/\/(cdnjs\.cloudflare\.com|cdn\.jsdelivr\.net)\//, serveVendored);
-    await stepPage.route(/^https:\/\/fonts\./, (route) => route.fulfill({ status: 200, contentType: 'text/css', body: '' }));
     await stepPage.goto(url, { waitUntil: 'networkidle' });
 
     await stepPage.setInputFiles('#fileInput', join(FIXTURES, 'part.step'));

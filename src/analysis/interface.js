@@ -45,7 +45,7 @@ export function analyseInterface(geom1, bvh1, shot2, maxDist, xform) {
     const dist = castRay(bvh1, geom1,
       cx + nx * eps, cy + ny * eps, cz + nz * eps, nx, ny, nz, eps, -1);
 
-    if (isFinite(dist) && dist < maxDist) {
+    if (Number.isFinite(dist) && dist < maxDist) {
       interfaceTris[t] = 1;
       thicknesses[t] = dist;
       coverArea += triAreas[t];

@@ -212,7 +212,7 @@ export function analyseFpcRegion({ geom, shot, region, requiredCover, gateLocati
     const insideBvh = buildBVH(insideGeom);
     const d = closestPoint(insideBvh, insideGeom,
       gateLocation[0], gateLocation[1], gateLocation[2], Infinity, new Float64Array(4));
-    gateDistance = isFinite(d) ? d : null;
+    gateDistance = Number.isFinite(d) ? d : null;
   }
 
   let regionArea = 0;

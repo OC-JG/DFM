@@ -60,6 +60,7 @@
 
 /* The `hidden` attribute must beat the layout displays set below, or a
    hidden .field still lays out as a grid. */
+/* biome-ignore lint/complexity/noImportantStyles: this is what !important is for — the attribute has to win against every display rule in the file, and any selector strong enough to do that by specificity would have to name them all. */
 [hidden] { display: none !important; }
 
 html { height: 100%; overflow: hidden; }
@@ -583,12 +584,18 @@ details.step > .step-body { animation: revealDown 0.16s ease; }
 
 /* ═══ SOLID BODY SELECTOR ══════════════════════════════════════════════ */
 .bodies-toolbar { display: flex; gap: 4px; margin-bottom: 8px; }
+/* biome-ignore-start lint/complexity/noImportantStyles: debt, not intent.
+   These three fight the generic `button` rule and should win on specificity
+   instead. Left standing because changing the selector changes what else it
+   matches, and that is a CSS change to make deliberately rather than inside a
+   lint pass. */
 .bodies-btn {
   flex: 1;
   font-size: 10px !important;
   padding: 4px 6px !important;
   margin-top: 0 !important;
 }
+/* biome-ignore-end lint/complexity/noImportantStyles: end */
 /* A row is a container rather than a button: it holds two of them, since a
    body can be hidden and marked as the flex independently. */
 .body-row {
@@ -857,6 +864,9 @@ details.step > .step-body { animation: revealDown 0.16s ease; }
 .field input:focus, .field select:focus { border-bottom: 2px solid var(--accent); }
 .field-unit { font-size: 10px; opacity: 0.5; margin-left: 4px; }
 
+/* biome-ignore-start lint/complexity/noImportantStyles: debt, as above — four
+   declarations undoing the uppercase, tracked, half-opacity `label` styling
+   rather than scoping that rule to the labels that actually want it. */
 .checkbox-inline {
   font-size: 11px !important;
   display: flex;
@@ -867,6 +877,7 @@ details.step > .step-body { animation: revealDown 0.16s ease; }
   opacity: 1 !important;
   cursor: pointer;
 }
+/* biome-ignore-end lint/complexity/noImportantStyles: end */
 .checkbox-inline input[type="checkbox"] { margin: 0; cursor: pointer; }
 
 .btn {
@@ -1005,8 +1016,11 @@ details.step > .step-body { animation: revealDown 0.16s ease; }
      fine for a hint, running underneath the buttons is not. */
   max-width: calc(100% - 372px);
   flex-wrap: wrap;
-  row-gap: 4px;
-  gap: 14px;
+  /* Row then column. It was `row-gap: 4px` followed by `gap: 14px`, and the
+     shorthand resets the longhand — so the tight 4px between wrapped rows,
+     which is the reason the row-gap was written at all, was silently 14px.
+     Found by the linter. */
+  gap: 4px 14px;
   font-size: 9px;
   letter-spacing: 0.10em;
   text-transform: uppercase;
@@ -1413,11 +1427,15 @@ footer {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  /* biome-ignore-start lint/complexity/noImportantStyles: a user's motion
+     preference must override every animation in the stylesheet, including ones
+     added after this rule. This is the pattern the media query exists for. */
   *, *::before, *::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+  /* biome-ignore-end lint/complexity/noImportantStyles: end */
 }
 
 /* ═══ SCROLLBARS ═══════════════════════════════════════════════════════ */

@@ -11,9 +11,10 @@
  * No browser, no network, no build step. Run: node test/unit.mjs
  */
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import * as S from './lib/shapes.mjs';
 import * as R from './lib/reference.mjs';
 import { weldGeometry } from '../src/geometry/weld.js';
@@ -38,7 +39,7 @@ import {
   estimateCycle, estimatePartCost, toolingDrivers,
   PRACTICAL_COOLING_FACTOR, COOLING_SHARE,
 } from '../src/analysis/cost.js';
-import { searchGateCandidates, computeFlowLengths, buildAdjacency, geodesicFrom } from '../src/analysis/flow.js';
+import { searchGateCandidates, buildAdjacency, geodesicFrom } from '../src/analysis/flow.js';
 import { jacobiEigen } from '../src/analysis/linalg.js';
 import {
   registerShots, fitRigid, rotationDegOf, identityXform, xformPoint,
@@ -46,12 +47,14 @@ import {
 } from '../src/analysis/register.js';
 import { analyseInterface } from '../src/analysis/interface.js';
 import { analyseFpcRegion, FPC_SAMPLES, MAX_CROSSINGS } from '../src/analysis/fpc.js';
+import { tagVersion, isPrerelease, section, releaseProblems, releaseNotes } from '../release.js';
+import { sriHash, RUNTIME_LOADS } from '../sri.js';
 import { castRayAll } from '../src/geometry/bvh.js';
 import { effectiveMinDraft } from '../src/core/finishes.js';
 import { MATERIALS, MATERIAL_ORDER } from '../src/core/materials.js';
 import { DEFAULT_SETTINGS } from '../src/app/state.js';
 import {
-  createCameraState, quatFromThetaPhi, quatApply, quatMul, quatAxisAngle,
+  createCameraState, quatFromThetaPhi,
   vDot, vLen, vSub, vUnit, vScale, PITCH_LIMIT, ZOOM_MIN_FACTOR, ZOOM_MAX_FACTOR,
 } from '../src/app/camera-state.js';
 import { applyRates, shape, isIdle, createNavigatorLoop, NAVIGATOR_DEFAULTS } from '../src/app/navigator.js';
@@ -59,6 +62,8 @@ import {
   axesFromCollections, decodeReport, readField, createHidSource,
   AXIS_USAGES, hidAvailable,
 } from '../src/app/spacemouse.js';
+
+const REPO_ROOT = join(fileURLToPath(new URL('.', import.meta.url)), '..');
 
 // ── harness ────────────────────────────────────────────────────────────────
 
@@ -1389,7 +1394,7 @@ describe('gate placement — searching instead of guessing');
     eq(dist[0], 0, 'distance to the source:');
     let reached = 0, maxD = 0;
     for (let v = 0; v < geom.vertCount; v++) {
-      if (isFinite(dist[v])) { reached++; maxD = Math.max(maxD, dist[v]); }
+      if (Number.isFinite(dist[v])) { reached++; maxD = Math.max(maxD, dist[v]); }
     }
     eq(reached, geom.vertCount, 'a closed mesh must be fully reachable:');
     assert(maxD > 100, `a 200 mm bar should have paths over 100 mm, got ${maxD.toFixed(1)}`);
@@ -1922,7 +1927,7 @@ describe('closest point on a mesh');
 
   await it('respects the search cap, and reports Infinity beyond it', () => {
     /* 30 mm off the +z face: inside a 31 mm cap, outside a 29 mm one. */
-    assert(isFinite(closestPoint(bvh, geom, 20, 15, 50, 31, out)), 'should find within 31 mm');
+    assert(Number.isFinite(closestPoint(bvh, geom, 20, 15, 50, 31, out)), 'should find within 31 mm');
     eq(closestPoint(bvh, geom, 20, 15, 50, 29, out), Infinity, 'should not find within 29 mm:');
   });
 }
@@ -1933,7 +1938,7 @@ describe('rigid fit — Horn quaternion');
      get transposed: a transposed correlation matrix yields the inverse
      rotation, which converges just as prettily onto the wrong pose. */
   const src = [];
-  let seed = makeRandom(7);
+  const seed = makeRandom(7);
   for (let i = 0; i < 40; i++) src.push(seed() * 60 - 30, seed() * 40 - 20, seed() * 20 - 10);
 
   for (const [name, axis, deg, t] of [
@@ -2953,7 +2958,13 @@ describe('camera — a 6-DoF sample, integrated');
     const samples = [S6({ ry: 1 }), S6({ ry: 1 }), null, S6({ ry: 1 })];
     let i = 0;
     const loop = createNavigatorLoop({
-      source: { read: () => (i < samples.length ? samples[i++] : (loop.stop(), null)) },
+      source: {
+        read: () => {
+          if (i < samples.length) return samples[i++];
+          loop.stop();
+          return null;
+        },
+      },
       controls,
       now: () => t,
       schedule: (fn) => { t += 100; frames.push(t); if (frames.length < 12) fn(); },
@@ -3005,7 +3016,7 @@ describe('a 6-DoF device, read from its own descriptor');
   const report = (...values) => {
     const buf = new ArrayBuffer(values.length * 2);
     const view = new DataView(buf);
-    values.forEach((v, i) => view.setInt16(i * 2, v, true));
+    values.forEach((v, i) => { view.setInt16(i * 2, v, true); });
     return view;
   };
 
@@ -3104,7 +3115,7 @@ describe('a 6-DoF device, read from its own descriptor');
     eq(source.axisCount, 6, 'axes declared:');
     eq(source.read(), null, 'silence before the first report:');
 
-    const send = (id, view) => listeners.forEach((fn) => fn({ reportId: id, data: view }));
+    const send = (id, view) => { listeners.forEach((fn) => { fn({ reportId: id, data: view }); }); };
     send(1, report(350, 0, 0));
     close(source.read().tx, 1, 1e-12, 'translation arrived:');
     close(source.read().ry, 0, 1e-12, 'and rotation is still centred:');
@@ -3494,6 +3505,189 @@ describe('build identity');
     for (const k of ['tool_version', 'source_fingerprint', 'release', 'built']) {
       assert(k in json.build, `the export is missing build.${k}`);
     }
+  });
+}
+
+// ── release gates ──────────────────────────────────────────────────────────
+
+{
+  describe('release: the tag, the version and the changelog');
+
+  await it('a release tag is v followed by a whole version, and nothing else', () => {
+    eq(tagVersion('v2.1.0'), '2.1.0', 'plain tag:');
+    eq(tagVersion('v2.1.0-rc.1'), '2.1.0-rc.1', 'pre-release tag:');
+    eq(tagVersion('  v2.1.0  '), '2.1.0', 'surrounding whitespace:');
+    /* Each of these is a plausible thing to type and none of them is
+       interpreted, because a tag is permanent and two spellings of one
+       release pointing at different commits is unrecoverable. */
+    for (const bad of ['2.1.0', 'v2.1', 'v2', 'release-2.1.0', 'v2.1.0+build.7', 'v 2.1.0', 'vX.Y.Z', '', null, undefined]) {
+      eq(tagVersion(bad), null, `rejects ${JSON.stringify(bad)}:`);
+    }
+  });
+
+  await it('a pre-release suffix is what marks a pre-release', () => {
+    assert(!isPrerelease('2.1.0'), '2.1.0 is not a pre-release');
+    assert(isPrerelease('2.1.0-rc.1'), '2.1.0-rc.1 is a pre-release');
+    assert(isPrerelease('2.1.0-beta'), '2.1.0-beta is a pre-release');
+  });
+
+  const DOC = [
+    '# Changelog', '', 'preamble', '', '---', '',
+    '## Unreleased', '', 'nothing yet', '',
+    '## v2.1.0 — 2026-09-09', '', 'the notes', '', '### Added', '', '- a thing', '',
+    '---', '',
+    '## v2.0.0 — 2026-08-17', '', 'older notes', '',
+    '## v1.9.0 — 2026-01-01', '',
+  ].join('\n');
+
+  await it('a section stops at the next release and keeps its own subsections', () => {
+    const notes = section(DOC, 'v2.1.0');
+    assert(notes.includes('the notes'), 'the section body is missing');
+    assert(notes.includes('### Added'), 'a subsection of the release was dropped');
+    assert(notes.includes('- a thing'), 'a subsection\'s content was dropped');
+    assert(!notes.includes('older notes'), 'the next release bled into this one');
+    assert(!notes.includes('nothing yet'), 'the previous section bled into this one');
+    /* The rule between sections belongs to neither. */
+    assert(!/-{3,}\s*$/.test(notes), `a horizontal rule was kept: ${JSON.stringify(notes.slice(-20))}`);
+  });
+
+  await it('a date after the version does not stop the heading matching', () => {
+    assert(section(DOC, 'v2.0.0') !== null, 'a dated heading was not found');
+    eq(section(DOC, 'v2.0.0'), 'older notes', 'dated heading body:');
+  });
+
+  await it('a missing section and an empty one are told apart', () => {
+    eq(section(DOC, 'v3.0.0'), null, 'a heading that is not there:');
+    eq(section(DOC, 'v1.9.0'), '', 'a heading with nothing under it:');
+  });
+
+  await it('a version is not a prefix of another version', () => {
+    /* `v2.1.0` must not match `v2.1.0-rc.1`, or releasing the candidate would
+       publish the release's notes and vice versa. */
+    const doc = '## v2.1.0-rc.1\n\ncandidate\n\n## v2.1.0\n\nfinal\n';
+    eq(section(doc, 'v2.1.0'), 'final', 'the release:');
+    eq(section(doc, 'v2.1.0-rc.1'), 'candidate', 'the candidate:');
+  });
+
+  await it('every problem with a release is reported at once', () => {
+    /* Bumped neither package.json nor the changelog: two mistakes, and being
+       told about the second one after fixing the first costs another tag. */
+    const problems = releaseProblems('v2.1.0', { version: '2.0.0', changelog: DOC.replace('## v2.1.0 — 2026-09-09', '## v9.9.9') });
+    eq(problems.length, 2, 'problems found:');
+    assert(problems.some((p) => p.includes('2.0.0') && p.includes('2.1.0')), 'the version mismatch does not name both versions');
+    /* Specifically the *missing* one. A section that exists and is empty has
+       its own message, and the two must not be able to stand in for each
+       other — "add the section" and "fill the section in" are different
+       instructions. */
+    assert(problems.some((p) => p.includes('has no "## v2.1.0" section')), `the missing changelog section was not reported: ${problems.join(' | ')}`);
+  });
+
+  await it('a bad tag is the only thing reported, because nothing else can be checked', () => {
+    const problems = releaseProblems('2.1.0', { version: '2.1.0', changelog: DOC });
+    eq(problems.length, 1, 'problems found:');
+    assert(problems[0].includes('not a release tag'), `unexpected problem: ${problems[0]}`);
+  });
+
+  await it('an empty section is a problem in its own right', () => {
+    const problems = releaseProblems('v1.9.0', { version: '1.9.0', changelog: DOC });
+    eq(problems.length, 1, 'problems found:');
+    assert(problems[0].includes('nothing in it'), `unexpected problem: ${problems[0]}`);
+  });
+
+  await it('a release that lines up has no problems, and its notes are the section', () => {
+    eq(releaseProblems('v2.1.0', { version: '2.1.0', changelog: DOC }).length, 0, 'problems:');
+    eq(releaseNotes(DOC, '2.1.0'), section(DOC, 'v2.1.0'), 'notes:');
+  });
+
+  await it("this repository's own changelog satisfies the gates it will be judged by", () => {
+    const doc = readFileSync(join(REPO_ROOT, 'CHANGELOG.md'), 'utf8');
+    assert(section(doc, 'Unreleased') !== null, 'CHANGELOG.md has no Unreleased section');
+    /* Every release heading must name a version this tool would accept as a
+       tag, and carry something. A heading added by hand in the wrong shape
+       would otherwise only be discovered by a release failing. */
+    const headings = [...doc.matchAll(/^##\s+(v\S+)/gm)].map((m) => m[1]);
+    for (const h of headings) {
+      assert(tagVersion(h) !== null, `CHANGELOG.md heading "${h}" is not a version a tag could name`);
+      assert(section(doc, h), `CHANGELOG.md section "${h}" is empty`);
+    }
+  });
+
+  await it('the release workflow checks the cheap thing first', () => {
+    /* The gate above costs a second and the browser suite costs minutes.
+       Ordering them the other way round is a real temptation when adding a
+       step, and the cost of getting it wrong is invisible until a release
+       fails four minutes in. */
+    const yml = readFileSync(join(REPO_ROOT, '.github/workflows/release.yml'), 'utf8');
+    assert(/tags:\s*\['v\*'\]/.test(yml), 'the release workflow does not fire on v* tags');
+    const gate = yml.indexOf('node release.js');
+    const browser = yml.indexOf('playwright install');
+    assert(gate > 0, 'the release workflow does not run the release gate');
+    assert(browser > 0, 'the release workflow does not install a browser');
+    assert(gate < browser, 'the release gate runs after the browser download');
+  });
+}
+
+// ── subresource integrity ──────────────────────────────────────────────────
+
+{
+  describe('sri: the hash, and the list of what needs one');
+
+  await it('the attribute is base64 of the digest bytes, not of its hex text', () => {
+    /* FIPS 180-4's own SHA-384 example, quoted as hex, converted here rather
+       than taken from the implementation under test. This is the mistake the
+       encoding invites: base64 of the hex string is 96 characters of
+       plausible-looking nonsense that no browser will ever match, and it
+       cannot be told from the real thing by looking. */
+    const FIPS_ABC = 'cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed'
+      + '8086072ba1e7cc2358baeca134c825a7';
+    const expected = `sha384-${Buffer.from(FIPS_ABC, 'hex').toString('base64')}`;
+    eq(sriHash(Buffer.from('abc', 'utf8')), expected, 'SHA-384 of "abc":');
+    /* And the wrong encoding is demonstrably different, so the test above is
+       not passing by accident. */
+    assert(sriHash(Buffer.from('abc', 'utf8')) !== `sha384-${Buffer.from(FIPS_ABC, 'utf8').toString('base64')}`,
+      'the hex-text encoding and the digest-bytes encoding came out the same, which cannot be');
+  });
+
+  await it('the algorithm is part of the value', () => {
+    const bytes = Buffer.from('abc', 'utf8');
+    assert(sriHash(bytes).startsWith('sha384-'), 'the default is not labelled sha384');
+    assert(sriHash(bytes, 'sha512').startsWith('sha512-'), 'sha512 is not labelled');
+    assert(sriHash(bytes, 'sha512') !== sriHash(bytes), 'two algorithms produced the same value');
+  });
+
+  await it('every runtime CDN URL in src/ is on the list, and every URL on the list is in src/', () => {
+    /* The list is spread across three files, and a version bumped in one of
+       them leaves a stale hash in another — which nothing notices, because a
+       stale integrity attribute is a blank viewer rather than an error. So the
+       two are held against each other, in both directions. */
+    const sources = ['index.html', 'export/pdf.js', 'geometry/step.js']
+      .map((f) => readFileSync(join(REPO_ROOT, 'src', f), 'utf8'));
+    const inSrc = new Set();
+    for (const text of sources) {
+      for (const m of text.matchAll(/https:\/\/(?:cdnjs\.cloudflare\.com|cdn\.jsdelivr\.net)\/[^"'\s)]+/g)) {
+        inSrc.add(m[0]);
+      }
+    }
+    const listed = new Set(RUNTIME_LOADS.map((l) => l.url));
+    for (const url of inSrc) {
+      assert(listed.has(url), `src/ fetches ${url}, which sri.js does not list`);
+    }
+    for (const url of listed) {
+      assert(inSrc.has(url), `sri.js lists ${url}, which nothing in src/ fetches any more`);
+    }
+    eq(listed.size, inSrc.size, 'runtime loads:');
+  });
+
+  await it('each entry says where it goes and what it needs alongside', () => {
+    for (const load of RUNTIME_LOADS) {
+      assert(load.site && load.how, `${load.name} does not say where its attribute goes`);
+      assert(existsSync(join(REPO_ROOT, 'src', load.site.replace(/^src\//, ''))),
+        `${load.name} names ${load.site}, which does not exist`);
+    }
+    /* The static tag is the one that also needs crossorigin, and forgetting it
+       fails the check whatever the hash is. */
+    const three = RUNTIME_LOADS.find((l) => l.name === 'three.js');
+    assert(/crossorigin/i.test(three.how), 'the <script> tag entry does not mention crossorigin');
   });
 }
 

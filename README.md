@@ -44,7 +44,9 @@ the score it replaced.
 
 Three things load from a CDN at runtime and therefore need a connection:
 three.js (the 3D viewer), the OpenCascade WASM reader (STEP files only), and
-jsPDF (PDF export only). Only three.js loads up front; the other two are
+jsPDF (PDF export only). The typography is not among them — both webfonts are
+embedded in the file, so the tool looks the same on a shop-floor PC with the
+internet blocked as it does on a desk with fibre. Only three.js loads up front; the other two are
 fetched the first time you actually need them. If a load fails the tool says
 so and keeps working with what remains — STL parsing, all the analysis, and
 JSON export are entirely local.
@@ -68,13 +70,16 @@ puts the normal one back. STEP import is not covered: the OpenCascade reader is
 ```sh
 npm install            # only needed for the tests
 npm run browser        # once: fetches the Chromium the smoke test drives
-npm test               # build + unit tests + fixtures + browser smoke test
+npm test               # build + lint + unit + perf + fixtures + browser smoke test
 
+npm run lint           # Biome, linter only — see biome.jsonc for why the formatter is off
 npm run test:unit      # just the unit tests: no browser, no network, sub-second
 npm run test:step      # the STEP path, which is also the .ipt path
 npm run test:bridge    # the Inventor loop, against a fake InventorMCP
+npm run test:perf      # the work budget: rays, BVH nodes and triangles tested
 npm run test:offline   # proves the --vendor build runs with no network at all
 npm run verify:build   # asserts the committed dfm-tool.html matches src/
+npm run sri            # the integrity attributes for the three CDN loads (needs network)
 ```
 
 `npm install` brings in the Playwright library but not a browser binary, which
@@ -117,6 +122,44 @@ The smoke test drives a real Chromium through the whole pipeline — load,
 analyse, heatmaps, gate picking, two-shot, both exports, persistence, reset,
 and the main-thread fallback — and serves three.js and jsPDF from
 `node_modules` so it never depends on the network.
+
+## Releasing
+
+`dfm-tool.html` is a file people are handed, and once it has left the
+repository the only thing that says what it is is the banner inside it. So a
+release is a tag, and the tag has to agree with everything else:
+
+```sh
+# 1. bump the version and move the changelog entries under it
+npm version 2.1.0 --no-git-tag-version
+$EDITOR CHANGELOG.md          # "## Unreleased" -> "## v2.1.0 — 2026-09-09"
+
+# 2. rebuild, because the version is compiled into the artifact
+node build.js && git commit -am "Release 2.1.0" && git push
+
+# 3. check the three things a release can get wrong, before the tag exists
+npm run release:check v2.1.0
+
+# 4. tag it
+git tag v2.1.0 && git push origin v2.1.0
+```
+
+Step 3 is worth the ten seconds: a tag is permanent, and correcting one means
+deleting it from the remote. It checks that the tag names a version, that
+`package.json` says that same version, and that `CHANGELOG.md` has a section
+for it with something in it — and prints the notes it would publish. The same
+gate runs first in `.github/workflows/release.yml`, before the browser suite,
+so a mismatch costs a second rather than four minutes.
+
+The tag then runs the full suite again, refuses to publish from a commit that
+is not an ancestor of `main`, and attaches two builds stamped with the tag: the
+CDN-loading one and the `--vendor` one. Which of those a recipient wants
+depends on the machine they will open it on, so they get both.
+
+`CHANGELOG.md` calls out separately any change that can move a score for a
+reason other than the part. That is not housekeeping: `compare.js` tells anyone
+comparing two runs from different builds to *"check the release notes before
+reading a score change as progress"*, and that file is where it sends them.
 
 ## Layout
 
@@ -466,7 +509,7 @@ part, so they carry no weight, appear as no check, and cannot move the score —
 part scores the same whether or not anyone has entered a resin price. A test
 asserts it.
 
-## Comparing revisions## Comparing revisions
+## Comparing revisions
 
 **Compare with JSON** reads a previous export and says what moved: the score, the
 grade, which checks changed band, and which measurements shifted and in which
@@ -480,14 +523,18 @@ the part, and each raises a caveat above the diff.
 
 ## Roadmap
 
-`docs/ROADMAP.md` is what happens next and why, in order: getting the STEP path
-under test (it is the primary input path and the only untested one), consuming
-the B-rep face groups the parser already extracts, putting the Inventor loop
-under test, SpaceMouse navigation for the people who use one all day, and the
-one question — the `coolK` convention — that cycle time and every cost derived
-from it are waiting on. It also records what has been decided *against*, so it
-does not get re-proposed: a computed parting line, flow
-simulation, and authentication on a localhost-only bridge.
+`docs/ROADMAP.md` is what happens next and why, in order — and what has already
+happened, with the premises the work turned out to have wrong. R2.1 to R2.7 are
+done: the STEP path under test, the B-rep face groups consumed, the Inventor
+loop under test, the `coolK` convention settled by re-derivation, cycle time and
+cost, two-shot registration, the FPC insert, build identity, the findings
+package and 6-DoF navigation. Two things wait on something a keyboard cannot
+supply — sixteen Vicat softening points, which need datasheets, and half an
+hour with a SpaceMouse plugged in.
+
+It also records what has been decided *against*, so it does not get
+re-proposed: a computed parting line, flow simulation, and authentication on a
+localhost-only bridge.
 
 `docs/ASSESSMENT.md` is the review that preceded the rebuild and the record of
 what the five delivered phases actually changed.

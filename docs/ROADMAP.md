@@ -579,7 +579,13 @@ mouse — **unverified**, for want of hardware.
 
 ### Release discipline
 
-**Do this first — it is two or three days and everything else benefits.**
+**Done, last rather than first.** It was estimated at two or three days and it
+was cheap, but "cheap" turned out to be the wrong word: five of its seven items
+turned up a defect, two of those were defects in checks that were reporting
+green, and three of its stated premises did not survive contact — `-diff` on
+the built file would have hidden the diff that diagnosed the build, the PDF was
+never affected by the webfonts, and CI cannot fail on a benchmark at all. Each
+item below records what shipped and what it found.
 
 - **A deterministic build, and the two suites its failure was hiding.**
   *(done — #6)* `verify:build` had been red on `main` since 2026-08-25, and not
@@ -601,51 +607,287 @@ mouse — **unverified**, for want of hardware.
   step in front of it was permanently red. A guard rail everyone has learned to
   ignore is worse than not having one — and the cost is not the guard rail
   itself, it is everything downstream of it that quietly stops being checked.
-- **Tag and release.** `package.json` says `2.0.0`; there are no tags and no
-  releases. CI already uploads `dfm-tool.html` as an artifact on every run
-  (`.github/workflows/ci.yml`); attaching it to a tagged release instead gives
-  the file a citable home. The deliverable is designed to be handed to people,
-  and right now nobody holding it can say which one they have.
-- **A CHANGELOG.** For a tool whose output is a scored report, a threshold change
-  is a user-visible change, and there is currently no record of when a score
-  moved for reasons other than the part.
-- **A linter and a formatter.** Neither is configured. The codebase has a clear,
-  consistent house style and no mechanical enforcement of it, which makes review
-  of an outside patch a style conversation. Whatever the choice, it should run in
-  CI next to the contract test.
-- **A performance budget.** `docs/ASSESSMENT.md` records a run going from 1,469 ms
-  to 2,531 ms and names the two levers that control it, but nothing measures it,
-  so the next regression will be found by feel. A benchmark script over a fixed
-  fixture with a budget CI can fail on is a day's work.
-- **`.gitattributes` for the built file.** 579 kB of generated HTML is committed
-  and must stay committed. Marking it `linguist-generated` and `-diff` keeps it
-  out of diffs and reviews without changing what ships.
-- **The webfonts.** `test/offline.mjs:106` explicitly tolerates blocked requests
-  to `fonts.` — so the `--vendor` build, whose whole purpose is needing no
-  network, still reaches for Google Fonts and silently falls back to system
-  faces. A report handed to a supplier renders in a different typeface depending
-  on their connection. Either vendor the two families or drop them for a system
-  stack; either is better than a difference nobody notices until it is in a PDF.
-- **The CDN question.** SRI hashes were considered and deliberately not added
-  blind — a wrong `integrity` attribute kills the page and the hashes must come
-  from the bytes the CDN actually serves. Whoever has network access should
-  compute them and confirm the tool still boots. Worth weighing against the
-  alternative: making `--vendor` the committed default removes two of the three
-  runtime loads and the SRI question with them, at 1.4 MB instead of 500 kB. The
-  STEP reader stays lazy and remote either way, so the exposure narrows rather
-  than closing.
+- **Tag and release.** *(done — the mechanism; the first tag is a decision, not
+  a commit)* `.github/workflows/release.yml` fires on a `v*` tag, re-runs the
+  whole suite, and attaches both builds stamped with the tag — the CDN-loading
+  one and the `--vendor` one, because which a recipient wants depends on the
+  machine they open it on.
+
+  Three gates run first, in `release.js`, and they run *before* the browser
+  download rather than after it: the tag must name a version, `package.json`
+  must say that same version, and `CHANGELOG.md` must have a non-empty section
+  for it. Each of the three fails silently in its own way if unchecked — a tag
+  ahead of `package.json` ships a file whose banner reads the old number, one
+  behind it ships a file claiming to be newer than it is, and a missing
+  changelog section ships a release whose notes are empty. `npm run
+  release:check v2.1.0` runs the same gates locally, which is the point: a tag
+  is permanent and correcting one means deleting it from the remote.
+
+  It also refuses to publish from a commit that is not an ancestor of `main`.
+  A release cut from an unmerged branch leaves no trace once the tag exists.
+
+  **Not done, deliberately: no tag was pushed.** `package.json` has read
+  `2.0.0` since the first modular commit and has never been tagged, so the
+  number to bump it to is a promise about what the tool is, which is the
+  owner's to make rather than a build step's. Everything mechanical is in
+  place; the release is one version bump and one tag away.
+- **A CHANGELOG.** *(done)* `CHANGELOG.md`, with the history reconstructed from
+  the 48 commits behind it. The structure follows from what the file is for: a
+  **Scores and thresholds** table first, with the measured effect of every
+  change that can move a number for a reason other than the part — sink
+  under-reported 10× on large meshes, a check that meant to cost 25 costing 15,
+  `ts_thermal` going 25 → 0 and PP + TPU stopping being condemned at 49, a
+  1200 mm² pair of slides becoming two lifters. Then the ordinary groups.
+
+  This is the file `compare.js` already points at. It tells anyone comparing
+  two runs from different builds to "check the release notes before reading a
+  score change as progress", and until now there were none. Worth noting what
+  the reconstruction turned up: two of the biggest score movements in the
+  tool's history — the weight/severity separation and the thermal check
+  standing down — happened under the same version number, which is precisely
+  the situation the fingerprint in the export exists to catch and the
+  changelog exists to explain.
+- **A linter and a formatter.** *(the linter, done. The formatter, measured and
+  refused.)* Biome, one devDependency and a platform binary, `biome.jsonc`,
+  running first in CI and first in `npm test` because it finishes before you
+  have finished reading its name.
+
+  **`--error-on-warnings` is the whole thing.** `biome lint` exits 0 while
+  reporting warnings, and almost every rule worth having here — unused
+  variables, unused imports, the `isNaN` coercions — reports as a warning. A CI
+  step without that flag is green while finding things, which is the same shape
+  as the failure two items above: a check that is green for reasons unrelated
+  to what it guards. `test/contract.mjs` now fails if the flag goes missing.
+
+  What it found on its first run, none of which was known:
+
+  - **`row-gap: 4px` followed by `gap: 14px`** on the viewer's nav hint. The
+    shorthand resets the longhand, so the tight gap between wrapped rows —
+    the only reason the `row-gap` was written — had never applied. A visual
+    defect, found by a linter, in a file nobody would have re-read.
+  - **`const WORKER_SOURCE = /*@WORKER_SRC@*\/;`** — not valid JavaScript until
+    the build substitutes it, which made `src/app/analysis-runner.js` the one
+    file in the repository no tool could parse. The other three build slots
+    already use a token-beside-a-literal precisely so the source stays valid;
+    this one did not. Now it does, and the unbuilt fallback is an empty worker
+    source rather than a syntax error.
+  - **19 uses of the global `isNaN`/`isFinite`**, which coerce. Every one is
+    now `Number.isFinite`, which is not the mechanical conversion: `isNaN(x)`
+    became `!Number.isFinite(x)` rather than `!Number.isNaN(x)`, because these
+    are all "is this a real measurement" tests over arrays where NaN is the
+    not-measured sentinel — and `Number.isNaN(undefined)` is `false` where
+    `isNaN(undefined)` was `true`, so the mechanical conversion would have
+    turned an out-of-range read from *skipped* into *used*. The auto-fix would
+    have made it worse quietly.
+  - **A `window.Worker` stub written as an arrow function**, which cannot be
+    constructed. The fallback test means to simulate `file://` refusing a
+    blob-backed worker, which is a constructor throwing; an arrow fails one
+    step earlier, in a way no browser does. Now a class.
+  - Four unused imports and one unused destructure, three `let`s that never
+    move, and two `forEach` callbacks returning a value.
+
+  **The formatter was measured and refused.** Over this codebase, with settings
+  matched to its own style, it rewrites 57 files: **+8,052 / −2,930**. Two of
+  its effects are the argument: `src/core/materials.js` goes from 22 lines to
+  324, because the 16-grade table is written as aligned columns so that ABS's
+  `coolK` and PC's can be compared by eye — which is how the full-wall reading
+  was settled — and one property per line ends that; and `git blame` and
+  `git log -S` stop reaching past the reformat, on a repository whose commit
+  messages are the design record. `biome.jsonc` carries the numbers and the
+  honest way in if it is ever wanted: an `overrides` block excluding the
+  tables, in a commit that does nothing else.
+
+  Four rules are off, each with its reason in the config rather than in
+  someone's memory. One of them is an accessibility rule and deserves saying
+  out loud: `useSemanticElements` fires four times, twice wrongly (it wants a
+  `<fieldset>` for a button group that is not in a form, replacing correct ARIA
+  with a form control) and **twice rightly** — both drop zones are
+  `<div role="button" tabindex="0">` and should be `<button>`. That is a UI
+  change with layout consequences and a keyboard path to re-test, so it is
+  recorded here rather than made inside a lint pass. It is the one finding from
+  this item left undone on purpose.
+- **A performance budget.** *(done, and not the one this item described)*
+  `test/perf.mjs`, running in CI after the unit tests.
+
+  The item said "a benchmark script over a fixed fixture with a budget CI can
+  fail on", and the first thing the work found is that CI cannot fail on a
+  benchmark. Six runs of the same analysis over the same geometry in the same
+  process, on an idle machine, spread **274 ms to 497 ms** — and two separate
+  invocations disagreed about the *minimum* by 9%. A shared runner is worse. A
+  threshold loose enough to survive that cannot see a doubling; one tight
+  enough to see a doubling fails on Tuesdays. Either way it becomes a check
+  people learn to ignore, and the item three above this one is the record of
+  what that costs.
+
+  So what is budgeted is the *work*, not the time: rays cast, BVH nodes
+  visited, triangles tested, counted in `src/geometry/bvh.js`. Those are the
+  same integers on every run and on every machine — asserted, not assumed —
+  and they are directly downstream of both levers the assessment named
+  (`SPHERE_SAMPLE_BUDGET` *is* a ray count; `CONE_RINGS_DEG` ×
+  `CONE_AZIMUTHS` is 33 rays per sampled point). Wall clock is reported beside
+  them with an 8× backstop, which is there to catch a synchronous network call
+  or an accidental O(n²) and is honest about catching nothing else.
+
+  Two fixtures: a drafted shell subdivided to 24,576 triangles (224,216 rays,
+  12.3M node visits) and the internal-ledge cup at 1,536 triangles (123,424
+  rays, 4.7M node visits). The cup earns its place by being small and expensive
+  — ray count is driven by the sample budgets, not by the mesh — and by being
+  the undercut case, where rays go in the parting plane rather than along a
+  face normal.
+
+  Two design points worth keeping. A budget is a **ceiling, not a snapshot**:
+  work going down never fails, because an optimisation should not have to edit
+  a test to land. And work dropping far *below* the recorded figure does fail,
+  asking to be recorded — a budget nobody ratchets down lets the next change
+  give the whole saving back unnoticed.
+
+  Verified by mutation, and one of them is a better demonstration than
+  anything I would have designed: dropping `LEAF_THRESH` from 8 to 3 moves
+  node visits **+17%** and triangle tests **−65%**, and the budget reports
+  both, because the trade a BVH leaf size makes is exactly what a single
+  number would have hidden. Raising `SPHERE_SAMPLE_BUDGET` by 30% moves rays
+  8.6%, which is what set the tolerance: at the 10% I first wrote, that change
+  passed.
+- **`.gitattributes` for the built file.** *(done, with one of its two halves
+  refused)* `dfm-tool.html` — 820 kB now, not the 579 kB above — is marked
+  `linguist-generated=true`, which collapses it in GitHub diffs and keeps it
+  out of the repository's language statistics. Also `-merge`, since the only
+  correct resolution of a conflict in generated output is to rebuild it, and a
+  line-merge of two bundles produces something that parses and is wrong.
+
+  `-diff` was **not** added, and this item asked for it. Marking the file
+  binary makes `git diff` print "Binary files differ" and nothing else — and
+  the line-by-line diff is exactly what diagnosed the build's platform
+  dependence one item above: *33 lines differing by nothing but a path
+  separator* is a finding, "the files differ" is not. The check that reads that
+  diff is `verify:build`, which is the whole reason the file is committed.
+
+  `* text=auto eol=lf` is there too, for the same episode's other half: a CRLF
+  checkout put escaped `\r\n` into the embedded worker string. The build
+  normalises on read now, so this is belt to that braces — nothing in the index
+  currently has a CR in it, and this keeps a machine with `core.autocrlf` set
+  from reopening the question.
+- **The webfonts.** *(done — vendored, in every build)* Archivo and JetBrains
+  Mono as woff2 data URIs, embedded by `build.js` rather than fetched.
+
+  One correction to this item first: **the PDF was never affected.** `pdf.js`
+  draws in jsPDF's built-in Helvetica, so a report handed to a supplier
+  rendered identically either way. What differed was the tool on screen —
+  which still matters, and for a reason the item understated: the difference
+  was *invisible*. A machine with no connection got the fallback stack with
+  nothing to say it had, so the typography looked like a choice rather than a
+  failure.
+
+  Vendored rather than dropped, and the numbers made that easy. Both families
+  are variable fonts, so the latin subset is **one file each** covering every
+  weight the stylesheet asks for — 34.9 kB and 40.4 kB, about 100 kB of the
+  output once base64'd, on a file that was already 825 kB. Latin only: the
+  interface is English and latin-ext, Cyrillic, Greek and Vietnamese would
+  triple that for glyphs nothing here renders. The CSS keeps a real fallback
+  stack, so a character outside the subset still draws.
+
+  In **every** build, not behind `--vendor`. The flag is for the two libraries,
+  which are a megabyte; a font that changes how the tool looks depending on the
+  network is not a size trade-off, it is a defect in both builds.
+
+  The obligation that came with it is discharged rather than noted. Both are
+  OFL-1.1, which requires the copyright notice and the licence to accompany
+  any copy of the font software — and this artifact *contains* the font
+  software. So the banner carries both notices and the licence text, next to
+  the MIT notice for the tool's own code; the body is byte-identical between
+  the two upstream files, which `build.js` asserts, so it appears once with
+  both notices above it. Neither family declares a Reserved Font Name, so a
+  subset keeping the family name is within the licence.
+
+  Three things now hold it in place. `test/offline.mjs`'s tolerance for
+  `fonts.` is **gone**, and its absence is what keeps the fonts embedded. The
+  smoke test's font route is a **tripwire** rather than a stub — it used to
+  answer the request with an empty stylesheet, which is precisely how the
+  silent fallback survived — and any request landing there fails the suite. And
+  the faces are asserted to have actually loaded, read off `document.fonts`
+  rather than asked with `document.fonts.check`, which was the first thing
+  tried and is vacuous: `check` answers "can this be rendered without
+  waiting", and with no `@font-face` at all the fallback renders immediately,
+  so it returned true for a build that embedded nothing. Caught by removing
+  the fonts from the build and watching the test pass.
+
+  One thing fell out: `--vendor`'s preconnect strip is gone, because there are
+  no preconnects left to strip. It was the line whose existence once let a
+  length-based check pass while leaving the three.js tag in place.
+- **The CDN question.** *(the tooling and the weighing, done. The hashes,
+  still blocked — and now with the evidence rather than the assumption.)*
+
+  **Measured: `cdnjs.cloudflare.com` and `cdn.jsdelivr.net` both answer 403 to
+  CONNECT at this environment's proxy.** So the hashes cannot be computed here,
+  and hashing the `node_modules` copies would be exactly the guess this item
+  warned against — a bet that the npm tarball and the CDN's build are
+  byte-identical, staked on the viewer appearing at all.
+
+  `npm run sri` is the missing half made executable. It fetches all three,
+  prints the `sha384` attribute for each and **where each one goes** — which is
+  the part that was not written down anywhere: three URLs in three files, one a
+  static `<script>` that also needs `crossorigin="anonymous"` (without which a
+  cross-origin response is opaque and the check fails whatever the hash says),
+  and two set on script elements a loader creates. It also reports whether the
+  served bytes matched the `node_modules` copy, which is the piece of evidence
+  nobody has had and which settles whether the shortcut was ever safe. It
+  writes nothing, deliberately: nothing lands that has not been read and then
+  confirmed by opening the file.
+
+  One caveat the item did not have: the OpenCascade loader fetches a `.wasm` of
+  its own afterwards, from a URL an `integrity` on the loader does not cover.
+  Pinning the loader is worth doing and is not the whole job.
+
+  Four assertions hold it together, and two of them matter more than they look.
+  The attribute is base64 of the *digest bytes*, checked against FIPS 180-4's
+  own SHA-384 example converted independently — base64 of the hex text is 96
+  characters of plausible nonsense no browser will match and nothing but a
+  test can tell apart. And the list of URLs is held against `src/` in both
+  directions, because a version bumped in one of three files leaves a stale
+  hash in another and the only thing that notices is a blank page.
+
+  **The alternative, re-measured.** Making `--vendor` the committed default
+  removes two of the three runtime loads and the SRI question with them. The
+  cost is no longer the "1.4 MB instead of 500 kB" above: it is now
+  **1,918,750 bytes against 950,663** — 1.87 MB against 928 kB, a factor of
+  2.02. The comparison also changed shape while this milestone ran, in a way
+  that argues *for* the vendored default: with the fonts embedded, those three
+  CDN loads are the only thing the default build reaches for at all, so
+  vendoring would take a file with three remote dependencies down to one
+  (the STEP reader, which is 6 MB and stays lazy and remote either way).
+
+  Not switched, because the deliverable is a file people email and 1.87 MB is
+  a different kind of attachment from 928 kB — and that is a judgement about
+  how the tool is handed around rather than a technical one, so it belongs to
+  whoever hands it around. Both routes are now one command away: `npm run sri`
+  for the hashes, or `--vendor` in the build script for the other.
 
 ---
 
 ## Sequencing, and why this order
 
-Release discipline first, because it is cheap and because a tagged build is what
-makes every later change traceable.
+Release discipline was meant to come first, "because it is cheap and because a
+tagged build is what makes every later change traceable". It came last, and the
+prediction was half right: it *was* cheap, and it would have been worth more
+earlier — the changelog it produced had to reconstruct 48 commits of score
+movements from their commit messages, which is work that would have been free
+if the file had existed while they landed. The half that was wrong is "cheap":
+five of its seven items turned up a defect, and two of those were defects in
+the checks themselves.
 
-R2.1 to R2.7 are done, bar two things that need something this environment
-does not have: R2.5's sixteen Vicat values need datasheet access, and R2.7's
-device layer needs a SpaceMouse plugged in. Both are recorded at their
-milestones. What remains that needs neither is release discipline, below.
+R2.1 to R2.7 and release discipline are all done, bar three things that need
+something a keyboard cannot supply and one that is a judgement rather than a
+task:
+
+- R2.5's sixteen Vicat softening points need datasheet access, which this
+  environment does not have.
+- R2.7's device layer needs a SpaceMouse plugged in for half an hour.
+- The SRI hashes need a machine that can reach cdnjs and jsdelivr, which both
+  answer 403 here. `npm run sri` does the rest of that job.
+- The first tag is a version number, which is a promise about what the tool is
+  and belongs to whoever makes it. Everything mechanical around it is in place.
+
+Each is recorded at its own milestone with what is missing and what to run.
 
 The sequencing held up, and two of its predictions are worth keeping for the
 next roadmap.

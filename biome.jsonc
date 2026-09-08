@@ -1,0 +1,71 @@
+{
+  "$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
+
+  "files": {
+    "includes": ["src/**", "test/**", "build.js", "release.js"]
+  },
+
+  // ── the formatter is off, and this is the measurement that decided it ──
+  //
+  // Run over this codebase with settings matched to its house style (two-space
+  // indent, single quotes, 100 columns) a formatter rewrites 57 files: +8052
+  // lines, -2930. That is not a cost worth paying for consistency the codebase
+  // already has, and two of its effects are actively bad:
+  //
+  //   src/core/materials.js — 22 lines become 324. The 16-grade table is
+  //   written as aligned columns so that ABS's coolK and PC's can be compared
+  //   by eye, which is how the full-wall/half-wall question was settled. A
+  //   formatter turns each grade into 18 lines of one property, and the
+  //   comparison the layout exists to support stops being possible.
+  //
+  //   `git blame` and `git log -S` stop finding anything before the reformat,
+  //   on a repository whose commit messages are the design record.
+  //
+  // So: mechanical enforcement of correctness, none of style. If a formatter
+  // is ever wanted, the honest way in is `overrides` excluding the tables, and
+  // one commit that does nothing else.
+  "formatter": { "enabled": false },
+
+  "linter": {
+    "enabled": true,
+    "domains": { "project": "all" },
+    "rules": {
+      "recommended": true,
+
+      "complexity": {
+        // 82 sites, and `a && a.b` reads no worse than `a?.b`. Rewriting all
+        // of them changes no behaviour and touches most of src/.
+        "useOptionalChain": "off",
+        // The test files scope each group's fixtures in a bare block, which is
+        // deliberate: it is what keeps 3,600 lines of tests from sharing one
+        // namespace of `const box`.
+        "noUselessLoneBlockStatements": "off"
+      },
+
+      "suspicious": {
+        // All nine are `while ((m = re.exec(s)) !== null)`, which is how the
+        // language spells that loop. The alternative is worse.
+        "noAssignInExpressions": "off"
+      },
+
+      "style": {
+        // The stylesheet is ordered by the part of the page it describes, not
+        // by specificity, and it is easier to find a rule that way.
+        "noDescendingSpecificity": "off"
+      },
+
+      "a11y": {
+        // Fires four times, and half of what it says is wrong here: it wants
+        // <fieldset> for `<div class="btn-group" role="group">`, which is a
+        // form control standing in for correct ARIA on a button group that is
+        // not in a form. The other half is right — the two drop zones are
+        // `<div role="button" tabindex="0">` and should be buttons — and that
+        // is a UI change with layout consequences, recorded in
+        // docs/ROADMAP.md rather than made inside a lint pass.
+        "useSemanticElements": "off"
+      }
+    }
+  },
+
+  "assist": { "actions": { "source": { "organizeImports": "off" } } }
+}

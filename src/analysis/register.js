@@ -358,7 +358,7 @@ function sampledCoverage(sample, geom1, bvh1, maxDist, m, eps) {
     const dist = castRay(bvh1, geom1,
       p[0] + d[0] * eps, p[1] + d[1] * eps, p[2] + d[2] * eps,
       d[0], d[1], d[2], eps, -1, maxDist);
-    if (isFinite(dist)) hits++;
+    if (Number.isFinite(dist)) hits++;
   }
   return sample.n > 0 ? (hits / sample.n) * 100 : 0;
 }
@@ -401,7 +401,7 @@ function correspond(sample, geom1, bvh1, m, corrMax, sc) {
   for (let s = 0; s < sample.n; s++) {
     xformPoint(sample.pts[s * 3], sample.pts[s * 3 + 1], sample.pts[s * 3 + 2], m, p);
     const dist = closestPoint(bvh1, geom1, p[0], p[1], p[2], corrMax, hit);
-    if (!isFinite(dist)) continue;
+    if (!Number.isFinite(dist)) continue;
 
     /* Outward normal, rotated into shot 1's frame. */
     xformDir(-sample.nrm[s * 3], -sample.nrm[s * 3 + 1], -sample.nrm[s * 3 + 2], m, d);

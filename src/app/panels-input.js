@@ -87,7 +87,7 @@ export function bindForm(onChange) {
     const event = node.tagName === 'SELECT' || node.type === 'checkbox' ? 'change' : 'input';
     node.addEventListener(event, () => {
       const raw = coerce === Boolean ? node.checked : node.value;
-      let value = coerce === Number ? Number(raw) : coerce === NumberOrNull ? NumberOrNull(raw) : raw;
+      const value = coerce === Number ? Number(raw) : coerce === NumberOrNull ? NumberOrNull(raw) : raw;
       /* An emptied numeric field should not silently become zero and start
          producing divide-by-zero ratios in the rules. A rate is the exception:
          blank is a meaningful value there, and it means the cost cannot be

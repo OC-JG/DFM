@@ -22,6 +22,33 @@ const MAX_DEPTH = 40;
    MAX_DEPTH, so twice that is ample headroom for the sibling pushes. */
 const RAY_STACK = new Int32Array(MAX_DEPTH * 2 + 8);
 
+/*
+ * Work counters, for the performance budget in test/perf.mjs.
+ *
+ * Wall clock cannot be the budget. Six runs of the same analysis on the same
+ * machine spread 320–497 ms, and a CI runner is worse, so a threshold loose
+ * enough not to fail on noise is too loose to catch anything. What *is*
+ * deterministic is how much work the analysis asks for: rays cast, BVH nodes
+ * visited, triangles tested. Those are identical run to run and on every
+ * machine, so they can be budgeted exactly, and they move when either of the
+ * two levers named in docs/ASSESSMENT.md moves.
+ *
+ * Counted here rather than at the call sites because this is where the work
+ * happens, and because `nodes` and `tris` catch a class `rays` cannot: a BVH
+ * that stops partitioning well costs the same rays and many times the
+ * traversal. Three increments in the traversal loop, whose cost is below the
+ * run-to-run noise of the thing being measured — the point above, arriving
+ * from the other side — and worth paying for a check that fails on a real
+ * regression rather than on which runner drew the job.
+ */
+export const bvhWork = { rays: 0, nodes: 0, tris: 0 };
+
+export function resetBvhWork() {
+  bvhWork.rays = 0;
+  bvhWork.nodes = 0;
+  bvhWork.tris = 0;
+}
+
 export function buildBVH(geom) {
   const { vertices, indices, triCount } = geom;
 
@@ -254,16 +281,19 @@ export function castRay(bvh, geom, ox, oy, oz, dx, dy, dz, eps, excludeTri, maxD
   let sp = 0;
   stack[sp++] = 0;
   let nearest = maxDist > 0 ? maxDist : Infinity;
+  bvhWork.rays++;
 
   while (sp > 0) {
     const ni = stack[--sp];
     const b6 = ni * 6, m3 = ni * 3;
+    bvhWork.nodes++;
     const tBox = rayAABB(ox, oy, oz, idx, idy, idz, bounds, b6);
     if (tBox < 0 || tBox > nearest) continue;
 
     if (meta[m3 + 2] === 1) {
       const first = meta[m3];
       const count = meta[m3 + 1];
+      bvhWork.tris += count;
       for (let k = 0; k < count; k++) {
         const t = triIdx[first + k];
         if (t === excludeTri) continue;
@@ -375,15 +405,18 @@ export function closestPoint(bvh, geom, px, py, pz, maxDist, out) {
   let bestSq = maxDist > 0 ? maxDist * maxDist : Infinity;
   let bestTri = -1;
   let bx = 0, by = 0, bz = 0;
+  bvhWork.rays++;
 
   while (sp > 0) {
     const ni = stack[--sp];
     const b6 = ni * 6, m3 = ni * 3;
+    bvhWork.nodes++;
     if (pointAABBDistSq(px, py, pz, bounds, b6) >= bestSq) continue;
 
     if (meta[m3 + 2] === 1) {
       const first = meta[m3];
       const count = meta[m3 + 1];
+      bvhWork.tris += count;
       for (let k = 0; k < count; k++) {
         const t = triIdx[first + k];
         closestOnTri(px, py, pz, vertices, indices, t, NEAR_HIT);
@@ -450,16 +483,19 @@ export function castRayAll(bvh, geom, ox, oy, oz, dx, dy, dz, eps, out, maxDist)
   let sp = 0;
   stack[sp++] = 0;
   let n = 0;
+  bvhWork.rays++;
 
   while (sp > 0) {
     const ni = stack[--sp];
     const b6 = ni * 6, m3 = ni * 3;
+    bvhWork.nodes++;
     const tBox = rayAABB(ox, oy, oz, idx, idy, idz, bounds, b6);
     if (tBox < 0 || tBox > limit) continue;
 
     if (meta[m3 + 2] === 1) {
       const first = meta[m3];
       const count = meta[m3 + 1];
+      bvhWork.tris += count;
       for (let k = 0; k < count; k++) {
         const hit = rayTriIdx(ox, oy, oz, dx, dy, dz, vertices, indices, triIdx[first + k]);
         if (!(hit > eps) || hit > limit) continue;

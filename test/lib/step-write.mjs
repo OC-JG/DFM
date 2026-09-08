@@ -152,7 +152,7 @@ export function writeStepSolids(solids, name = 'fixture') {
      */
     const revolveFaces = ({ origin, axis, rOuter, rInner = null, zLo, zHi, fromDeg = 0, toDeg = 360 }) => {
       const a = norm(axis);
-      let refRaw = Math.abs(a[2]) < 0.9 ? [0, 0, 1] : [1, 0, 0];
+      const refRaw = Math.abs(a[2]) < 0.9 ? [0, 0, 1] : [1, 0, 0];
       const proj = refRaw[0] * a[0] + refRaw[1] * a[1] + refRaw[2] * a[2];
       const ref = norm([refRaw[0] - proj * a[0], refRaw[1] - proj * a[1], refRaw[2] - proj * a[2]]);
       /* ref × axis completes a right-handed frame, so angles measured from ref

@@ -57,7 +57,7 @@ async function main() {
   if (!existsSync(join(FIXTURES, 'part.stl'))) throw new Error('fixtures missing — run `node test/make-fixtures.mjs`');
 
   const { chromium } = require('playwright');
-  const server = createServer((req, res) => {
+  const server = createServer((_req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(html);
   });
@@ -105,8 +105,12 @@ async function main() {
        health probe is allowed alongside it: it is a request to localhost
        rather than to the internet, it is how the header chip reports whether
        an Inventor is listening, and nothing is listening here — so it is not
-       evidence that this build depends on a network. */
-    const EXPECTED_OFF_ORIGIN = /occt|fonts\.|\/bridge\/health$/;
+       evidence that this build depends on a network.
+       `fonts.` used to be on this list, which meant the build whose whole
+       purpose is needing no network was reaching out for its typography and a
+       test was tolerating it. The fonts are embedded now, so the exception is
+       gone and its absence is what keeps them embedded. */
+    const EXPECTED_OFF_ORIGIN = /occt|\/bridge\/health$/;
     check('only the STEP reader was ever requested off-origin',
       blocked.every((u) => EXPECTED_OFF_ORIGIN.test(u)),
       blocked.filter((u) => !EXPECTED_OFF_ORIGIN.test(u)).join(', ') || 'none');
