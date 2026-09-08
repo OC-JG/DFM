@@ -370,6 +370,12 @@ async function main() {
       check('so the device button is offered rather than hidden',
         fileHid.button === true, JSON.stringify(fileHid));
 
+      /* Closed before the next page opens rather than at the end of the
+         block: each of these loads the whole tool, and the tool builds a WebGL
+         context. Three of those alive at once on a CI runner with software
+         GL is a lot to ask for a check that reads one boolean. */
+      await filePage.close();
+
       /* And where the API is absent it degrades to nothing: no button, no
          error, no mention. Deleted rather than mocked, because that is what a
          browser without WebHID actually presents. */
@@ -385,7 +391,6 @@ async function main() {
       check('with no WebHID the feature leaves no trace',
         absent.button === true && absent.mentions.length === 0,
         JSON.stringify(absent));
-      await filePage.close();
       await noHid.close();
     }
 

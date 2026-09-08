@@ -494,11 +494,15 @@ it could survive that trip.
   `../../etc/passwd` mangles to a safe but absurd `_.._etc_passwd`; the file's
   name is `passwd`, and that is what belongs in the archive.
 
-- *The unit suite is now about two and a half minutes.* Nothing dominates it —
-  the slowest single test is 1.7 s — it is simply two hundred assertions over
-  real ray-casting. Duplicated fixture analyses are memoised, which was the
-  only free saving; the rest is the cost of measuring geometry rather than
-  asserting that a number appeared.
+- *The unit suite is 17 seconds, and the two and a half minutes I measured was
+  a bug.* Eight of the package tests were `async` under a synchronous `it`, so
+  they reported themselves as passes before running and their work carried on
+  after the summary was printed — which held the process open long enough for
+  CI to shoot the runner, and which I first mistook for the suite being slow.
+  The harness now awaits, `test/contract.mjs` checks statically that every call
+  site does too, and one of those tests turned out to allocate four gigabytes
+  in the course of refusing four gigabytes. Duplicated fixture analyses are
+  memoised as well, which is worth having but was not the problem.
 
 **Exit criteria.** Two runs of the same part produce the same finding ids —
 met, and asserted across a run that adds a feature, which is what used to

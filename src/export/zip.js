@@ -119,7 +119,20 @@ export async function createZip(entries, now = new Date()) {
 
   for (const entry of entries) {
     const name = encoder.encode(entry.name);
-    const raw = entry.bytes instanceof Uint8Array ? entry.bytes : new Uint8Array(entry.bytes);
+
+    /*
+     * The size is checked before the bytes are materialised, which matters
+     * more than it looks: coercing an over-large source into a typed array
+     * allocates it, so refusing afterwards means allocating four gigabytes in
+     * order to say no to it. Ask first.
+     */
+    const src = entry.bytes || new Uint8Array(0);
+    const declared = src.length != null ? src.length : src.byteLength;
+    if (!(declared >= 0) || declared > ZIP_LIMIT) {
+      throw new Error(`${entry.name} is too large for a ZIP without Zip64 support`);
+    }
+
+    const raw = src instanceof Uint8Array ? src : new Uint8Array(src);
     const crc = crc32(raw);
 
     const deflated = await deflateRaw(raw);
@@ -129,7 +142,7 @@ export async function createZip(entries, now = new Date()) {
     const payload = useDeflate ? deflated : raw;
     const method = useDeflate ? METHOD_DEFLATE : METHOD_STORE;
 
-    if (raw.length > ZIP_LIMIT || payload.length > ZIP_LIMIT) {
+    if (payload.length > ZIP_LIMIT) {
       throw new Error(`${entry.name} is too large for a ZIP without Zip64 support`);
     }
 

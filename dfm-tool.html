@@ -3,7 +3,7 @@
 OnlyCat DFM — injection moulding design-for-manufacture analyser
 
 Version 2.0.0
-Source fingerprint f9800f51e37f
+Source fingerprint c5e93164c29c
 
 Copyright (c) 2026 OnlyCat. Released under the MIT License.
 Full terms: the LICENSE file in the source repository, or
@@ -2185,7 +2185,7 @@ function fpcCompatibility(material) {
  * directly — and they say so rather than claiming a version they are not.
  */
 const TOOL_VERSION = "2.0.0";
-const BUILD_FINGERPRINT = "f9800f51e37f";
+const BUILD_FINGERPRINT = "c5e93164c29c";
 const BUILD_STAMP = "";
 
 /* One short string for a banner or a footer. */
@@ -9453,7 +9453,20 @@ async function createZip(entries, now = new Date()) {
 
   for (const entry of entries) {
     const name = encoder.encode(entry.name);
-    const raw = entry.bytes instanceof Uint8Array ? entry.bytes : new Uint8Array(entry.bytes);
+
+    /*
+     * The size is checked before the bytes are materialised, which matters
+     * more than it looks: coercing an over-large source into a typed array
+     * allocates it, so refusing afterwards means allocating four gigabytes in
+     * order to say no to it. Ask first.
+     */
+    const src = entry.bytes || new Uint8Array(0);
+    const declared = src.length != null ? src.length : src.byteLength;
+    if (!(declared >= 0) || declared > ZIP_LIMIT) {
+      throw new Error(`${entry.name} is too large for a ZIP without Zip64 support`);
+    }
+
+    const raw = src instanceof Uint8Array ? src : new Uint8Array(src);
     const crc = crc32(raw);
 
     const deflated = await deflateRaw(raw);
@@ -9463,7 +9476,7 @@ async function createZip(entries, now = new Date()) {
     const payload = useDeflate ? deflated : raw;
     const method = useDeflate ? METHOD_DEFLATE : METHOD_STORE;
 
-    if (raw.length > ZIP_LIMIT || payload.length > ZIP_LIMIT) {
+    if (payload.length > ZIP_LIMIT) {
       throw new Error(`${entry.name} is too large for a ZIP without Zip64 support`);
     }
 

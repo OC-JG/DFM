@@ -15,7 +15,9 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const SRC = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src');
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const SRC = path.join(HERE, '..', 'src');
+const TESTS = HERE;
 
 /* Ids the scripts create at runtime rather than expecting in the markup. */
 const CREATED_AT_RUNTIME = new Set(['toastHost']);
@@ -73,6 +75,28 @@ const lostModuleSlots = MODULE_SLOTS
   .filter(([slot, file]) => !readFileSync(path.join(SRC, file), 'utf8').includes(slot))
   .map(([slot, file]) => `  ${slot}  (expected in ${file})`);
 
+/*
+ * Async tests must be awaited.
+ *
+ * A harness whose `it` is async but whose call sites are not awaited reports
+ * every async test as a pass before it has run, and lets its work carry on
+ * after the summary — which is how eight tests came to be vacuous and how CI
+ * came to shoot a runner that would not exit. Both test files that have hit
+ * this now have an async `it`, and the invariant that makes it safe is
+ * checkable statically, so it is checked rather than remembered.
+ */
+const asyncHarnessSlips = [];
+for (const file of readdirSync(TESTS).filter((f) => f.endsWith('.mjs'))) {
+  const code = readFileSync(path.join(TESTS, file), 'utf8');
+  if (!/^async function it\(/m.test(code)) continue;
+  const lines = code.split('\n');
+  lines.forEach((line, i) => {
+    /* A call at the start of a statement. The declaration itself, and any
+       mention inside a string or comment, does not match. */
+    if (/^\s+it\(/.test(line)) asyncHarnessSlips.push(`  ${file}:${i + 1} — it(...) is not awaited`);
+  });
+}
+
 let failed = false;
 
 if (missing.length) {
@@ -87,6 +111,10 @@ if (lostModuleSlots.length) {
   failed = true;
   console.error(`\n  build slot(s) missing from src/:\n${lostModuleSlots.join('\n')}`);
 }
+if (asyncHarnessSlips.length) {
+  failed = true;
+  console.error(`\n  ${asyncHarnessSlips.length} async test(s) whose result is dropped:\n${asyncHarnessSlips.join('\n')}`);
+}
 
 if (failed) {
   console.error('');
@@ -95,4 +123,5 @@ if (failed) {
 
 console.log(`  ok    ${wanted.size} scripted ids all present in ${declared.size} declared`);
 console.log(`  ok    all ${SLOTS.length + MODULE_SLOTS.length} build slots intact`);
+console.log('  ok    every async test is awaited');
 console.log('\n  contract holds\n');
