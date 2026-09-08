@@ -3,7 +3,7 @@
 OnlyCat DFM — injection moulding design-for-manufacture analyser
 
 Version 2.0.0
-Source fingerprint 020b1c3f7d61
+Source fingerprint 2f16245dc89d
 
 Copyright (c) 2026 OnlyCat. Released under the MIT License.
 Full terms: the LICENSE file in the source repository, or
@@ -2027,6 +2027,7 @@ footer {
 
       <div class="actions">
         <button type="button" class="btn" id="pdfBtn">↓ Export PDF report</button>
+        <button type="button" class="btn secondary" id="packageBtn" title="The report, the record and the CAD file that was measured, in one archive">↓ Findings package (zip)</button>
         <button type="button" class="btn secondary" id="jsonBtn">↓ Export JSON</button>
         <button type="button" class="btn secondary" id="compareBtn">⇄ Compare with JSON</button>
         <input type="file" id="compareInput" accept=".json,application/json" class="visually-hidden">
@@ -2180,7 +2181,7 @@ function fpcCompatibility(material) {
  * directly — and they say so rather than claiming a version they are not.
  */
 const TOOL_VERSION = "2.0.0";
-const BUILD_FINGERPRINT = "020b1c3f7d61";
+const BUILD_FINGERPRINT = "2f16245dc89d";
 const BUILD_STAMP = "";
 
 /* One short string for a banner or a footer. */
@@ -8646,7 +8647,7 @@ function interfaceFrame(reg) {
   return 'As loaded';
 }
 
-async function exportPDF({ sessionId, dfm, analysis, twoShot, validation, shot, cycle, cost, tooling, settings }) {
+async function exportPDF({ sessionId, dfm, analysis, twoShot, validation, shot, cycle, cost, tooling, settings, deliver = 'download' }) {
   const jsPDF = await loadJsPDF();
   const doc = new jsPDF({ unit: 'mm', format: 'a4' });
   const r = dfm.result;
@@ -8912,7 +8913,390 @@ async function exportPDF({ sessionId, dfm, analysis, twoShot, validation, shot, 
     doc.text(`Page ${i} / ${pages}`, PAGE_W - MARGIN, FOOTER_Y, { align: 'right' });
   }
 
-  doc.save(`dfm_report_${sessionId}_${Date.now()}.pdf`);
+  /*
+   * Two callers, two deliveries. Ordinarily the browser saves it; the findings
+   * package wants the bytes so it can put the same report inside an archive.
+   * One function either way, because a second one that laid the report out
+   * again would be a second report to keep in step.
+   */
+  const filename = `dfm_report_${sessionId}_${Date.now()}.pdf`;
+  if (deliver === 'bytes') return { filename, bytes: new Uint8Array(doc.output('arraybuffer')) };
+  doc.save(filename);
+  return { filename, bytes: null };
+}
+
+/* ==== export/zip.js ================================================= */
+/*
+ * A ZIP writer, in about a hundred lines.
+ *
+ * Written out rather than pulled in for the same reason build.js has no
+ * dependencies: the deliverable is one HTML file someone double-clicks, and
+ * every library it does not need is a library that cannot break it. The format
+ * used here is the 1989 original — local header, data, central directory, end
+ * record — with none of the extensions, which is what every unzip on earth
+ * reads.
+ *
+ * Compression is `CompressionStream('deflate-raw')`, which is exactly the
+ * bitstream ZIP method 8 wants, so the browser does the work and this file
+ * does the bookkeeping. Where it is unavailable the entry is stored
+ * uncompressed instead — a larger archive rather than no archive, and the
+ * difference matters: a STEP file is mostly repeated ASCII and deflates to
+ * something like a seventh of its size, which is the difference between an
+ * attachment that sends and one that bounces.
+ *
+ * Not supported, deliberately: Zip64. An archive over 4 GB, or a member over
+ * it, needs a different central directory, and this is assembling a report and
+ * a CAD file. The limit is checked rather than overflowed silently.
+ */
+
+const LOCAL_SIG = 0x04034b50;
+const CENTRAL_SIG = 0x02014b50;
+const END_SIG = 0x06054b50;
+const METHOD_STORE = 0;
+const METHOD_DEFLATE = 8;
+
+/* The point past which the fields below stop being able to describe the
+   archive. Reached only by something that should not be in one. */
+const ZIP_LIMIT = 0xffffffff;
+
+/*
+ * CRC-32, IEEE 802.3 polynomial, over the *uncompressed* bytes — which is
+ * what ZIP stores, and also what makes it useful to report in the manifest: a
+ * recipient can check the file they extracted is the file that was measured.
+ */
+const CRC_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    table[n] = c >>> 0;
+  }
+  return table;
+})();
+
+function crc32(bytes) {
+  let c = 0xffffffff;
+  for (let i = 0; i < bytes.length; i++) c = CRC_TABLE[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+
+/* Eight hex digits, which is how a CRC is quoted and compared. */
+function crc32Hex(bytes) {
+  return crc32(bytes).toString(16).padStart(8, '0');
+}
+
+/*
+ * MS-DOS date and time, which is what the header fields are.
+ *
+ * Two-second resolution and a 1980 epoch, and local time with no zone — the
+ * format has no way to record one. Written from the local clock because that
+ * is what every other tool writes and what a recipient's unzip will show.
+ */
+function dosDateTime(date) {
+  const year = Math.max(1980, date.getFullYear());
+  return {
+    time: (date.getHours() << 11) | (date.getMinutes() << 5) | (date.getSeconds() >> 1),
+    date: ((year - 1980) << 9) | ((date.getMonth() + 1) << 5) | date.getDate(),
+  };
+}
+
+async function deflateRaw(bytes) {
+  if (typeof CompressionStream === 'undefined') return null;
+  try {
+    const stream = new Blob([bytes]).stream().pipeThrough(new CompressionStream('deflate-raw'));
+    return new Uint8Array(await new Response(stream).arrayBuffer());
+  } catch {
+    /* An engine that has the constructor but not this format. Storing is
+       always available, so there is nothing here worth failing over. */
+    return null;
+  }
+}
+
+/* Little-endian writer over a growable list of chunks. */
+function record(fields) {
+  let size = 0;
+  for (const [width] of fields) size += width;
+  const out = new Uint8Array(size);
+  const view = new DataView(out.buffer);
+  let at = 0;
+  for (const [width, value] of fields) {
+    if (width === 2) view.setUint16(at, value, true);
+    else if (width === 4) view.setUint32(at, value, true);
+    else out.set(value, at);
+    at += width;
+  }
+  return out;
+}
+
+/*
+ * Build a ZIP from `[{ name, bytes }]`.
+ *
+ * Names are used verbatim, so a caller passing "a/b.txt" gets a directory.
+ * Returns a Blob, and the per-entry sizes and CRCs, since the manifest inside
+ * the archive wants to quote them and computing them twice invites the two
+ * copies disagreeing.
+ */
+async function createZip(entries, now = new Date()) {
+  const encoder = new TextEncoder();
+  const { time, date } = dosDateTime(now);
+
+  const chunks = [];
+  const central = [];
+  const summary = [];
+  let offset = 0;
+
+  for (const entry of entries) {
+    const name = encoder.encode(entry.name);
+    const raw = entry.bytes instanceof Uint8Array ? entry.bytes : new Uint8Array(entry.bytes);
+    const crc = crc32(raw);
+
+    const deflated = await deflateRaw(raw);
+    /* Deflate can enlarge already-compressed data — a PDF, a PNG — in which
+       case storing it is both smaller and faster to read. */
+    const useDeflate = deflated != null && deflated.length < raw.length;
+    const payload = useDeflate ? deflated : raw;
+    const method = useDeflate ? METHOD_DEFLATE : METHOD_STORE;
+
+    if (raw.length > ZIP_LIMIT || payload.length > ZIP_LIMIT) {
+      throw new Error(`${entry.name} is too large for a ZIP without Zip64 support`);
+    }
+
+    const local = record([
+      [4, LOCAL_SIG],
+      [2, 20],            // version needed: 2.0, which is deflate
+      [2, 0],             // flags: none. No data descriptor, no UTF-8 bit.
+      [2, method],
+      [2, time], [2, date],
+      [4, crc],
+      [4, payload.length], [4, raw.length],
+      [2, name.length], [2, 0],
+      [name.length, name],
+    ]);
+    chunks.push(local, payload);
+
+    central.push(record([
+      [4, CENTRAL_SIG],
+      [2, 20], [2, 20],
+      [2, 0],
+      [2, method],
+      [2, time], [2, date],
+      [4, crc],
+      [4, payload.length], [4, raw.length],
+      [2, name.length], [2, 0], [2, 0],
+      [2, 0],             // disk number
+      [2, 0],             // internal attributes
+      [4, 0],             // external attributes
+      [4, offset],
+      [name.length, name],
+    ]));
+
+    summary.push({ name: entry.name, bytes: raw.length, stored: payload.length, crc32: crc32Hex(raw), deflated: useDeflate });
+    offset += local.length + payload.length;
+  }
+
+  const dirBytes = central.reduce((n, c) => n + c.length, 0);
+  if (offset > ZIP_LIMIT || dirBytes > ZIP_LIMIT) {
+    throw new Error('archive is too large for a ZIP without Zip64 support');
+  }
+
+  const end = record([
+    [4, END_SIG],
+    [2, 0], [2, 0],
+    [2, entries.length], [2, entries.length],
+    [4, dirBytes],
+    [4, offset],
+    [2, 0],             // no archive comment
+  ]);
+
+  return { blob: new Blob([...chunks, ...central, end], { type: 'application/zip' }), entries: summary };
+}
+
+/* ==== export/package.js ============================================= */
+/*
+ * The findings package: one archive holding the report, the record, and the
+ * file that was measured.
+ *
+ * This is what actually gets emailed to a factory, and assembling it by hand
+ * is where the wrong revision gets attached — three files pulled from three
+ * places, one of them last week's export, and nobody finds out until the tool
+ * arrives cut to a drawing nobody scored. The three cannot disagree if they
+ * leave together.
+ *
+ * ── The manifest ─────────────────────────────────────────────────────────
+ *
+ * A plain-text file at the top of the archive, and the part that earns its
+ * place rather than duplicating the JSON. It answers what a recipient asks
+ * before opening anything: which part is this, what did it score, which build
+ * scored it, and — the reason the package exists — is the CAD file in here
+ * the one the report describes. That last one is a CRC32 per member, which
+ * the ZIP has already computed, so the check costs nothing and a recipient
+ * can verify it with any unzip.
+ *
+ * A CRC is a checksum, not a signature: it catches a truncated or swapped
+ * attachment, which is the failure this is guarding against, and proves
+ * nothing about who produced the file. The manifest says so, because a
+ * hexadecimal number next to a filename invites being read as more than it
+ * is.
+ */
+
+/* ISO 8601 to the second. The archive's own timestamps are MS-DOS format and
+   carry no zone; this one does. */
+function stamp(date) {
+  return date.toISOString().replace(/\.\d+Z$/, 'Z');
+}
+
+function manifestText({ partName, sourceName, result, twoShot, entries, now }) {
+  const id = buildIdentity();
+  const lines = [
+    'OnlyCat DFM — findings package',
+    '===============================================================',
+    '',
+    `Part                ${partName || '(unnamed)'}`,
+    `Generated           ${stamp(now)}`,
+    `Tool                OnlyCat DFM ${buildLabel()}`,
+    /* Spelled out rather than left to the version string: an export made from
+       an unbuilt source tree is a legitimate thing to have and must not be
+       mistaken for a release. */
+    `Build               ${id.built ? `release-quality build, sources ${id.source_fingerprint}` : 'RUNNING FROM SOURCE — not a released build'}`,
+    '',
+  ];
+
+  if (result) {
+    lines.push(
+      `Score               ${result.score} / 100 — ${result.grade.label}`,
+      `Basis               ${result.totalDeduction.toFixed(1)} points deducted from a ${result.budget}-point budget`,
+      `Critical findings   ${result.criticalCount}`,
+      '');
+  }
+  if (twoShot) {
+    lines.push(
+      `Interface score     ${twoShot.score} / 100 — ${twoShot.grade.label}`,
+      `Shots               ${twoShot.mat1.name} + ${twoShot.mat2.name}`,
+      '');
+  }
+
+  lines.push(
+    'Contents',
+    '---------------------------------------------------------------');
+  for (const e of entries) {
+    lines.push(`  ${e.name.padEnd(28)} ${String(e.bytes).padStart(9)} bytes   crc32 ${e.crc32}`);
+  }
+  lines.push(
+    '',
+    'The CRC32 above is the checksum of each file as extracted. It is here',
+    'to catch a truncated download or the wrong file having been swapped in;',
+    'it is not a signature and says nothing about who produced the file.',
+    '');
+
+  if (sourceName) {
+    lines.push(
+      `The geometry in this archive — ${sourceName} — is the file the report`,
+      'was measured from, not a copy fetched separately. That is the whole',
+      'reason the three travel together.',
+      '');
+  } else {
+    lines.push(
+      'NO GEOMETRY IS INCLUDED. The part was loaded before this build could',
+      'retain the source bytes, or arrived by a route that has none. The',
+      'report and the record describe a file that is not in here — attach it',
+      'yourself, and check it is the revision named above.',
+      '');
+  }
+
+  if (result) {
+    lines.push(
+      'Findings, by the reference to quote when responding',
+      '---------------------------------------------------------------');
+    for (const c of result.checks) {
+      const deduct = c.scoreDeduction > 0 ? `−${c.scoreDeduction.toFixed(1)}` : '  0 ';
+      lines.push(`  ${checkRef(c.key).padEnd(16)} ${c.status.toUpperCase().padEnd(5)} ${deduct.padStart(6)}  ${c.name}`);
+    }
+    lines.push('');
+  }
+
+  lines.push(
+    'Guideline-based DFM analysis. Validate critical dimensions with your',
+    'moulder before cutting steel.',
+    '');
+  return lines.join('\n');
+}
+
+/*
+ * Assemble the archive.
+ *
+ * `pdfBytes` and `json` are produced by the callers that already know how —
+ * this does not lay out a report or build a record, it packages them. `source`
+ * is `{ name, bytes }` for the geometry as it arrived, or null: a part loaded
+ * from somewhere that kept no bytes still gets a package, and the manifest
+ * says loudly that the CAD file is missing rather than quietly omitting it.
+ */
+async function buildFindingsPackage({
+  sessionId, partName, source, pdfBytes, json, result, twoShot, now = new Date(),
+}) {
+  const encoder = new TextEncoder();
+  const entries = [];
+
+  if (pdfBytes) entries.push({ name: 'report.pdf', bytes: pdfBytes });
+  entries.push({ name: 'findings.json', bytes: encoder.encode(JSON.stringify(json, null, 2)) });
+  if (source && source.bytes) {
+    /* Under its own name, so the recipient recognises it and the revision in
+       the filename travels with the bytes. */
+    entries.push({ name: `geometry/${safeName(source.name)}`, bytes: source.bytes });
+  }
+
+  /* Sizes and CRCs first, so the manifest can quote them — including its own
+     absence from that list, which is correct: a file cannot state its own
+     checksum. */
+  const measured = await createZip(entries, now);
+  const manifest = manifestText({
+    partName, sourceName: source && source.bytes ? safeName(source.name) : null,
+    result, twoShot, entries: measured.entries, now,
+  });
+
+  /* Manifest at the top, where an unzip lists it first. */
+  const final = await createZip(
+    [{ name: 'MANIFEST.txt', bytes: encoder.encode(manifest) }, ...entries],
+    now,
+  );
+
+  const base = (partName || 'part').replace(/\.[^.]+$/, '');
+  return {
+    blob: final.blob,
+    filename: `dfm_findings_${safeName(base)}_${sessionId}.zip`,
+    manifest,
+    entries: final.entries,
+  };
+}
+
+/*
+ * A filename an archive and a filesystem will both accept.
+ *
+ * The directory part is dropped rather than escaped. A member called
+ * "../../etc/passwd" is the classic archive escape and mangling it to
+ * "_.._etc_passwd" is safe but absurd; the file's name is "passwd" and that is
+ * what belongs in the archive. Same for a Windows path arriving in a name,
+ * which some browsers still hand over — the last segment is the file. What is
+ * left has anything but plain name characters replaced, and leading dots
+ * stripped so nothing becomes a dotfile or a relative reference.
+ */
+function safeName(name) {
+  const segments = String(name == null ? '' : name).split(/[/\\]+/).filter(Boolean);
+  const base = segments.length ? segments[segments.length - 1] : '';
+  const cleaned = base.replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^\.+/, '');
+  return cleaned.slice(0, 80) || 'part';
+}
+
+/* Hand the archive to the browser. Separate from assembling it so a test can
+   check the bytes without a DOM. */
+function downloadPackage(pkg) {
+  const url = URL.createObjectURL(pkg.blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = pkg.filename;
+  a.click();
+  /* Revoking synchronously can race the download in Firefox — same reason as
+     downloadJSON in json.js. */
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
 }
 
 /* ==== analysis/register.js ========================================== */
@@ -11074,6 +11458,10 @@ const runtime = {
   bodies: null,                // per-body visibility for multi-body STEP
   fileName1: null,
   fileName2: null,
+  /* The bytes shot 1 arrived as, so the findings package can carry the file
+     the report was measured from rather than one attached by hand. Null for a
+     part that arrived by a route with no bytes to keep. */
+  sourceFile: null,
 
   validation: null,            // shot 1 mesh health report
   validation2: null,           // shot 2 mesh health report
@@ -11176,6 +11564,7 @@ function resetRuntime() {
   runtime.bodies = null;
   runtime.fileName1 = null;
   runtime.fileName2 = null;
+  runtime.sourceFile = null;
   runtime.validation = null;
   runtime.validation2 = null;
   runtime.analysis = null;
@@ -12217,17 +12606,30 @@ async function parseGeometryFile(file, onProgress) {
   if (ext === 'ipt') {
     const { buffer, model } = await openIptViaBridge(file, onProgress);
     onProgress(0.6, 'Tessellating B-rep');
-    return { geom: await parseSTEP(buffer, onProgress), format: 'IPT', model };
+    /* The bytes measured on this path are the STEP Inventor wrote, not the
+       .ipt — so that is what the findings package carries, under a name that
+       says what it is. A member called part.ipt holding STEP would be worse
+       than either. */
+    return {
+      geom: await parseSTEP(buffer, onProgress),
+      format: 'IPT',
+      model,
+      source: { name: `${file.name.replace(/\.ipt$/i, '')}.step`, bytes: new Uint8Array(buffer) },
+    };
   }
 
   const buffer = await file.arrayBuffer();
+  /* Kept so the findings package can carry the file the report was measured
+     from. One copy of the bytes, which is the cost of not attaching last
+     week's revision by hand. */
+  const source = { name: file.name, bytes: new Uint8Array(buffer) };
   if (STEP_EXTS.has(ext)) {
     onProgress(0.02, 'Initialising');
-    return { geom: await parseSTEP(buffer, onProgress), format: 'STEP' };
+    return { geom: await parseSTEP(buffer, onProgress), format: 'STEP', source };
   }
   onProgress(0.2, 'Parsing STL');
   await nextFrame(); // let the overlay paint before the parse blocks
-  return { geom: parseSTL(buffer, onProgress), format: 'STL' };
+  return { geom: parseSTL(buffer, onProgress), format: 'STL', source };
 }
 
 /*
@@ -12370,8 +12772,9 @@ async function handleFile1(file) {
   showProgress('Reading file');
 
   try {
-    const { geom, format, model } = await parseGeometryFile(file, updateProgress);
+    const { geom, format, model, source } = await parseGeometryFile(file, updateProgress);
     runtime.fileName1 = file.name;
+    runtime.sourceFile = source || null;
     runtime.model = model || null;
     if (model) panel.renderModelTree(model, applyParameterChange);
     const report = installGeometry(geom, file);
@@ -12903,6 +13306,59 @@ function doExportJSON() {
 }
 
 /*
+ * The findings package: the report, the record and the measured file, zipped.
+ *
+ * The three of them together rather than three downloads, because assembling
+ * them by hand is where the wrong revision gets attached — and once they are
+ * apart nobody can tell which report describes which file.
+ */
+async function doExportPackage() {
+  if (!runtime.dfm) return;
+  const btn = $('packageBtn');
+  const label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Packaging…';
+  try {
+    const json = currentRecord();
+    /* The same report the PDF button produces, handed over as bytes instead
+       of saved — one layout, not two. */
+    const pdf = await exportPDF({
+      sessionId: runtime.sessionId,
+      dfm: runtime.dfm,
+      analysis: runtime.analysis,
+      twoShot: runtime.twoShot,
+      validation: runtime.validation,
+      shot: runtime.shot,
+      cycle: runtime.cycle,
+      cost: runtime.cost,
+      tooling: runtime.tooling,
+      settings,
+      deliver: 'bytes',
+    });
+    const pkg = await buildFindingsPackage({
+      sessionId: runtime.sessionId,
+      partName: runtime.fileName1,
+      source: runtime.sourceFile,
+      pdfBytes: pdf.bytes,
+      json,
+      result: runtime.dfm.result,
+      twoShot: runtime.twoShot,
+    });
+    downloadPackage(pkg);
+    toast(runtime.sourceFile
+      ? `Packaged ${pkg.entries.length} files — report, record and the geometry it was measured from.`
+      : `Packaged ${pkg.entries.length} files. No geometry: this part arrived without bytes to keep, and the manifest says so.`,
+    runtime.sourceFile ? 'info' : 'warn', 8000);
+  } catch (err) {
+    console.error(err);
+    toast(`Could not build the package: ${err.message}`, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = label;
+  }
+}
+
+/*
  * Compare this run against a previously exported JSON.
  *
  * Reading a file rather than keeping history in the page: a revision comparison
@@ -13197,6 +13653,7 @@ function boot() {
     e.target.value = ''; // allow re-selecting the same file
   });
   $('pdfBtn').addEventListener('click', doExportPDF);
+  $('packageBtn').addEventListener('click', doExportPackage);
 
   wireKeyboard();
 

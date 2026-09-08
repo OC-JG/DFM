@@ -10,6 +10,10 @@
  *
  * No browser, no network, no build step. Run: node test/unit.mjs
  */
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import * as S from './lib/shapes.mjs';
 import * as R from './lib/reference.mjs';
 import { weldGeometry } from '../src/geometry/weld.js';
@@ -24,6 +28,8 @@ import {
   scoreChecks, escalate, PART_GRADES, INTERFACE_GRADES,
 } from '../src/rules/scoring.js';
 import { buildExportJSON } from '../src/export/json.js';
+import { createZip, crc32, crc32Hex } from '../src/export/zip.js';
+import { buildFindingsPackage, safeName } from '../src/export/package.js';
 import { compareRuns } from '../src/rules/compare.js';
 import { buildIdentity, buildLabel, TOOL_VERSION, BUILD_FINGERPRINT } from '../src/core/build-info.js';
 import { featureId, checkRef, FEATURE_GRID_MM, FEATURE_KINDS } from '../src/rules/findings.js';
@@ -86,6 +92,25 @@ function within(actual, expected, pct, msg = '') {
 const weld = (soup) => weldGeometry(soup.positions, soup.triCount);
 const analyse = (geom, opts = {}) =>
   analyseMesh(geom, { material: MATERIALS.abs, minDraft: 0.5, pullAxis: '+z', ...opts });
+
+/*
+ * Analysing a fixture is seconds of ray casting, and a dozen assertions want
+ * the same one. Memoised so each is measured once per run.
+ *
+ * Safe to share: nothing downstream mutates a mesh analysis — `scoreChecks`
+ * annotates the checks it is given, not the measurements they came from. The
+ * exception is a test whose subject is reproducibility, which has to analyse
+ * twice on purpose and says so where it does.
+ */
+const analysedOnce = new Map();
+function analysedFixture(key, make, opts = {}) {
+  if (!analysedOnce.has(key)) {
+    analysedOnce.set(key, analyse(weld(make()), { suggestGate: false, ...opts }));
+  }
+  return analysedOnce.get(key);
+}
+const LEDGE_CUP = () => analysedFixture('ledge-cup', () => S.internalLedgeCup());
+const SHELL_BOX = () => analysedFixture('shell-box', () => S.hollowBox([40, 30, 20], 2));
 
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -1793,9 +1818,9 @@ describe('a check that costs points cannot look like a pass');
 
   it('holds across every check the engine can emit', () => {
     const meshes = [
-      analyse(weld(S.hollowFrustum(20, 30, 3, 2)), { suggestGate: false }),
-      analyse(weld(S.hollowBox([40, 30, 20], 2)), { suggestGate: false }),
-      analyse(weld(S.internalLedgeCup()), { suggestGate: false }),
+      analysedFixture('hollow-frustum', () => S.hollowFrustum(20, 30, 3, 2)),
+      SHELL_BOX(),
+      LEDGE_CUP(),
     ];
     for (const mesh of meshes) {
       for (const c of runDFM({ ...CLEAN_INPUT, mesh }).checks) {
@@ -2666,6 +2691,193 @@ describe('FPC — what the located insert changes in the rules');
 
 // ═══════════════════════════════════════════════════════════════════════════
 
+describe('the findings package');
+{
+  /*
+   * Read back by `unzip`, not by this repository's own reader. An archive
+   * that only its author can open is not an archive — the file goes to a
+   * factory, and whatever is on that machine has to be able to open it. The
+   * assertions below therefore go through a real extractor; that is the whole
+   * point of the test, and a self-consistency check would prove nothing.
+   */
+  const OUT = join(tmpdir(), `dfm-zip-${process.pid}`);
+
+  async function extract(blob, label) {
+    const dir = join(OUT, label);
+    rmSync(dir, { recursive: true, force: true });
+    mkdirSync(dir, { recursive: true });
+    const zipPath = join(dir, 'a.zip');
+    writeFileSync(zipPath, Buffer.from(await blob.arrayBuffer()));
+    /* -qq so a failure is the exit status rather than buried in a listing.
+       `unzip` returns 1 for warnings and 2+ for a broken archive. */
+    execFileSync('unzip', ['-qq', '-o', zipPath, '-d', dir]);
+    const names = execFileSync('zipinfo', ['-1', zipPath], { encoding: 'utf8' })
+      .split('\n').filter(Boolean);
+    return {
+      dir,
+      names,
+      read: (name) => readFileSync(join(dir, name)),
+    };
+  }
+
+  it('crc32 agrees with an independent implementation', () => {
+    /* The manifest publishes these for a recipient to check, so they have to
+       be the CRC everybody else computes. Values from the zlib test vectors. */
+    eq(crc32Hex(new TextEncoder().encode('')), '00000000', 'empty:');
+    eq(crc32Hex(new TextEncoder().encode('a')), 'e8b7be43', '"a":');
+    eq(crc32Hex(new TextEncoder().encode('123456789')), 'cbf43926', '"123456789":');
+    /* And on bytes that are not ASCII, where a sign error would show. */
+    eq(crc32(Uint8Array.from([0, 255, 128, 1])), crc32(Uint8Array.from([0, 255, 128, 1])),
+      'stable across calls:');
+  });
+
+  it('writes an archive unzip can read, byte for byte', async () => {
+    const payloads = {
+      'plain.txt': new TextEncoder().encode('hello'),
+      /* Highly compressible, so deflate is exercised. */
+      'repeated.txt': new TextEncoder().encode('STEP;'.repeat(4000)),
+      /* Incompressible, so the store fallback is exercised on the same run —
+         deflate on random bytes comes out larger and must not be used. */
+      'random.bin': (() => {
+        const rand = makeRandom(11);
+        return Uint8Array.from({ length: 4096 }, () => Math.floor(rand() * 256));
+      })(),
+      'nested/dir/file.json': new TextEncoder().encode('{"a":1}'),
+    };
+    const zip = await createZip(Object.entries(payloads).map(([name, bytes]) => ({ name, bytes })));
+    const got = await extract(zip.blob, 'roundtrip');
+
+    eq(got.names.sort().join(','), Object.keys(payloads).sort().join(','), 'members:');
+    for (const [name, bytes] of Object.entries(payloads)) {
+      const back = got.read(name);
+      eq(back.length, bytes.length, `${name} length:`);
+      assert(Buffer.from(bytes).equals(back), `${name} came back different`);
+    }
+
+    const summary = new Map(zip.entries.map((e) => [e.name, e]));
+    assert(summary.get('repeated.txt').deflated, 'repeated text should have been deflated');
+    assert(summary.get('repeated.txt').stored < summary.get('repeated.txt').bytes / 5,
+      `deflate barely helped: ${summary.get('repeated.txt').stored} of ${summary.get('repeated.txt').bytes}`);
+    assert(!summary.get('random.bin').deflated,
+      'random bytes must be stored rather than grown by deflating them');
+    eq(summary.get('plain.txt').crc32, crc32Hex(payloads['plain.txt']), 'reported crc:');
+  });
+
+  it('refuses a member too large for the format rather than overflowing it', async () => {
+    /* No Zip64 here, so the 32-bit fields have a limit. Reached by lying about
+       a length rather than by allocating four gigabytes. */
+    const huge = { name: 'big.bin', bytes: { length: 0x100000000, BYTES_PER_ELEMENT: 1 } };
+    let threw = null;
+    try {
+      await createZip([{ name: 'big.bin', bytes: new Uint8Array(0) }, huge]);
+    } catch (err) { threw = err; }
+    assert(threw, 'a 4 GB member should be refused');
+    assert(/too large/.test(threw.message), `unhelpful message: ${threw.message}`);
+  });
+
+  it('packages the report, the record and the file that was measured', async () => {
+    const mesh = SHELL_BOX();
+    const result = runDFM({ ...CLEAN_INPUT, mesh });
+    const json = buildExportJSON({
+      sessionId: 'ABCDE', dfm: { input: CLEAN_INPUT, result }, analysis: mesh,
+      twoShot: null, interface: null, validation: null,
+      settings: { analysisMode: 'single', windowType: 'none' },
+    });
+    const stepBytes = new TextEncoder().encode('ISO-10303-21;\nHEADER;\nENDSEC;\nEND-ISO-10303-21;\n');
+    const pkg = await buildFindingsPackage({
+      sessionId: 'ABCDE',
+      partName: 'housing_rev4.step',
+      source: { name: 'housing_rev4.step', bytes: stepBytes },
+      pdfBytes: new TextEncoder().encode('%PDF-1.3\nnot really a pdf\n'),
+      json,
+      result,
+      twoShot: null,
+    });
+
+    const got = await extract(pkg.blob, 'package');
+    eq(got.names.sort().join(','),
+      ['MANIFEST.txt', 'findings.json', 'geometry/housing_rev4.step', 'report.pdf'].sort().join(','),
+      'members:');
+    assert(pkg.filename.startsWith('dfm_findings_housing_rev4_ABCDE'), `filename: ${pkg.filename}`);
+
+    /* The geometry is the bytes that were measured, not a re-read of anything. */
+    assert(Buffer.from(stepBytes).equals(got.read('geometry/housing_rev4.step')),
+      'the geometry in the archive is not the geometry that went in');
+    /* And the record is the record, still parseable after the round trip. */
+    const back = JSON.parse(got.read('findings.json').toString('utf8'));
+    eq(back.score, result.score, 'exported score survived:');
+    eq(back.build.tool_version, json.build.tool_version, 'build identity survived:');
+  });
+
+  it('the manifest names the file, its checksum, and every finding reference', async () => {
+    const mesh = LEDGE_CUP();
+    const result = runDFM({ ...CLEAN_INPUT, mesh });
+    const stepBytes = new TextEncoder().encode('ISO-10303-21;\nENDSEC;\n');
+    const pkg = await buildFindingsPackage({
+      sessionId: 'ZZZZZ', partName: 'cup.step',
+      source: { name: 'cup.step', bytes: stepBytes },
+      pdfBytes: null,
+      json: { score: result.score }, result, twoShot: null,
+      now: new Date('2026-09-08T10:30:00Z'),
+    });
+    const m = pkg.manifest;
+
+    assert(m.includes('cup.step'), 'the part is not named');
+    assert(m.includes('2026-09-08T10:30:00Z'), `no timestamp: ${m.slice(0, 200)}`);
+    assert(m.includes(`${result.score} / 100`), 'the score is not stated');
+    /* The checksum a recipient checks the attachment against. */
+    assert(m.includes(crc32Hex(stepBytes)),
+      `the geometry's crc32 (${crc32Hex(stepBytes)}) is not in the manifest`);
+    assert(/not a signature/.test(m), 'the manifest must say what a CRC is not');
+    /* Every finding, by the reference a response is written against. */
+    for (const c of result.checks) {
+      assert(m.includes(checkRef(c.key)), `${c.key} is missing from the manifest's finding list`);
+    }
+    /* And it is inside the archive, not only returned here. */
+    const got = await extract(pkg.blob, 'manifest');
+    eq(got.read('MANIFEST.txt').toString('utf8'), m, 'the manifest in the archive:');
+  });
+
+  it('says loudly when there is no geometry to include', async () => {
+    /* A part loaded before the bytes were kept, or by a route with none. The
+       package is still worth having; silently shipping two files that describe
+       a third nobody attached is not. */
+    const result = runDFM({ ...CLEAN_INPUT, mesh: analysedFixture('plain-box', () => S.box()) });
+    const pkg = await buildFindingsPackage({
+      sessionId: 'NOGEO', partName: 'part.stl', source: null,
+      pdfBytes: null, json: { score: result.score }, result, twoShot: null,
+    });
+    assert(/NO GEOMETRY IS INCLUDED/.test(pkg.manifest), 'the absence must be stated, not implied');
+    const got = await extract(pkg.blob, 'nogeo');
+    assert(!got.names.some((n) => n.startsWith('geometry/')), `unexpected geometry: ${got.names}`);
+  });
+
+  it('an unbuilt source tree is not passed off as a release', async () => {
+    const pkg = await buildFindingsPackage({
+      sessionId: 'DEV', partName: 'part.stl', source: null,
+      pdfBytes: null, json: {}, result: null, twoShot: null,
+    });
+    assert(/RUNNING FROM SOURCE/.test(pkg.manifest),
+      `the manifest should not imply a release: ${pkg.manifest.slice(0, 300)}`);
+  });
+
+  it('turns a hostile filename into a harmless member name', () => {
+    /* A member called ../etc is the classic archive escape, and a Windows
+       path in a name makes an entry nothing can extract. */
+    /* The directory part is dropped, not escaped: the file's name is
+       "passwd", and mangling the path into the name would be safe but absurd. */
+    eq(safeName('../../etc/passwd'), 'passwd', 'traversal:');
+    eq(safeName('C:\\Users\\me\\part.step'), 'part.step', 'windows path:');
+    eq(safeName(''), 'part', 'empty:');
+    eq(safeName(null), 'part', 'missing:');
+    assert(safeName('x'.repeat(500)).length <= 80, 'a very long name must be truncated');
+    for (const hostile of ['../../etc/passwd', 'a/b', 'x\u0000y', '....//x']) {
+      assert(!safeName(hostile).includes('/') && !safeName(hostile).includes('\\'),
+        `safeName left a separator in "${hostile}" → "${safeName(hostile)}"`);
+    }
+  });
+}
+
 describe('finding references');
 {
   it('a check is quoted by its key, not by a second identifier', () => {
@@ -2745,6 +2957,8 @@ describe('finding references');
     /* The exit criterion, measured rather than asserted about the helper: two
        analyses of the same geometry, and the ids have to agree region for
        region — including across the sort, which orders by area. */
+    /* Two analyses on purpose: reproducibility is the subject, so the
+       memoised fixture would assert nothing. */
     const soup = S.internalLedgeCup();
     const first = analyse(weld(soup), { suggestGate: false });
     const second = analyse(weld(soup), { suggestGate: false });
@@ -2762,8 +2976,8 @@ describe('finding references');
      * elsewhere on the part used to renumber the rest — and a factory's "point
      * 3" then pointed at something else entirely.
      */
-    const plain = analyse(weld(S.internalLedgeCup()), { suggestGate: false });
-    const more = analyse(weld(S.internalLedgeCup({ ledgeZ: [8, 2] })), { suggestGate: false });
+    const plain = LEDGE_CUP();
+    const more = analysedFixture('ledge-cup-2', () => S.internalLedgeCup({ ledgeZ: [8, 2] }));
     const byId = (a) => new Map((a.undercutRegions || [])
       .filter((r) => r.area > 1).map((r) => [r.id, r]));
     const before = byId(plain);
@@ -2794,7 +3008,7 @@ describe('build identity');
   it('the export carries every reference a response could be written against', () => {
     /* An export that omits the references is an export nobody can answer
        point by point, which is the whole reason they exist. */
-    const mesh = analyse(weld(S.internalLedgeCup()), { suggestGate: false });
+    const mesh = LEDGE_CUP();
     const r = runDFM({ ...CLEAN_INPUT, mesh });
     const json = buildExportJSON({
       sessionId: 'TEST', dfm: { input: CLEAN_INPUT, result: r },

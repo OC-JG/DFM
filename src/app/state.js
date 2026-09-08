@@ -74,6 +74,10 @@ export const runtime = {
   bodies: null,                // per-body visibility for multi-body STEP
   fileName1: null,
   fileName2: null,
+  /* The bytes shot 1 arrived as, so the findings package can carry the file
+     the report was measured from rather than one attached by hand. Null for a
+     part that arrived by a route with no bytes to keep. */
+  sourceFile: null,
 
   validation: null,            // shot 1 mesh health report
   validation2: null,           // shot 2 mesh health report
@@ -176,6 +180,7 @@ export function resetRuntime() {
   runtime.bodies = null;
   runtime.fileName1 = null;
   runtime.fileName2 = null;
+  runtime.sourceFile = null;
   runtime.validation = null;
   runtime.validation2 = null;
   runtime.analysis = null;

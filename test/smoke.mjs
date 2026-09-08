@@ -16,6 +16,7 @@
  * different build number than the installed Playwright expects.
  */
 import { createServer } from 'node:http';
+import { execFileSync } from 'node:child_process';
 import { startFakeBridge } from './lib/fake-bridge.mjs';
 import { writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -167,6 +168,32 @@ async function main() {
         === (await page.locator('#checksList .check').count())
       && /^[A-Z0-9-]+$/.test(firstRef.trim()),
       `first=${firstRef}, refs=${await page.locator('#checksList .check .check-ref').count()}`);
+
+    /*
+     * The findings package, end to end. Unit tests prove the archive is
+     * readable and the manifest correct; what only a browser can show is that
+     * the button produces a download at all — jsPDF rendering to bytes,
+     * CompressionStream, and the anchor click are all browser machinery.
+     */
+    const pkgDownload = page.waitForEvent('download', { timeout: 60000 });
+    await page.click('#packageBtn');
+    const pkgFile = await pkgDownload;
+    const pkgPath = join(FIXTURES, 'downloaded-package.zip');
+    await pkgFile.saveAs(pkgPath);
+    const names = execFileSync('zipinfo', ['-1', pkgPath], { encoding: 'utf8' })
+      .split('\n').filter(Boolean).sort();
+    check('the findings package downloads, and holds all three files',
+      /\.zip$/.test(pkgFile.suggestedFilename())
+      && names.includes('MANIFEST.txt') && names.includes('report.pdf')
+      && names.includes('findings.json')
+      && names.some((n) => n.startsWith('geometry/')),
+      `${pkgFile.suggestedFilename()}: ${names.join(', ')}`);
+
+    const manifest = execFileSync('unzip', ['-p', pkgPath, 'MANIFEST.txt'], { encoding: 'utf8' });
+    check('the packaged manifest names the build and the geometry it measured',
+      manifest.includes(pkg.version) && manifest.includes('part.stl')
+      && /crc32 [0-9a-f]{8}/.test(manifest),
+      manifest.split('\n').slice(0, 6).join(' | '));
 
     check('score strips match checks',
       (await page.locator('#scoreBars .score-strip').count()) === (await page.locator('#checksList .check').count()));

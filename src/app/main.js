@@ -14,6 +14,7 @@ import { runTwoShotDFM } from '../rules/twoshot.js';
 import { compareRuns } from '../rules/compare.js';
 import { buildExportJSON, downloadJSON } from '../export/json.js';
 import { exportPDF } from '../export/pdf.js';
+import { buildFindingsPackage, downloadPackage } from '../export/package.js';
 import { runAnalysis, initWorker } from './analysis-runner.js';
 import { computeHeatColours, computeInterfaceColours, buildLegend, HEAT_MODES } from './heatmap.js';
 import * as viewer from './viewer.js';
@@ -60,17 +61,30 @@ async function parseGeometryFile(file, onProgress) {
   if (ext === 'ipt') {
     const { buffer, model } = await openIptViaBridge(file, onProgress);
     onProgress(0.6, 'Tessellating B-rep');
-    return { geom: await parseSTEP(buffer, onProgress), format: 'IPT', model };
+    /* The bytes measured on this path are the STEP Inventor wrote, not the
+       .ipt — so that is what the findings package carries, under a name that
+       says what it is. A member called part.ipt holding STEP would be worse
+       than either. */
+    return {
+      geom: await parseSTEP(buffer, onProgress),
+      format: 'IPT',
+      model,
+      source: { name: `${file.name.replace(/\.ipt$/i, '')}.step`, bytes: new Uint8Array(buffer) },
+    };
   }
 
   const buffer = await file.arrayBuffer();
+  /* Kept so the findings package can carry the file the report was measured
+     from. One copy of the bytes, which is the cost of not attaching last
+     week's revision by hand. */
+  const source = { name: file.name, bytes: new Uint8Array(buffer) };
   if (STEP_EXTS.has(ext)) {
     onProgress(0.02, 'Initialising');
-    return { geom: await parseSTEP(buffer, onProgress), format: 'STEP' };
+    return { geom: await parseSTEP(buffer, onProgress), format: 'STEP', source };
   }
   onProgress(0.2, 'Parsing STL');
   await nextFrame(); // let the overlay paint before the parse blocks
-  return { geom: parseSTL(buffer, onProgress), format: 'STL' };
+  return { geom: parseSTL(buffer, onProgress), format: 'STL', source };
 }
 
 /*
@@ -213,8 +227,9 @@ async function handleFile1(file) {
   showProgress('Reading file');
 
   try {
-    const { geom, format, model } = await parseGeometryFile(file, updateProgress);
+    const { geom, format, model, source } = await parseGeometryFile(file, updateProgress);
     runtime.fileName1 = file.name;
+    runtime.sourceFile = source || null;
     runtime.model = model || null;
     if (model) panel.renderModelTree(model, applyParameterChange);
     const report = installGeometry(geom, file);
@@ -746,6 +761,59 @@ function doExportJSON() {
 }
 
 /*
+ * The findings package: the report, the record and the measured file, zipped.
+ *
+ * The three of them together rather than three downloads, because assembling
+ * them by hand is where the wrong revision gets attached — and once they are
+ * apart nobody can tell which report describes which file.
+ */
+async function doExportPackage() {
+  if (!runtime.dfm) return;
+  const btn = $('packageBtn');
+  const label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Packaging…';
+  try {
+    const json = currentRecord();
+    /* The same report the PDF button produces, handed over as bytes instead
+       of saved — one layout, not two. */
+    const pdf = await exportPDF({
+      sessionId: runtime.sessionId,
+      dfm: runtime.dfm,
+      analysis: runtime.analysis,
+      twoShot: runtime.twoShot,
+      validation: runtime.validation,
+      shot: runtime.shot,
+      cycle: runtime.cycle,
+      cost: runtime.cost,
+      tooling: runtime.tooling,
+      settings,
+      deliver: 'bytes',
+    });
+    const pkg = await buildFindingsPackage({
+      sessionId: runtime.sessionId,
+      partName: runtime.fileName1,
+      source: runtime.sourceFile,
+      pdfBytes: pdf.bytes,
+      json,
+      result: runtime.dfm.result,
+      twoShot: runtime.twoShot,
+    });
+    downloadPackage(pkg);
+    toast(runtime.sourceFile
+      ? `Packaged ${pkg.entries.length} files — report, record and the geometry it was measured from.`
+      : `Packaged ${pkg.entries.length} files. No geometry: this part arrived without bytes to keep, and the manifest says so.`,
+    runtime.sourceFile ? 'info' : 'warn', 8000);
+  } catch (err) {
+    console.error(err);
+    toast(`Could not build the package: ${err.message}`, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = label;
+  }
+}
+
+/*
  * Compare this run against a previously exported JSON.
  *
  * Reading a file rather than keeping history in the page: a revision comparison
@@ -1040,6 +1108,7 @@ function boot() {
     e.target.value = ''; // allow re-selecting the same file
   });
   $('pdfBtn').addEventListener('click', doExportPDF);
+  $('packageBtn').addEventListener('click', doExportPackage);
 
   wireKeyboard();
 

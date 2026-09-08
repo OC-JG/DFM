@@ -554,6 +554,15 @@ build.
   over-reports because most of a part is nowhere near the insert. Both versions
   say which one they are.
 
+- **The findings package is assembled, not collected.** The report, the JSON
+  record and the file that was measured leave in one archive, with a manifest
+  naming the build that scored it and a CRC32 per member. That last part is the
+  point: three files pulled from three places is where the wrong revision gets
+  attached, and nobody finds out until the tool is cut. A part loaded by a
+  route that kept no bytes still packages, and the manifest says in capitals
+  that the geometry is missing rather than quietly shipping two files that
+  describe a third.
+
 - **Wall transitions remain advisory on STL.** Thickness sampling is genuinely
   unreliable at corners and rim edges; the check is off by default and says so.
 - **Two-shot alignment is corrected, not diagnosed.** Where shot 2's mating

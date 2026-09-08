@@ -190,7 +190,7 @@ function interfaceFrame(reg) {
   return 'As loaded';
 }
 
-export async function exportPDF({ sessionId, dfm, analysis, twoShot, validation, shot, cycle, cost, tooling, settings }) {
+export async function exportPDF({ sessionId, dfm, analysis, twoShot, validation, shot, cycle, cost, tooling, settings, deliver = 'download' }) {
   const jsPDF = await loadJsPDF();
   const doc = new jsPDF({ unit: 'mm', format: 'a4' });
   const r = dfm.result;
@@ -456,5 +456,14 @@ export async function exportPDF({ sessionId, dfm, analysis, twoShot, validation,
     doc.text(`Page ${i} / ${pages}`, PAGE_W - MARGIN, FOOTER_Y, { align: 'right' });
   }
 
-  doc.save(`dfm_report_${sessionId}_${Date.now()}.pdf`);
+  /*
+   * Two callers, two deliveries. Ordinarily the browser saves it; the findings
+   * package wants the bytes so it can put the same report inside an archive.
+   * One function either way, because a second one that laid the report out
+   * again would be a second report to keep in step.
+   */
+  const filename = `dfm_report_${sessionId}_${Date.now()}.pdf`;
+  if (deliver === 'bytes') return { filename, bytes: new Uint8Array(doc.output('arraybuffer')) };
+  doc.save(filename);
+  return { filename, bytes: null };
 }

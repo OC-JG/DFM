@@ -90,7 +90,7 @@ in — those ran roughly to estimate, which is the only reason to trust these.
 | R2.3 | The Inventor loop under test | ~~4–6 d~~ done | one part blocked upstream |
 | R2.4 | Numbers that get quoted | ~~1 wk~~ done | — |
 | R2.5 | Two-shot and FPC earn their weights | ~~1–2 wk~~ two of three done | third part blocked on datasheets |
-| R2.6 | Findings that survive leaving the tool | 4–6 d | Independent |
+| R2.6 | Findings that survive leaving the tool | ~~4–6 d~~ done | — |
 | R2.7 | Navigation for people who navigate for a living | 1–2 wk | Independent |
 | — | Release discipline | 2–3 d | Independent, do first |
 
@@ -447,33 +447,64 @@ against a STEP fixture whose answer is 1.90 mm by construction. `ts_thermal`
 carries a weight and sixteen cited `vicatC` values — **not met**, blocked as
 above.
 
-### R2.6 — Findings that survive leaving the tool
+### R2.6 — Findings that survive leaving the tool *(done)*
 
-**Why now.** The tool's output is not the end of the process — it goes to a
-factory, comes back as a DFM report, and gets argued about. Everything in gap 4
-is cheap to fix and compounds with every export that already exists.
+**Why it was needed.** The tool's output is not the end of the process — it
+goes to a factory, comes back as a DFM report, and gets argued about. None of
+it could survive that trip.
 
-**What ships.**
+**What shipped.**
 
-- **Stable finding identifiers.** A finding gets an id derived from its check key
-  and the geometry it concerns, stable across runs of the same part. That makes
-  "we accept point 4, reject point 7" mean something months later, and it is
-  what lets a supplier's DFM response be reconciled against the tool's own
-  findings rather than re-read by hand.
-- **Build identity in every artifact.** `tool_version` and the source commit in
-  the JSON export, and the same in `dfm-tool.html`'s banner, which currently
-  carries a licence and no version at all. `build.js` already writes that banner
-  and can read `package.json` and `git rev-parse`.
-- **A rules-version caveat in `compare.js`.** Once exports carry a version, add
-  the caveat the comparison is currently missing: the rules changed between these
-  two runs, so some of this movement is the tool, not the part. It belongs
-  alongside the three caveats at `compare.js:51-59`.
-- **A findings package export.** One archive: the PDF, the JSON, and the STEP
-  that was measured. This is what actually gets emailed to a factory, and
-  assembling it by hand is where the wrong revision gets attached.
+- **Build identity**, from the sources rather than from the commit. `tool_version`
+  and a fingerprint in the JSON export, the PDF footer, the header on screen
+  and the banner in the file. `--stamp v2.0.1` adds a release name for a
+  tagged build.
+- **Finding references.** A check is quoted by its key, upper-cased, printed
+  on the card and in the PDF. Located features — undercut regions, wall
+  transitions — carry a reference derived from where they are, on a 2 mm grid.
+- **The rules-version caveat in `compare.js`**, in three states: a version
+  change, a source change at the same version, and a record from before builds
+  were named.
+- **The findings package.** `src/export/zip.js` and `src/export/package.js`:
+  the report, the record and the measured file in one archive, with a manifest
+  naming the build and a CRC32 per member. Read back by `unzip` in the tests,
+  not by its own reader.
 
-**Exit criteria.** Two runs of the same part produce the same finding ids. A JSON
-export names the build that produced it. Comparing across a rules change says so.
+**Found while doing the work.**
+
+- *The source commit cannot go in the artifact.* `dfm-tool.html` is committed
+  and `verify:build` fails if a rebuild differs from it, so a build stamping
+  `git rev-parse HEAD` would write the *parent* commit's hash into the file
+  being committed — no commit contains its own hash — and the check would fail
+  on every commit for ever. A hash of the sources is reproducible, and answers
+  the question a commit SHA was standing in for more directly: two commits that
+  touch only the README share a fingerprint, and should.
+
+- *A stable id for a whole-part check would be a second identifier for
+  something already identified.* A run emits at most one finding per key. What
+  was missing was printing the key, not deriving something from it. The work
+  was entirely in the *located* findings, which had no identity at all.
+
+- *Assembling the manifest needs the archive built twice.* The manifest quotes
+  each member's size and checksum, and cannot quote its own — so the members
+  are zipped once to measure them, and again with the manifest in front. Cheap,
+  and the alternative is a manifest that describes something else.
+
+- *A hostile filename is dropped, not escaped.* A member called
+  `../../etc/passwd` mangles to a safe but absurd `_.._etc_passwd`; the file's
+  name is `passwd`, and that is what belongs in the archive.
+
+- *The unit suite is now about two and a half minutes.* Nothing dominates it —
+  the slowest single test is 1.7 s — it is simply two hundred assertions over
+  real ray-casting. Duplicated fixture analyses are memoised, which was the
+  only free saving; the rest is the cost of measuring geometry rather than
+  asserting that a number appeared.
+
+**Exit criteria.** Two runs of the same part produce the same finding ids —
+met, and asserted across a run that adds a feature, which is what used to
+renumber them. A JSON export names the build that produced it — met, from one
+place, with the PDF and the on-screen header reading the same value. Comparing
+across a rules change says so — met, in three states.
 
 ### R2.7 — Navigation for people who navigate for a living
 
@@ -598,11 +629,10 @@ for, and it has no automated coverage today.
 Release discipline first, because it is cheap and because a tagged build is what
 makes every later change traceable.
 
-R2.1 to R2.4 are done, and R2.5 is done but for its Vicat data. What remains is
-independent of everything and of each other: R2.5's last third (sixteen Vicat
-values, and switching `ts_thermal` on), R2.6 (stable finding ids, build
-identity, the findings package) and R2.7 (SpaceMouse) can be taken in any
-order.
+R2.1 to R2.4 and R2.6 are done, and R2.5 is done but for its Vicat data. What
+remains is independent of everything and of each other: R2.5's last third
+(sixteen Vicat values, and switching `ts_thermal` on) and R2.7 (SpaceMouse)
+can be taken in either order.
 
 R2.7 depends on nothing and competes with nothing — it is viewer code, and the
 only file it shares with any other milestone is `src/app/camera.js`, which none
