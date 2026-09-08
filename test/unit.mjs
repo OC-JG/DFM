@@ -937,6 +937,36 @@ describe('scoring — one source of truth');
     }
   });
 
+  it('the check and the property it needs are locked to each other', () => {
+    /*
+     * `ts_thermal` is dark because the material table has no Vicat softening
+     * point, and materials.js carries an instruction not to restore a
+     * melt-versus-HDT threshold without adding one. This is that instruction
+     * made checkable, in both directions, because either half alone is a
+     * regression:
+     *
+     *   Vicat entered, weight still 0 — the data is in the table and the check
+     *   is still refusing to judge, which is the work half-done.
+     *
+     *   weight raised, no Vicat — the threshold is back and the property it
+     *   was supposed to rest on never arrived. That is precisely the state
+     *   this check was rescued from: it held 25 of the interface's 100 points
+     *   and decided the grade from a sustained-load deflection test.
+     *
+     * Whoever adds the sixteen values will see this fail, which is the point:
+     * the failure names the other half of the change.
+     */
+    const withVicat = MATERIAL_ORDER.filter((k) => MATERIALS[k].vicatC != null);
+    const weight = TWO_SHOT_RISK_PROFILES.ts_thermal.weight;
+    if (weight > 0) {
+      eq(withVicat.length, MATERIAL_ORDER.length,
+        `ts_thermal scores at weight ${weight}, so every material needs a Vicat point; missing: ${MATERIAL_ORDER.filter((k) => MATERIALS[k].vicatC == null).join(', ')} —`);
+    } else {
+      eq(withVicat.length, 0,
+        `these materials carry a Vicat point but ts_thermal is still unscored: ${withVicat.join(', ')} —`);
+    }
+  });
+
   it('the fusion pairs that HDT condemned now grade on adhesion', () => {
     for (const [a, b] of [['pcasa', 'asa_n'], ['asa_n', 'pcasa'], ['asa', 'asa_n'], ['asa', 'asa']]) {
       const ts = runTwoShotDFM({ mat1: a, mat2: b, interface: null, opticalWindow: 'none' });

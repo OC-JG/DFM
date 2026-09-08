@@ -136,3 +136,25 @@ reach a quotation.
 material's `coolK` must imply a physically possible diffusivity under the
 full-wall reading, and an impossible one under the half-wall reading. An edit
 that rewrites a coefficient into the other convention fails there.
+
+---
+
+## A note for whoever adds Vicat
+
+The process assumptions above — mould and ejection temperature per family —
+live in `test/unit.mjs`, next to the assertion that uses them, because nothing
+in the tool needs them: `coolK` is tabulated and the derivation exists to
+check it, not to compute with it. If a later change wants thermal diffusivity
+as a quantity in its own right rather than as a check on this one, it should
+be a measured column with its own citations, not a value inverted out of
+`coolK` through a second set of assumptions. Two assumptions deep is where a
+derived number stops being better than no number.
+
+That applies directly to `ts_thermal`, which is the check waiting on a
+softening point. The temperature the substrate skin actually reaches at the
+interface is derivable — two semi-infinite bodies in contact settle at a
+temperature weighted by their thermal penetration coefficients — and it would
+be a more honest thing to print than melt against HDT. But it needs α per
+material, and inverting α out of `coolK` would hang it off the assumptions
+above. Vicat is the shorter route to the same answer, and it is a number
+someone can look up.

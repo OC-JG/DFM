@@ -89,7 +89,7 @@ in — those ran roughly to estimate, which is the only reason to trust these.
 | R2.2 | Features, not triangles | ~~1–2 wk~~ done | unblocked nothing further |
 | R2.3 | The Inventor loop under test | ~~4–6 d~~ done | one part blocked upstream |
 | R2.4 | Numbers that get quoted | ~~1 wk~~ done | — |
-| R2.5 | Two-shot and FPC earn their weights | 1–2 wk | Needs R2.2 for the FPC region |
+| R2.5 | Two-shot and FPC earn their weights | ~~1–2 wk~~ two of three done | third part blocked on datasheets |
 | R2.6 | Findings that survive leaving the tool | 4–6 d | Independent |
 | R2.7 | Navigation for people who navigate for a living | 1–2 wk | Independent |
 | — | Release discipline | 2–3 d | Independent, do first |
@@ -367,39 +367,85 @@ the PDF and in the JSON.
 be checked. It is also the one where being wrong is most expensive, which is why
 it sits behind an explicit decision rather than an estimate.
 
-### R2.5 — Two-shot and FPC earn their weights
+### R2.5 — Two-shot and FPC earn their weights *(two of three done)*
 
-**Why now.** Both paths matter to OnlyCat's own parts — the material table
-carries a natural ASA entry with IR transmission notes and adhesion data for a
-reason — and both have rules that currently cannot do their job.
+**Why it was needed.** Both paths matter to OnlyCat's own parts — the material
+table carries a natural ASA entry with IR transmission notes and adhesion data
+for a reason — and both had rules that could not do their job.
 
-**What ships.**
+**What shipped.**
 
-- **Mesh registration for two-shot.** The interface pass assumes both shots were
-  exported in a shared coordinate system, with no registration step (README,
-  "Known constraints"). When they were not, `ts_coverage` fires — and its own
-  weight comment concedes it is "usually a mesh alignment problem"
-  (`src/rules/scoring.js:98`). A coarse alignment (principal axes, then an ICP
-  refinement on the overlapping region) plus a reported registration residual
-  turns a false finding into either a real one or a stated non-problem.
-- **A located FPC region.** `src/rules/engine.js:75` and `:737` both note the FPC
-  region cannot be located on the mesh, which leaves the coverage and
-  gate-proximity rules advisory inside a check carrying `weight: 12`. Given
-  R2.2, the most economical answer is a designated body or face selection — a
-  multi-body STEP already carries `bodies` (`step.js:120`), and the UI already
-  lists them with visibility toggles (`src/app/main.js:291-298`) — rather than
-  painting a region on the mesh.
-- **Vicat data, and `ts_thermal` switched on.** The check sits at `weight: 0`
-  with an explicit instruction not to restore a melt-versus-HDT threshold
-  without adding Vicat first (`src/core/materials.js:10-16`,
-  `src/rules/scoring.js:109`). Adding a `vicatC` column for the sixteen grades
-  in the table is data entry against datasheets, not modelling, and it closes a
-  check the previous work deliberately left dark.
+- **Registration for two-shot.** `src/analysis/register.js`. A rigid transform
+  is searched for from four kinds of starting pose, refined by ICP, and applied
+  only when it demonstrably mates the two shots; the offset, the rotation and
+  the residual left at the mating surface are all reported, and every interface
+  figure is labelled with the frame it was measured in.
+
+- **A located FPC insert.** `src/analysis/fpc.js`. Marking the flex in the body
+  selector turns two advisories into measurements: the polymer over the insert,
+  and the distance from the gate to it. Where nothing is marked the part-wide
+  comparison still runs and now says that it over-reports.
+
+**What did not, and why.** `ts_thermal` is still dark. The check needs a Vicat
+softening point per grade, and Vicat is data rather than modelling: sixteen
+values, each from the datasheet of a specific grade. Every datasheet host —
+CAMPUS, UL Prospector, MatWeb, the resin makers' own sites — is refused by this
+environment's network policy, and a web search returns summaries attributed to
+datasheets that cannot then be opened. Entering sixteen numbers on that footing
+and switching on a scored check would recreate exactly what the previous work
+removed: a threshold resting on a property nobody had actually read.
+
+So it stays advisory, and the instruction not to restore a melt-versus-HDT
+threshold without Vicat is now enforced rather than commented. A test locks the
+check's weight to the presence of `vicatC` in both directions: entering the data
+without switching the check on fails, and switching it on without the data
+fails. Whoever finishes this will see the failure name the other half.
+
+**Found while doing the work.**
+
+- *Principal axes are not a coarse alignment stage.* They align two instances of
+  the same shape, and a substrate and its overmould are different shapes —
+  their inertia frames have no reason to coincide even when the pair is
+  perfectly placed. An axis alignment is one candidate pose among four, and the
+  residual picks between them.
+
+- *Coverage cannot referee alignment.* This was the obvious criterion and it is
+  wrong. On the box fixture the misaligned pair scored **higher** coverage than
+  the mated one — 42% against 37% — while reporting overmould thickness from
+  0.05 mm to 9 mm where the truth is 2 mm everywhere. Coverage counts faces with
+  the substrate somewhere beneath them, which a shell shoved sideways still has.
+  The decision is the residual at the mating surface instead.
+
+- *Trimming to the closest fraction of correspondences does not isolate the
+  mating surface.* The right fraction is the mating area, which is unknown; on
+  the box fixture a 60% trim leaves a perfectly mated pair reading a 1 mm
+  residual purely from the outer-surface points it had to include. What
+  separates the two surfaces without a magic number is direction.
+
+- *Geometry cannot say why two shots are apart.* A part exported in its own
+  frame and an overmould that genuinely misses its substrate produce the
+  identical gap, and the same transform explains both. The finding names both
+  readings and carries no weight — a file error is worth nothing and a design
+  error is fatal, so any deduction would average nothing with everything.
+
+- *Cover is the material along the ray, not the nearest surface.* An assembly
+  that models a clearance pocket around the insert puts a surface a few
+  hundredths in front of the insert's own, so a first-hit measurement reports
+  the clearance as the cover.
+
+- *A crossing count can hide its own truncation.* Duplicate hits — a ray down a
+  facet edge or diagonal is reported by every incident triangle — are merged
+  after collection, so four raw hits come back as two, which looks exactly like
+  a ray that crossed twice. Truncation is now its own answer rather than a
+  number to be second-guessed.
 
 **Exit criteria.** Two deliberately mis-aligned exports of the same pair
-register, and report a residual rather than a coverage finding. The FPC coverage
-rule scores. `ts_thermal` carries a weight, and the sixteen `vicatC` values each
-cite the datasheet they came from.
+register and report a residual rather than a coverage finding — met, with the
+transform recovered to within 0.01 mm of the inverse of the one applied. The
+FPC coverage rule scores on a measured cover — met, end to end in a browser
+against a STEP fixture whose answer is 1.90 mm by construction. `ts_thermal`
+carries a weight and sixteen cited `vicatC` values — **not met**, blocked as
+above.
 
 ### R2.6 — Findings that survive leaving the tool
 
@@ -552,10 +598,11 @@ for, and it has no automated coverage today.
 Release discipline first, because it is cheap and because a tagged build is what
 makes every later change traceable.
 
-R2.1, R2.2, R2.3 and R2.4 are done. What remains is independent of everything
-and of each other: R2.5 (two-shot registration, the FPC region, Vicat data),
-R2.6 (stable finding ids, build identity, the findings package) and R2.7
-(SpaceMouse) can be taken in any order.
+R2.1 to R2.4 are done, and R2.5 is done but for its Vicat data. What remains is
+independent of everything and of each other: R2.5's last third (sixteen Vicat
+values, and switching `ts_thermal` on), R2.6 (stable finding ids, build
+identity, the findings package) and R2.7 (SpaceMouse) can be taken in any
+order.
 
 R2.7 depends on nothing and competes with nothing — it is viewer code, and the
 only file it shares with any other milestone is `src/app/camera.js`, which none
@@ -563,8 +610,9 @@ of them touch. Slot it wherever there is appetite for it.
 
 R2.4's engineering is a week; its blocking decision could take five minutes or a
 fortnight, so raise the `coolK` question at the *start* of R2.1, not when R2.4
-comes up. R2.5 sits last because its most valuable piece, the located FPC region,
-is much cheaper once R2.2 has made faces and bodies first-class.
+comes up. R2.5 sat last because its most valuable piece, the located FPC region,
+is much cheaper once R2.2 has made faces and bodies first-class — which held
+up, and is also why the piece that remains is the one that needs no code.
 
 ## Decisions that need a human
 
@@ -601,7 +649,9 @@ oversights.
   usable from a plain `<script>` tag; moving costs the single-file property for
   no gain in what the viewer does.
 - **Scoring melt against HDT.** Removed on purpose. HDT cannot answer the
-  question that was being asked of it. Vicat can, and that is R2.5.
+  question that was being asked of it. Vicat can, and that is what remains of
+  R2.5 — data entry against sixteen datasheets, with the check's weight locked
+  to it by a test so neither half can land without the other.
 
 ## Keeping this document honest
 
