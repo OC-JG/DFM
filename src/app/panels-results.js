@@ -1,5 +1,6 @@
 import { $, el, replaceChildren } from './dom.js';
 import { formatPullAxis } from '../analysis/stats.js';
+import { checkRef } from '../rules/findings.js';
 
 /*
  * Results panel rendering.
@@ -70,6 +71,10 @@ function checkCard(check) {
     el('summary', { class: 'check-header' }, [
       el('span', { class: `check-dot ${st}`, text: STATUS_DOT[st], 'aria-hidden': 'true' }),
       el('span', { class: 'check-name', text: check.name }),
+      /* The reference a factory's response is written against. On the card
+         rather than only in the export, because the person reading the card is
+         the one who has to answer the report. */
+      el('span', { class: 'check-ref', text: checkRef(check.key), title: 'Quote this reference when responding to a DFM report' }),
       el('span', {
         class: `check-deduct ${deduct > 0 ? st : 'zero'}`,
         text: deduct > 0 ? `−${deduct.toFixed(1)}` : '0',
@@ -321,6 +326,9 @@ export function hideTwoShotResults() {
 function toolingRegionCard(region, index) {
   const isSlide = region.type === 1;
   const c = region.centroid;
+  /* Numbered for reading order, referenced by id for everything else: the
+     number moves when a region is added, the id does not. */
+  const ref = region.id || `#${index + 1}`;
   const advice = isSlide
     ? `External undercut. Slide retracts perpendicular to pull along ${formatPullAxis(null, region.action)}, min stroke ≈ ${region.perpStroke.toFixed(1)} mm (add ~3–5 mm clearance). Drive via angle pin (typical 15–22°) or hydraulic cylinder. Verify cooling channel routing through the slide body.`
     : `Internal undercut. Lifter angled <b>${region.lifterAngleDeg.toFixed(1)}°</b> from pull axis, travels ≈ <b>${region.pullTravel.toFixed(1)} mm</b> along pull while sweeping ${region.perpStroke.toFixed(1)} mm perpendicular. Hardened face (≥50 HRC) and grease groove recommended.`;
@@ -329,6 +337,7 @@ function toolingRegionCard(region, index) {
     el('div', { class: 'tooling-region-head' }, [
       el('span', { class: 'tooling-pin', text: String(index + 1) }),
       el('span', { class: 'tooling-type', text: isSlide ? 'SLIDE' : 'LIFTER' }),
+      el('span', { class: 'tooling-ref', text: ref, title: 'Quote this reference when responding to a DFM report — it is derived from where the feature is, so it survives a revision that does not move it' }),
       el('span', { class: 'tooling-area', text: `${region.area.toFixed(1)} mm²` }),
     ]),
     el('div', { class: 'tooling-region-coords', text: `@ (${c[0].toFixed(1)}, ${c[1].toFixed(1)}, ${c[2].toFixed(1)})` }),

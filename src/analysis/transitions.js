@@ -1,3 +1,5 @@
+import { featureId, FEATURE_KINDS } from '../rules/findings.js';
+
 /*
  * Wall thickness transition detection (Malloy §2.4.2).
  *
@@ -95,6 +97,7 @@ export function detectWallTransitions(geom, triThickness, triCentroid, triCount,
 
   for (const s of grid.values()) {
     transitions.push({
+      id: featureId(FEATURE_KINDS.transition, [s.cx, s.cy, s.cz]),
       centroid: [s.cx, s.cy, s.cz],
       thicknessLow: s.thicknessLow,
       thicknessHigh: s.thicknessHigh,

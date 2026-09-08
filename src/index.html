@@ -25,7 +25,10 @@
 <header>
   <div class="brand">
     <img src="data:image/png;base64,@LOGO@" alt="OnlyCat" class="brand-logo">
-    <div class="brand-sub">Injection&nbsp;Moulding&nbsp;Analyser&nbsp;//&nbsp;v2.0</div>
+    <!-- The version was hardcoded here and read v2.0 regardless of what the
+         file actually was. Set from build-info at boot instead, so the number
+         on screen is the number in the exports. -->
+    <div class="brand-sub">Injection&nbsp;Moulding&nbsp;Analyser&nbsp;//&nbsp;<span id="buildLabel">dev</span></div>
   </div>
 
   <!-- Whether a local Inventor can be reached. Separate from the run status
@@ -336,6 +339,10 @@
         <button type="button" class="view-btn" data-view="front" aria-pressed="false">FRONT</button>
         <button type="button" class="view-btn" data-view="right" aria-pressed="false">RIGHT</button>
         <button type="button" class="view-btn" id="frameBtn" title="Frame to fit (F)">FRAME</button>
+        <!-- Hidden unless WebHID exists and a device can be asked for. A
+             browser or machine without one shows nothing at all: no button,
+             no error, no mention. -->
+        <button type="button" class="view-btn" id="spaceMouseBtn" hidden title="Connect a 3Dconnexion SpaceMouse">6DOF</button>
       </div>
       <div class="btn-group" id="heatModes" role="group" aria-label="Heatmap mode"></div>
     </div>
@@ -455,6 +462,7 @@
 
       <div class="actions">
         <button type="button" class="btn" id="pdfBtn">↓ Export PDF report</button>
+        <button type="button" class="btn secondary" id="packageBtn" title="The report, the record and the CAD file that was measured, in one archive">↓ Findings package (zip)</button>
         <button type="button" class="btn secondary" id="jsonBtn">↓ Export JSON</button>
         <button type="button" class="btn secondary" id="compareBtn">⇄ Compare with JSON</button>
         <input type="file" id="compareInput" accept=".json,application/json" class="visually-hidden">

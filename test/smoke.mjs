@@ -16,6 +16,7 @@
  * different build number than the installed Playwright expects.
  */
 import { createServer } from 'node:http';
+import { execFileSync } from 'node:child_process';
 import { startFakeBridge } from './lib/fake-bridge.mjs';
 import { writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -25,6 +26,9 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, '..');
+/* The version the built file should be claiming, read from the same place
+   build.js reads it, so the check cannot pass by agreeing with itself. */
+const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
 const BUILT = join(ROOT, 'dfm-tool.html');
 const FIXTURES = join(HERE, 'fixtures');
 
@@ -150,6 +154,47 @@ async function main() {
     check('grade rendered', (await page.textContent('#scoreGrade')).trim().length > 0);
     check('checks rendered', (await page.locator('#checksList .check').count()) >= 6,
       `count=${await page.locator('#checksList .check').count()}`);
+    /* Build identity and finding references, on the page. Both are only
+       useful if a person can read them off the screen and quote them, which
+       is the one thing a unit test cannot check. */
+    check('the header names the build rather than a hardcoded version',
+      (await page.textContent('#buildLabel')).trim().length > 0
+      && (await page.textContent('#buildLabel')).includes(pkg.version),
+      await page.textContent('#buildLabel'));
+
+    const firstRef = await page.locator('#checksList .check .check-ref').first().textContent();
+    check('every finding shows the reference a DFM response is written against',
+      (await page.locator('#checksList .check .check-ref').count())
+        === (await page.locator('#checksList .check').count())
+      && /^[A-Z0-9-]+$/.test(firstRef.trim()),
+      `first=${firstRef}, refs=${await page.locator('#checksList .check .check-ref').count()}`);
+
+    /*
+     * The findings package, end to end. Unit tests prove the archive is
+     * readable and the manifest correct; what only a browser can show is that
+     * the button produces a download at all — jsPDF rendering to bytes,
+     * CompressionStream, and the anchor click are all browser machinery.
+     */
+    const pkgDownload = page.waitForEvent('download', { timeout: 60000 });
+    await page.click('#packageBtn');
+    const pkgFile = await pkgDownload;
+    const pkgPath = join(FIXTURES, 'downloaded-package.zip');
+    await pkgFile.saveAs(pkgPath);
+    const names = execFileSync('zipinfo', ['-1', pkgPath], { encoding: 'utf8' })
+      .split('\n').filter(Boolean).sort();
+    check('the findings package downloads, and holds all three files',
+      /\.zip$/.test(pkgFile.suggestedFilename())
+      && names.includes('MANIFEST.txt') && names.includes('report.pdf')
+      && names.includes('findings.json')
+      && names.some((n) => n.startsWith('geometry/')),
+      `${pkgFile.suggestedFilename()}: ${names.join(', ')}`);
+
+    const manifest = execFileSync('unzip', ['-p', pkgPath, 'MANIFEST.txt'], { encoding: 'utf8' });
+    check('the packaged manifest names the build and the geometry it measured',
+      manifest.includes(pkg.version) && manifest.includes('part.stl')
+      && /crc32 [0-9a-f]{8}/.test(manifest),
+      manifest.split('\n').slice(0, 6).join(' | '));
+
     check('score strips match checks',
       (await page.locator('#scoreBars .score-strip').count()) === (await page.locator('#checksList .check').count()));
     check('run counter incremented', (await page.textContent('#runCount')) === '001');
@@ -248,6 +293,106 @@ async function main() {
       check(`heat mode ${mode} applies with legend`, active === 'true' && legendVisible === 1);
     }
     await page.click('.heat-btn[data-heat="flat"]');
+
+    /*
+     * ── the camera, which had no coverage at all ───────────────────────────
+     *
+     * The pose arithmetic is unit-tested; what only a browser can show is that
+     * the events still reach it. Compared by pixels rather than by reading the
+     * camera through a debug hook: the question is whether the view moved, and
+     * the rendered frame is the only honest answer to that. It is also the
+     * regression the camera refactor most needed watching for.
+     */
+    {
+      const viewer = page.locator('#viewer');
+      const vbox = await viewer.boundingBox();
+      const shot = async () => (await viewer.screenshot()).toString('base64');
+
+      await page.click('.view-btn[data-view="iso"]');
+      const iso = await shot();
+
+      await page.click('.view-btn[data-view="top"]');
+      const top = await shot();
+      check('a named view moves the camera', top !== iso,
+        `iso and top rendered ${top === iso ? 'identically' : 'differently'}`);
+      check('and marks itself as the current view',
+        (await page.getAttribute('.view-btn[data-view="top"]', 'aria-pressed')) === 'true'
+        && (await page.textContent('#viewMode')) === 'top');
+
+      /* Left-drag orbits, and orbiting is no longer any named view. */
+      await page.mouse.move(vbox.x + vbox.width / 2, vbox.y + vbox.height / 2);
+      await page.mouse.down();
+      await page.mouse.move(vbox.x + vbox.width / 2 + 90, vbox.y + vbox.height / 2 + 40, { steps: 8 });
+      await page.mouse.up();
+      const orbited = await shot();
+      check('dragging orbits the part', orbited !== top);
+      check('and the view is reported as free', (await page.textContent('#viewMode')) === 'free');
+
+      /* The wheel zooms. */
+      await page.mouse.move(vbox.x + vbox.width / 2, vbox.y + vbox.height / 2);
+      await page.mouse.wheel(0, -600);
+      check('the wheel zooms', (await shot()) !== orbited);
+
+      /* And F frames the part again, which is the escape hatch from all of it. */
+      await page.keyboard.press('f');
+      check('F reframes the part', (await shot()) !== orbited);
+      await page.click('.view-btn[data-view="iso"]');
+    }
+
+    /*
+     * ── the 6-DoF route, as far as it can be taken without hardware ────────
+     *
+     * The roadmap left the transport open between WebHID and 3Dconnexion's
+     * own local service, and named the deciding fact: whether `navigator.hid`
+     * exists on a `file://` page, which is how this tool is normally opened.
+     * It is measured here rather than remembered — a Chrome release could
+     * take it away, and this says so instead of the feature quietly dying.
+     */
+    {
+      const hid = await page.evaluate(() => ({
+        api: typeof navigator.hid,
+        secure: window.isSecureContext,
+      }));
+      check('WebHID is reachable from the page as served', hid.api === 'object' && hid.secure,
+        JSON.stringify(hid));
+
+      const filePage = await browser.newPage({ viewport: { width: 800, height: 600 } });
+      await filePage.goto(`file://${join(ROOT, 'dfm-tool.html')}`, { waitUntil: 'load' });
+      const fileHid = await filePage.evaluate(() => ({
+        api: typeof navigator.hid,
+        secure: window.isSecureContext,
+        button: !document.getElementById('spaceMouseBtn').hidden,
+      }));
+      /* The finding that settled the transport choice: Chromium treats a file
+         URL as potentially trustworthy, so WebHID is available there. */
+      check('and from a file:// page, which is how the tool is opened',
+        fileHid.api === 'object' && fileHid.secure, JSON.stringify(fileHid));
+      check('so the device button is offered rather than hidden',
+        fileHid.button === true, JSON.stringify(fileHid));
+
+      /* Closed before the next page opens rather than at the end of the
+         block: each of these loads the whole tool, and the tool builds a WebGL
+         context. Three of those alive at once on a CI runner with software
+         GL is a lot to ask for a check that reads one boolean. */
+      await filePage.close();
+
+      /* And where the API is absent it degrades to nothing: no button, no
+         error, no mention. Deleted rather than mocked, because that is what a
+         browser without WebHID actually presents. */
+      const noHid = await browser.newPage({ viewport: { width: 800, height: 600 } });
+      await noHid.addInitScript(() => {
+        Object.defineProperty(navigator, 'hid', { get: () => undefined });
+      });
+      await noHid.goto(url, { waitUntil: 'load' });
+      const absent = await noHid.evaluate(() => ({
+        button: document.getElementById('spaceMouseBtn').hidden,
+        mentions: document.body.innerText.match(/SpaceMouse|6DOF|6-DoF/gi) || [],
+      }));
+      check('with no WebHID the feature leaves no trace',
+        absent.button === true && absent.mentions.length === 0,
+        JSON.stringify(absent));
+      await noHid.close();
+    }
 
     // ── gate picking drives the flow check ────────────────────────────────
     await page.click('#pickGateBtn');

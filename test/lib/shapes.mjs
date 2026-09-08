@@ -347,8 +347,15 @@ export function subdivideSoup(soup, times = 1) {
 export function internalLedgeCup(opts = {}) {
   const {
     rOuter = 20, wall = 2, height = 20, seg = 96,
-    ledgeZ = 8, ledgeH = 4, ledgeD = 2,
+    ledgeH = 4, ledgeD = 2,
   } = opts;
+  /* One ledge by default; `ledgeZ` may be a list, which puts several of them
+     at different heights. That is what a test needs to show that adding a
+     feature does not renumber the others: the regions are sorted by area, so
+     a second ledge used to shift every reference by one. Listed top-down,
+     because the profile is walked downward from the cavity ceiling. */
+  const ledges = (Array.isArray(opts.ledgeZ) ? opts.ledgeZ : [opts.ledgeZ != null ? opts.ledgeZ : 8])
+    .slice().sort((a, b) => b - a);
   const rInner = rOuter - wall;
   const hCeil = height - wall;
   const rLedge = rInner - ledgeD;
@@ -360,11 +367,15 @@ export function internalLedgeCup(opts = {}) {
     [0, height],                  // across the top
     [0, hCeil],                   // down the axis (no surface; skipped)
     [rInner, hCeil],              // cavity ceiling, outward from the axis
-    [rInner, ledgeZ + ledgeH],    // down the inner wall to the ledge
-    [rLedge, ledgeZ + ledgeH],    // ledge top
-    [rLedge, ledgeZ],             // ledge inner face
-    [rInner, ledgeZ],             // ledge underside
   ];
+  for (const z of ledges) {
+    profile.push(
+      [rInner, z + ledgeH],       // down the inner wall to this ledge
+      [rLedge, z + ledgeH],       // ledge top
+      [rLedge, z],                // ledge inner face
+      [rInner, z],                // ledge underside
+    );
+  }
   return revolveProfileRZ(profile, seg);
 }
 

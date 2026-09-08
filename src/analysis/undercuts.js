@@ -1,3 +1,5 @@
+import { featureId, FEATURE_KINDS } from '../rules/findings.js';
+
 /*
  * Cluster undercut triangles into connected tooling regions and derive the
  * slide or lifter action each one implies.
@@ -167,6 +169,11 @@ export function clusterUndercuts(triCentroid, triAreas, triFNorm, triUndercut, t
     ];
 
     regions.push({
+      /* Stable across runs, and derived from where the feature is rather than
+         from where it landed in this list — regions are sorted by area, so a
+         rib added on the far side of the part used to renumber every one of
+         them. See src/rules/findings.js. */
+      id: featureId(patch.type === 1 ? FEATURE_KINDS.slide : FEATURE_KINDS.lifter, patch.centroid),
       type: patch.type,
       triCount: patch.triCount,
       area: patch.area,

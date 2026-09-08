@@ -16,6 +16,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -37,6 +38,20 @@ const OUT = path.join(ROOT, 'dfm-tool.html');
  * network-dependent and says so.
  */
 const VENDOR = process.argv.includes('--vendor');
+
+/*
+ * `node build.js --stamp v2.0.1` records a release name in the output.
+ *
+ * Off by default, and that is the point: the committed `dfm-tool.html` must be
+ * reproducible from the committed sources or `verify:build` is meaningless, so
+ * nothing about it may depend on where or when it was built. A release build
+ * is the one place that is not true — it is cut from a tag, and the tag is
+ * worth carrying — so it is opt-in and everything else stays deterministic.
+ */
+const STAMP_AT = process.argv.indexOf('--stamp');
+const STAMP = STAMP_AT >= 0 ? (process.argv[STAMP_AT + 1] || '') : '';
+if (STAMP_AT >= 0 && !STAMP) fail('--stamp needs a value, e.g. --stamp v2.0.1');
+if (STAMP && !/^[\w.+-]{1,40}$/.test(STAMP)) fail(`--stamp "${STAMP}" is not a plain version-like string`);
 const VENDOR_FILES = {
   three: path.join(ROOT, 'node_modules/three/build/three.min.js'),
   jspdf: path.join(ROOT, 'node_modules/jspdf/dist/jspdf.umd.min.js'),
@@ -187,9 +202,45 @@ const logo = read(path.join(SRC, 'assets/logo.png.b64')).trim();
    refuse blob workers on file:// (Chrome) fall back to main-thread analysis,
    which is why the worker's module graph is also part of the main bundle. */
 const workerCode = bundle(path.join(SRC, 'worker/analysis-worker.js'), 'worker');
-const appCode = bundle(path.join(SRC, 'app/main.js'), 'app');
+let appCode = bundle(path.join(SRC, 'app/main.js'), 'app');
 
 let html = read(path.join(SRC, 'index.html'));
+
+/*
+ * Build identity: the version from package.json, and a fingerprint of the
+ * sources this build read.
+ *
+ * The fingerprint is over the *inputs*, before any substitution, and that is
+ * forced rather than chosen: the value ends up inside `appCode`, so hashing
+ * the output would be circular. Over the inputs it is deterministic, which is
+ * what lets `verify:build` keep working — see src/core/build-info.js for why
+ * this is a content hash rather than the commit SHA the roadmap asked for.
+ *
+ * Neither `--vendor` nor `--stamp` is part of it, and that follows from what
+ * the fingerprint is *for*: compare.js asks it whether two exports were scored
+ * by the same rules. Vendoring inlines three.js and jsPDF — a viewer and a PDF
+ * renderer, neither of which can move a threshold — and a release tag is not a
+ * source at all. Two builds of one source tree should agree here whatever
+ * options produced them; which artifact someone is holding is what the banner
+ * in the file is for.
+ */
+const VERSION = JSON.parse(read(path.join(ROOT, 'package.json'))).version;
+const FINGERPRINT = crypto.createHash('sha256')
+  .update(`v=${VERSION}\n`)
+  .update(css).update(appCode).update(workerCode).update(html).update(logo)
+  .digest('hex').slice(0, 12);
+
+/* Same shape as the VENDORED flag in export/pdf.js: a token beside a literal,
+   so the source runs unbuilt and reports itself as unbuilt. */
+for (const [token, value] of [
+  ["/*@VERSION@*/'dev'", JSON.stringify(VERSION)],
+  ["/*@FINGERPRINT@*/'source'", JSON.stringify(FINGERPRINT)],
+  ["/*@STAMP@*/''", JSON.stringify(STAMP)],
+]) {
+  if (!appCode.includes(token)) fail(`slot ${token} not found in src/core/build-info.js`);
+  appCode = appCode.replace(token, () => value);
+}
+console.log(`  build: v${VERSION}${STAMP ? ` ${STAMP}` : ''} (${FINGERPRINT})`);
 
 /*
  * Licence banner, injected into the output rather than kept in src/index.html.
@@ -202,9 +253,16 @@ let html = read(path.join(SRC, 'index.html'));
  * It goes *after* the doctype, never before: a comment ahead of the doctype
  * puts some browsers into quirks mode, which would quietly break the layout.
  */
-function licenceBanner(vendored) {
+function licenceBanner(vendored, version, fingerprint, stamp) {
   const lines = [
     'OnlyCat DFM — injection moulding design-for-manufacture analyser',
+    '',
+    /* The file gets handed on and argued about; a recipient has to be able to
+       say which one they are holding. The fingerprint is over the sources
+       this was built from, so two copies that agree here were produced by the
+       same rules. */
+    `Version ${version}${stamp ? `   Release ${stamp}` : ''}`,
+    `Source fingerprint ${fingerprint}${vendored ? '   (offline build)' : ''}`,
     '',
     'Copyright (c) 2026 OnlyCat. Released under the MIT License.',
     'Full terms: the LICENSE file in the source repository, or',
@@ -292,7 +350,7 @@ if (VENDOR) {
 /* After the doctype, before <html>. */
 const DOCTYPE = /^\s*<!doctype html>/i;
 if (!DOCTYPE.test(html)) fail('src/index.html must begin with <!DOCTYPE html> so the licence banner can follow it');
-html = html.replace(DOCTYPE, (m) => `${m}\n${licenceBanner(VENDOR)}`);
+html = html.replace(DOCTYPE, (m) => `${m}\n${licenceBanner(VENDOR, VERSION, FINGERPRINT, STAMP)}`);
 
 fs.writeFileSync(OUT, html);
 

@@ -1,3 +1,6 @@
+import { createCameraState, quatFromThetaPhi } from './camera-state.js';
+import { applyRates, NAVIGATOR_DEFAULTS } from './navigator.js';
+
 /*
  * CAD-style camera controls.
  *
@@ -13,19 +16,41 @@
  *   R                reset to iso
  *
  * Written against the global THREE from the CDN build.
+ *
+ * The pose itself lives in camera-state.js, which knows nothing about three.js
+ * or the DOM: an orientation quaternion, a target and a distance, replacing the
+ * theta/phi/radius pair this file used to carry. What is left here is event
+ * plumbing — reading pixels off events, unprojecting a cursor, and copying the
+ * result onto a THREE camera.
+ *
+ * The move was made for the 6-DoF device work, which needs a camera that can
+ * express roll, but it pays for itself immediately: the pose arithmetic now has
+ * tests, where before its correctness lived entirely in whether an orbit felt
+ * right. Every constant below is the one that was here before, and the eye
+ * positions the new state produces match the old formula to one part in 10¹³.
  */
+
+/* Radians of orbit per pixel dragged. Unchanged, and the feel depends on it. */
+const ORBIT_PER_PX = 0.008;
+
 export function createCameraControls(viewerEl, camera, getMesh, onViewChange) {
-  let theta = Math.PI / 4;
-  let phi = Math.PI / 3;
-  let radius = 200;
-  let partDiag = 100;
-  const target = new THREE.Vector3();
+  const state = createCameraState({
+    orientation: quatFromThetaPhi(Math.PI / 4, Math.PI / 3),
+    distance: 200,
+    partSize: 100,
+  });
 
   function update() {
-    camera.position.x = target.x + radius * Math.sin(phi) * Math.cos(theta);
-    camera.position.y = target.y + radius * Math.cos(phi);
-    camera.position.z = target.z + radius * Math.sin(phi) * Math.sin(theta);
-    camera.lookAt(target);
+    const eye = state.eye;
+    camera.position.set(eye[0], eye[1], eye[2]);
+    /*
+     * The orientation is copied rather than recovered with `lookAt`. lookAt
+     * rebuilds it from the camera's `up`, which silently discards any roll —
+     * fine while only a mouse could drive this, and wrong the moment a device
+     * can.
+     */
+    const q = state.orientation;
+    camera.quaternion.set(q[0], q[1], q[2], q[3]);
   }
 
   let mode = null;              // 'orbit' | 'pan' | 'pinch' | null
@@ -36,40 +61,41 @@ export function createCameraControls(viewerEl, camera, getMesh, onViewChange) {
 
   /* Convert screen pixels to world units at the target's depth. */
   function panBy(dxScreen, dyScreen) {
-    const fov = camera.fov * Math.PI / 180;
-    const worldPerPx = (2 * Math.tan(fov / 2) * radius) / Math.max(1, viewerEl.clientHeight);
-    const forward = new THREE.Vector3();
-    camera.getWorldDirection(forward);
-    const right = new THREE.Vector3().crossVectors(forward, camera.up).normalize();
-    const camUp = new THREE.Vector3().crossVectors(right, forward).normalize();
-    target.addScaledVector(right, -dxScreen * worldPerPx);
-    target.addScaledVector(camUp, dyScreen * worldPerPx);
+    const worldPerPx = state.worldPerPixel(camera.fov * Math.PI / 180, viewerEl.clientHeight);
+    state.pan(-dxScreen * worldPerPx, dyScreen * worldPerPx);
+  }
+
+  /*
+   * The world point under a screen position, at the target's depth.
+   *
+   * Where the cursor ray crosses the plane through the target square to the
+   * view direction — which is the depth a zoom should hold still, since it is
+   * the depth the part is at.
+   */
+  function planePointAt(anchorPx) {
+    const rect = viewerEl.getBoundingClientRect();
+    const ndc = new THREE.Vector3(
+      ((anchorPx.x - rect.left) / rect.width) * 2 - 1,
+      -((anchorPx.y - rect.top) / rect.height) * 2 + 1,
+      0.5,
+    );
+    ndc.unproject(camera);
+    const rayDir = ndc.sub(camera.position).normalize();
+    const viewDir = new THREE.Vector3();
+    camera.getWorldDirection(viewDir);
+    const t = state.target;
+    const camToTarget = new THREE.Vector3(t[0], t[1], t[2]).sub(camera.position);
+    const denom = rayDir.dot(viewDir);
+    if (Math.abs(denom) <= 1e-6) return null;
+    const tDist = camToTarget.dot(viewDir) / denom;
+    const p = camera.position.clone().addScaledVector(rayDir, tDist);
+    return [p.x, p.y, p.z];
   }
 
   /* factor < 1 zooms in. anchorPx keeps the point under the cursor roughly
      fixed by sliding the target along the cursor ray. */
   function zoomBy(factor, anchorPx) {
-    const newRadius = Math.max(partDiag * 0.05, Math.min(partDiag * 20, radius * factor));
-    if (anchorPx) {
-      const rect = viewerEl.getBoundingClientRect();
-      const ndc = new THREE.Vector3(
-        ((anchorPx.x - rect.left) / rect.width) * 2 - 1,
-        -((anchorPx.y - rect.top) / rect.height) * 2 + 1,
-        0.5,
-      );
-      ndc.unproject(camera);
-      const rayDir = ndc.sub(camera.position).normalize();
-      const viewDir = new THREE.Vector3();
-      camera.getWorldDirection(viewDir);
-      const camToTarget = new THREE.Vector3().subVectors(target, camera.position);
-      const denom = rayDir.dot(viewDir);
-      if (Math.abs(denom) > 1e-6) {
-        const tDist = camToTarget.dot(viewDir) / denom;
-        const cursorWorld = camera.position.clone().addScaledVector(rayDir, tDist);
-        target.lerp(cursorWorld, 1 - newRadius / radius);
-      }
-    }
-    radius = newRadius;
+    state.zoomToward(factor, anchorPx ? planePointAt(anchorPx) : null);
   }
 
   function pickPointAt(px, py) {
@@ -96,9 +122,9 @@ export function createCameraControls(viewerEl, camera, getMesh, onViewChange) {
     g.boundingBox.getCenter(center);
     g.boundingBox.getSize(size);
     const maxDim = Math.max(size.x, size.y, size.z);
-    target.copy(center);
-    radius = maxDim * 2.2;
-    partDiag = Math.max(maxDim, 1);
+    state.setPartSize(Math.max(maxDim, 1));
+    state.setTarget([center.x, center.y, center.z]);
+    state.setDistance(maxDim * 2.2);
     update();
   }
 
@@ -122,8 +148,7 @@ export function createCameraControls(viewerEl, camera, getMesh, onViewChange) {
     dragDist += Math.abs(dx) + Math.abs(dy);
     lastX = e.clientX; lastY = e.clientY;
     if (mode === 'orbit') {
-      theta -= dx * 0.008;
-      phi = Math.max(0.05, Math.min(Math.PI - 0.05, phi - dy * 0.008));
+      state.orbit(dx * ORBIT_PER_PX, -dy * ORBIT_PER_PX);
       if (onViewChange) onViewChange('free');
     } else if (mode === 'pan') {
       panBy(dx, dy);
@@ -145,7 +170,7 @@ export function createCameraControls(viewerEl, camera, getMesh, onViewChange) {
 
   viewerEl.addEventListener('dblclick', (e) => {
     const p = pickPointAt(e.clientX, e.clientY);
-    if (p) { target.copy(p); update(); } else { frameToFit(); }
+    if (p) { state.setTarget([p.x, p.y, p.z]); update(); } else { frameToFit(); }
   });
 
   // ── touch ────────────────────────────────────────────────────────────────
@@ -158,7 +183,7 @@ export function createCameraControls(viewerEl, camera, getMesh, onViewChange) {
       touch1 = { x: e.touches[0].clientX, y: e.touches[0].clientY };
       touch2 = { x: e.touches[1].clientX, y: e.touches[1].clientY };
       pinchStartDist = Math.hypot(touch2.x - touch1.x, touch2.y - touch1.y);
-      pinchStartRadius = radius;
+      pinchStartRadius = state.distance;
       mode = 'pinch';
     }
   }, { passive: true });
@@ -169,15 +194,14 @@ export function createCameraControls(viewerEl, camera, getMesh, onViewChange) {
       const x = e.touches[0].clientX, y = e.touches[0].clientY;
       const dx = x - lastX, dy = y - lastY;
       dragDist += Math.abs(dx) + Math.abs(dy);
-      theta -= dx * 0.008;
-      phi = Math.max(0.05, Math.min(Math.PI - 0.05, phi - dy * 0.008));
+      state.orbit(dx * ORBIT_PER_PX, -dy * ORBIT_PER_PX);
       lastX = x; lastY = y;
       update();
     } else if (mode === 'pinch' && e.touches.length === 2) {
       const ax = e.touches[0].clientX, ay = e.touches[0].clientY;
       const bx = e.touches[1].clientX, by = e.touches[1].clientY;
       const dist = Math.hypot(bx - ax, by - ay);
-      radius = Math.max(partDiag * 0.05, Math.min(partDiag * 20, pinchStartRadius * (pinchStartDist / Math.max(dist, 0.001))));
+      state.setDistance(pinchStartRadius * (pinchStartDist / Math.max(dist, 0.001)));
       panBy((ax + bx) / 2 - (touch1.x + touch2.x) / 2, (ay + by) / 2 - (touch1.y + touch2.y) / 2);
       touch1 = { x: ax, y: ay }; touch2 = { x: bx, y: by };
       update();
@@ -190,18 +214,40 @@ export function createCameraControls(viewerEl, camera, getMesh, onViewChange) {
 
   return {
     setTarget(t, r) {
-      target.copy(t);
-      radius = r;
-      /* radius is set to ~2.2 × maxDim by callers, so this recovers a usable
-         scale reference for the zoom clamps. */
-      partDiag = r * 0.45;
+      state.setTarget([t.x, t.y, t.z]);
+      /* partSize first: the distance is clamped against it, and setting them
+         the other way round clamps the new distance to the old part's scale.
+         `r` is ~2.2 × maxDim by every caller, so this recovers the size. */
+      state.setPartSize(r * 0.45);
+      state.setDistance(r);
       update();
     },
-    setAngles(theta_, phi_) { theta = theta_; phi = phi_; update(); },
+    setAngles(theta_, phi_) { state.setAngles(theta_, phi_); update(); },
     frame: frameToFit,
     zoomIn() { zoomBy(0.8, null); update(); },
     zoomOut() { zoomBy(1.25, null); update(); },
     dragDistance: () => dragDist,
     pickPointAt,
+
+    /*
+     * A 6-DoF sample, integrated over `dt` seconds.
+     *
+     * The seam the device work plugs into, and the seam a test drives: nothing
+     * about a physical puck is testable in CI, so the transport stays outside
+     * and what arrives here is six numbers. See navigator.js for what happens
+     * to them.
+     */
+    applyRates(sample, dt, settings = NAVIGATOR_DEFAULTS) {
+      const moved = applyRates(state, sample, dt, settings);
+      if (moved) {
+        if (onViewChange) onViewChange('free');
+        update();
+      }
+      return moved;
+    },
+
+    /* For tests and for anything that needs to read the pose without going
+       through three.js. */
+    state,
   };
 }

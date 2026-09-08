@@ -1,4 +1,6 @@
 import { formatPullAxis } from '../analysis/stats.js';
+import { buildIdentity } from '../core/build-info.js';
+import { checkRef } from '../rules/findings.js';
 
 /*
  * JSON export — the machine-readable counterpart to the PDF.
@@ -9,6 +11,11 @@ import { formatPullAxis } from '../analysis/stats.js';
 export function buildExportJSON({ sessionId, dfm, analysis, twoShot, interface: iface, registration, fpcRegion, validation, shot, cycle, cost, tooling, settings }) {
   const out = {
     tool: 'OnlyCat DFM',
+    /* Which build made this claim. Thresholds move between versions, so two
+       exports of the same geometry that disagree are only interpretable if
+       each says what produced it — and compare.js reads this to caveat a
+       comparison that spans a rules change. */
+    build: buildIdentity(),
     session: sessionId,
     timestamp: new Date().toISOString(),
     mode: settings.analysisMode,
@@ -26,6 +33,10 @@ export function buildExportJSON({ sessionId, dfm, analysis, twoShot, interface: 
     input: dfm.input,
     checks: dfm.result.checks.map((c) => ({
       key: c.key,
+      /* The same key, upper-cased: how the finding is printed on screen and in
+         the PDF, so a response quoting "WALL" can be matched back to a record
+         without knowing that the field is called `key`. */
+      ref: checkRef(c.key),
       name: c.name,
       status: c.status,
       detail: c.detail,
@@ -305,6 +316,10 @@ function meshSummary(a) {
     } : null,
     wall_transitions: (a.wallTransitions || []).slice(0, 50),
     undercut_regions: (a.undercutRegions || []).filter((r) => r.area > 1).map((r) => ({
+      /* The reference a DFM response can be written against. Derived from
+         where the feature is, not from its position in this list — see
+         src/rules/findings.js. */
+      id: r.id,
       type: r.type === 1 ? 'slide' : 'lifter',
       area_mm2: r.area,
       tri_count: r.triCount,

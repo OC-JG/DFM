@@ -90,8 +90,8 @@ in — those ran roughly to estimate, which is the only reason to trust these.
 | R2.3 | The Inventor loop under test | ~~4–6 d~~ done | one part blocked upstream |
 | R2.4 | Numbers that get quoted | ~~1 wk~~ done | — |
 | R2.5 | Two-shot and FPC earn their weights | ~~1–2 wk~~ two of three done | third part blocked on datasheets |
-| R2.6 | Findings that survive leaving the tool | 4–6 d | Independent |
-| R2.7 | Navigation for people who navigate for a living | 1–2 wk | Independent |
+| R2.6 | Findings that survive leaving the tool | ~~4–6 d~~ done | — |
+| R2.7 | Navigation for people who navigate for a living | ~~1–2 wk~~ done, untested on hardware | — |
 | — | Release discipline | 2–3 d | Independent, do first |
 
 ### R2.1 — Trust the STEP path *(done)*
@@ -447,91 +447,135 @@ against a STEP fixture whose answer is 1.90 mm by construction. `ts_thermal`
 carries a weight and sixteen cited `vicatC` values — **not met**, blocked as
 above.
 
-### R2.6 — Findings that survive leaving the tool
+### R2.6 — Findings that survive leaving the tool *(done)*
 
-**Why now.** The tool's output is not the end of the process — it goes to a
-factory, comes back as a DFM report, and gets argued about. Everything in gap 4
-is cheap to fix and compounds with every export that already exists.
+**Why it was needed.** The tool's output is not the end of the process — it
+goes to a factory, comes back as a DFM report, and gets argued about. None of
+it could survive that trip.
 
-**What ships.**
+**What shipped.**
 
-- **Stable finding identifiers.** A finding gets an id derived from its check key
-  and the geometry it concerns, stable across runs of the same part. That makes
-  "we accept point 4, reject point 7" mean something months later, and it is
-  what lets a supplier's DFM response be reconciled against the tool's own
-  findings rather than re-read by hand.
-- **Build identity in every artifact.** `tool_version` and the source commit in
-  the JSON export, and the same in `dfm-tool.html`'s banner, which currently
-  carries a licence and no version at all. `build.js` already writes that banner
-  and can read `package.json` and `git rev-parse`.
-- **A rules-version caveat in `compare.js`.** Once exports carry a version, add
-  the caveat the comparison is currently missing: the rules changed between these
-  two runs, so some of this movement is the tool, not the part. It belongs
-  alongside the three caveats at `compare.js:51-59`.
-- **A findings package export.** One archive: the PDF, the JSON, and the STEP
-  that was measured. This is what actually gets emailed to a factory, and
-  assembling it by hand is where the wrong revision gets attached.
+- **Build identity**, from the sources rather than from the commit. `tool_version`
+  and a fingerprint in the JSON export, the PDF footer, the header on screen
+  and the banner in the file. `--stamp v2.0.1` adds a release name for a
+  tagged build.
+- **Finding references.** A check is quoted by its key, upper-cased, printed
+  on the card and in the PDF. Located features — undercut regions, wall
+  transitions — carry a reference derived from where they are, on a 2 mm grid.
+- **The rules-version caveat in `compare.js`**, in three states: a version
+  change, a source change at the same version, and a record from before builds
+  were named.
+- **The findings package.** `src/export/zip.js` and `src/export/package.js`:
+  the report, the record and the measured file in one archive, with a manifest
+  naming the build and a CRC32 per member. Read back by `unzip` in the tests,
+  not by its own reader.
 
-**Exit criteria.** Two runs of the same part produce the same finding ids. A JSON
-export names the build that produced it. Comparing across a rules change says so.
+**Found while doing the work.**
 
-### R2.7 — Navigation for people who navigate for a living
+- *The source commit cannot go in the artifact.* `dfm-tool.html` is committed
+  and `verify:build` fails if a rebuild differs from it, so a build stamping
+  `git rev-parse HEAD` would write the *parent* commit's hash into the file
+  being committed — no commit contains its own hash — and the check would fail
+  on every commit for ever. A hash of the sources is reproducible, and answers
+  the question a commit SHA was standing in for more directly: two commits that
+  touch only the README share a fingerprint, and should.
 
-**Why now.** The people this tool is for spend their day in Inventor with a
-SpaceMouse under their left hand, and then arrive here and have to orbit a part
-with a mouse drag. It is the one part of the tool that feels less capable than
-the CAD package it sits beside, and the fix is bounded.
+- *A stable id for a whole-part check would be a second identifier for
+  something already identified.* A run emits at most one finding per key. What
+  was missing was printing the key, not deriving something from it. The work
+  was entirely in the *located* findings, which had no identity at all.
 
-**What ships.**
+- *Assembling the manifest needs the archive built twice.* The manifest quotes
+  each member's size and checksum, and cannot quote its own — so the members
+  are zipped once to measure them, and again with the manifest in front. Cheap,
+  and the alternative is a manifest that describes something else.
 
-- **6-DoF input from a 3Dconnexion device.** Two routes, and the choice should
-  be made by testing rather than argument. WebHID (`navigator.hid`) reads the
-  device directly, needs a user gesture to grant access, and is Chromium-only —
-  and whether it is available at all from a `file://` origin, which is how this
-  tool is opened, is the first thing to establish, not assume. The alternative
-  is 3Dconnexion's own local service, which their web samples talk to over a
-  localhost socket. That second route is the same shape as the Inventor bridge
-  this repo already has (`src/app/bridge.js`) — a local service, a localhost
-  origin, an availability chip in the header — and a SpaceMouse user is very
-  likely to be the same person already running InventorMCP on that machine.
-- **A camera that can express what the device sends.** This is the actual work,
-  and it is worth being clear that it is not a shim. `src/app/camera.js` holds
-  orientation as `theta`, `phi` and `radius` around a target — 2 DoF of
-  rotation with world-up implied, which is why there is no roll. A puck sends
-  three translation and three rotation rates at once. Taking them properly means
-  the camera state becoming a quaternion plus a target plus a distance, with the
-  existing mouse, touch and keyboard paths rewritten onto it. Doing that first,
-  and shipping it with no device attached, de-risks the rest: if the orbit still
-  feels right afterwards, the hard part is done.
-- **Rate control, not position control, with a dead zone.** A SpaceMouse
-  displaces a few millimetres and springs back; the axis value is a velocity, so
-  it integrates per animation frame with a dead zone around centre and a
-  configurable sensitivity per axis. Getting this wrong is what makes 6-DoF
-  navigation feel seasick, and it is tuning, not architecture.
-- **The device's buttons on the actions that already exist.** Fit, top, front,
-  right and iso are already implemented behind `setView` and the `F`/`R` keys
-  (`src/app/camera.js:1-16`); the buttons should reach the same functions rather
-  than grow their own.
-- **An input source the tests can drive.** Nothing about a physical puck is
-  testable in CI, so the device layer should sit behind a small interface that
-  the smoke test can feed synthetic axis samples through — the same trick as the
-  bridge fixture in R2.3. That is what stops this becoming a permanently
-  unverified corner of the viewer.
-- **A reduced-motion answer.** The tool respects `prefers-reduced-motion`
-  elsewhere. Continuous 6-DoF drift is exactly the kind of motion that setting
-  is about, so decide deliberately: damp it, or leave the device to override it
-  on the grounds that the user is driving every frame themselves.
+- *A hostile filename is dropped, not escaped.* A member called
+  `../../etc/passwd` mangles to a safe but absurd `_.._etc_passwd`; the file's
+  name is `passwd`, and that is what belongs in the archive.
 
-**Exit criteria.** The camera refactor lands and passes the existing smoke test
-with no device present. Synthetic axis samples produce the expected camera pose
-in a test. With a real device, a part can be inspected without touching the
-mouse, and a user with no device notices no change at all.
+- *The unit suite is 17 seconds, and the two and a half minutes I measured was
+  a bug.* Eight of the package tests were `async` under a synchronous `it`, so
+  they reported themselves as passes before running and their work carried on
+  after the summary was printed — which held the process open long enough for
+  CI to shoot the runner, and which I first mistook for the suite being slow.
+  The harness now awaits, `test/contract.mjs` checks statically that every call
+  site does too, and one of those tests turned out to allocate four gigabytes
+  in the course of refusing four gigabytes. Duplicated fixture analyses are
+  memoised as well, which is worth having but was not the problem.
 
-**Risk.** Chromium-only, whichever route is chosen, so this is an enhancement
-that must degrade to silence — no error, no chip, nothing — on a browser or
-machine without the device. And the camera refactor touches the most
-hand-tuned code in the repo; the mouse and touch feel is the regression to watch
-for, and it has no automated coverage today.
+**Exit criteria.** Two runs of the same part produce the same finding ids —
+met, and asserted across a run that adds a feature, which is what used to
+renumber them. A JSON export names the build that produced it — met, from one
+place, with the PDF and the on-screen header reading the same value. Comparing
+across a rules change says so — met, in three states.
+
+### R2.7 — Navigation for people who navigate for a living *(done, untested on hardware)*
+
+**Why it was needed.** The people this tool is for spend their day in Inventor
+with a SpaceMouse under their left hand, and then arrive here and orbit a part
+with a mouse drag.
+
+**What shipped.**
+
+- **A camera that can express six degrees of freedom.** `src/app/camera-state.js`
+  — an orientation quaternion, a target and a distance, with no reference to
+  three.js and none to the DOM. Every input path is rewritten onto it, and the
+  eye positions match the old theta/phi formula to one part in 10¹³.
+- **Rate control with a dead zone.** `src/app/navigator.js`. A sample is
+  integrated over the frame it arrived in, quadratically shaped, rescaled from
+  the edge of the dead zone, and capped so a backgrounded tab cannot fling the
+  camera on its first frame back.
+- **The device, read from its own report descriptor.** `src/app/spacemouse.js`.
+  WebHID, with the axis layout taken from the descriptor rather than a table of
+  byte offsets per model.
+- **A source a test can drive.** `read()` returning a sample or null is the
+  whole interface, so everything above the transport is exercised in CI with a
+  synthetic source and a synthetic clock — the same trick as the bridge fixture
+  in R2.3.
+- **Coverage for the camera, which had none.** The pose arithmetic is
+  unit-tested against the arithmetic it replaced; the browser test drives a
+  drag, a wheel, the named views and `F`, and compares rendered frames.
+
+**Found while doing the work.**
+
+- *WebHID is available on `file://`.* This was the open question the roadmap
+  said to settle before choosing a transport, and the expectation was that it
+  would not be — which would have forced the 3Dconnexion local-service route.
+  Chromium treats a file URL as a potentially trustworthy origin, so
+  `isSecureContext` is true and `navigator.hid` is present. Measured in the
+  browser test rather than remembered, because a Chrome release could change
+  it.
+
+- *A quaternion camera rolls unless it is told not to.* Yaw about a world axis
+  pre-multiplies and pitch about the camera's own axis post-multiplies; doing
+  both on one side gives a camera that slowly tilts as you circle a part, and
+  after a hundred drags it is visibly crooked. The theta/phi pair gave that
+  property away for free, which is the one thing it was better at.
+
+- *The navigator loop threw away its first sample.* The first frame has no
+  elapsed time, so it integrated a sample over zero seconds and discarded it.
+  Harmless for a device reporting its current deflection and wrong for anything
+  that queues, and either way it made the loop's behaviour depend on which it
+  was. The first frame now only starts the clock.
+
+- *Three of my own tests were wrong before the code was.* A pole test with the
+  pitch sign inverted, a pan test with the eye equation backwards, and a rate
+  test asking for a whole second in one step — which is exactly what `maxStep`
+  exists to refuse. Each looked right and asserted something else.
+
+**What is not verified.** No 3Dconnexion device was attached to any of this.
+Everything from the report descriptor onwards is tested against synthetic
+descriptors; what is untested is whether a real puck's descriptor matches the
+shape WebHID documents, and whether the rates feel right in the hand. Both need
+a device and half an hour. The tuning constants are all exported and
+commented for that session.
+
+**Exit criteria.** The camera refactor lands and passes the existing browser
+test with no device present — met, and the browser test now covers the camera
+itself. Synthetic axis samples produce the expected camera pose in a test —
+met, including through the loop. A part can be inspected without touching the
+mouse — **unverified**, for want of hardware.
 
 ### Release discipline
 
@@ -598,21 +642,27 @@ for, and it has no automated coverage today.
 Release discipline first, because it is cheap and because a tagged build is what
 makes every later change traceable.
 
-R2.1 to R2.4 are done, and R2.5 is done but for its Vicat data. What remains is
-independent of everything and of each other: R2.5's last third (sixteen Vicat
-values, and switching `ts_thermal` on), R2.6 (stable finding ids, build
-identity, the findings package) and R2.7 (SpaceMouse) can be taken in any
-order.
+R2.1 to R2.7 are done, bar two things that need something this environment
+does not have: R2.5's sixteen Vicat values need datasheet access, and R2.7's
+device layer needs a SpaceMouse plugged in. Both are recorded at their
+milestones. What remains that needs neither is release discipline, below.
 
-R2.7 depends on nothing and competes with nothing — it is viewer code, and the
-only file it shares with any other milestone is `src/app/camera.js`, which none
-of them touch. Slot it wherever there is appetite for it.
+The sequencing held up, and two of its predictions are worth keeping for the
+next roadmap.
 
-R2.4's engineering is a week; its blocking decision could take five minutes or a
-fortnight, so raise the `coolK` question at the *start* of R2.1, not when R2.4
-comes up. R2.5 sat last because its most valuable piece, the located FPC region,
-is much cheaper once R2.2 has made faces and bodies first-class — which held
-up, and is also why the piece that remains is the one that needs no code.
+R2.7 was called independent — viewer code, sharing only `src/app/camera.js`
+with nothing else — and it was, but the estimate was for the wrong reason. The
+work was not the device; it was that the camera had no automated coverage at
+all, so the refactor had to bring its own before it could be trusted. Reckon
+on that wherever a milestone touches code whose correctness lives in how it
+feels.
+
+R2.5 sat last because its most valuable piece, the located FPC region, is much
+cheaper once R2.2 has made faces and bodies first-class. That held — and it is
+also why the piece of R2.5 still outstanding is the one that needs no code at
+all. A milestone gated on data rather than on engineering should be sequenced
+by when the data can be got, not by what depends on it, which is the lesson
+R2.4's `coolK` question was supposed to have taught: raise it at the *start*.
 
 ## Decisions that need a human
 

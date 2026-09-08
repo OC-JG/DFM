@@ -1,4 +1,6 @@
 import { formatPullAxis } from '../analysis/stats.js';
+import { buildLabel } from '../core/build-info.js';
+import { checkRef } from '../rules/findings.js';
 
 /*
  * PDF report.
@@ -127,7 +129,21 @@ function writeChecks(doc, cur, checks) {
     doc.setFontSize(10);
     doc.setTextColor(10, 14, 12);
     doc.text(c.name, MARGIN + 7, cur.y + 2);
+    /* Measured while the font is still the one the name was drawn in —
+       getTextWidth reports for the *current* font, so this has to come before
+       the switch below rather than after it. */
+    const nameWidth = doc.getTextWidth(c.name);
 
+    /* The reference, beside the name. This page is the one that goes to the
+       factory and comes back annotated, and until now a point could only be
+       identified by its position in a list whose length depends on which
+       checks ran. */
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(7);
+    doc.setTextColor(120, 120, 120);
+    doc.text(checkRef(c.key), MARGIN + 9 + nameWidth, cur.y + 2);
+
+    doc.setFont('helvetica', 'bold');
     doc.setFontSize(8);
     doc.setTextColor(col[0], col[1], col[2]);
     doc.text(c.status.toUpperCase(), PAGE_W - MARGIN, cur.y + 2, { align: 'right' });
@@ -174,7 +190,7 @@ function interfaceFrame(reg) {
   return 'As loaded';
 }
 
-export async function exportPDF({ sessionId, dfm, analysis, twoShot, validation, shot, cycle, cost, tooling, settings }) {
+export async function exportPDF({ sessionId, dfm, analysis, twoShot, validation, shot, cycle, cost, tooling, settings, deliver = 'download' }) {
   const jsPDF = await loadJsPDF();
   const doc = new jsPDF({ unit: 'mm', format: 'a4' });
   const r = dfm.result;
@@ -436,9 +452,18 @@ export async function exportPDF({ sessionId, dfm, analysis, twoShot, validation,
     doc.setPage(i);
     doc.setFontSize(7);
     doc.setTextColor(120, 120, 120);
-    doc.text('OnlyCat DFM — guideline-based DFM analysis. Validate critical dimensions with your moulder.', MARGIN, FOOTER_Y);
+    doc.text(`OnlyCat DFM ${buildLabel()} — guideline-based DFM analysis. Validate critical dimensions with your moulder.`, MARGIN, FOOTER_Y);
     doc.text(`Page ${i} / ${pages}`, PAGE_W - MARGIN, FOOTER_Y, { align: 'right' });
   }
 
-  doc.save(`dfm_report_${sessionId}_${Date.now()}.pdf`);
+  /*
+   * Two callers, two deliveries. Ordinarily the browser saves it; the findings
+   * package wants the bytes so it can put the same report inside an archive.
+   * One function either way, because a second one that laid the report out
+   * again would be a second report to keep in step.
+   */
+  const filename = `dfm_report_${sessionId}_${Date.now()}.pdf`;
+  if (deliver === 'bytes') return { filename, bytes: new Uint8Array(doc.output('arraybuffer')) };
+  doc.save(filename);
+  return { filename, bytes: null };
 }

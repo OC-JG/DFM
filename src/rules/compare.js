@@ -59,6 +59,30 @@ export function compareRuns(before, after) {
     caveats.push(`A different set of checks ran (${budgetBefore}-point budget → ${budgetAfter}). Scores out of different budgets are not directly comparable.`);
   }
 
+  /*
+   * The caveat this comparison was missing, and could not have carried before
+   * exports named their build: some of the movement below may be the tool
+   * rather than the part. Thresholds do move — `ts_thermal` lost 25 points,
+   * `corner_radii` gained 8, the FPC floor stopped applying part-wide — and a
+   * reader looking at a five-point improvement deserves to know whether the
+   * rules that produced the two numbers were the same rules.
+   *
+   * The version is reported when it differs; the fingerprint catches the case
+   * the version cannot, which is two builds of the same version — the normal
+   * state of an unreleased tool, and exactly when thresholds are moving most.
+   * An export from before this block existed carries no build at all, and
+   * that is its own caveat rather than a silent pass.
+   */
+  const buildBefore = before.build || null;
+  const buildAfter = after.build || null;
+  if (!buildBefore || !buildAfter) {
+    caveats.push('One of these runs does not name the build that produced it, so whether the same rules scored both cannot be established. Re-export the older run with the current build to compare like with like.');
+  } else if (buildBefore.tool_version !== buildAfter.tool_version) {
+    caveats.push(`The tool changed between these runs: ${buildBefore.tool_version} → ${buildAfter.tool_version}. Some of the movement below is the rules, not the part — check the release notes before reading a score change as progress.`);
+  } else if (buildBefore.source_fingerprint !== buildAfter.source_fingerprint) {
+    caveats.push(`Both runs report ${buildAfter.tool_version}, but from different sources (${buildBefore.source_fingerprint} → ${buildAfter.source_fingerprint}). The rules moved without the version moving, which is the usual state between releases; treat a small score change as unexplained rather than as progress.`);
+  }
+
   const trisBefore = dig(before, ['mesh_summary', 'tris']);
   const trisAfter = dig(after, ['mesh_summary', 'tris']);
   if (trisBefore && trisAfter && trisBefore === trisAfter) {
