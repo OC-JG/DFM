@@ -14,6 +14,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import * as S from './lib/shapes.mjs';
 import * as R from './lib/reference.mjs';
 import { weldGeometry } from '../src/geometry/weld.js';
@@ -46,6 +47,7 @@ import {
 } from '../src/analysis/register.js';
 import { analyseInterface } from '../src/analysis/interface.js';
 import { analyseFpcRegion, FPC_SAMPLES, MAX_CROSSINGS } from '../src/analysis/fpc.js';
+import { tagVersion, isPrerelease, section, releaseProblems, releaseNotes } from '../release.js';
 import { castRayAll } from '../src/geometry/bvh.js';
 import { effectiveMinDraft } from '../src/core/finishes.js';
 import { MATERIALS, MATERIAL_ORDER } from '../src/core/materials.js';
@@ -59,6 +61,8 @@ import {
   axesFromCollections, decodeReport, readField, createHidSource,
   AXIS_USAGES, hidAvailable,
 } from '../src/app/spacemouse.js';
+
+const REPO_ROOT = join(fileURLToPath(new URL('.', import.meta.url)), '..');
 
 // ── harness ────────────────────────────────────────────────────────────────
 
@@ -3494,6 +3498,125 @@ describe('build identity');
     for (const k of ['tool_version', 'source_fingerprint', 'release', 'built']) {
       assert(k in json.build, `the export is missing build.${k}`);
     }
+  });
+}
+
+// ── release gates ──────────────────────────────────────────────────────────
+
+{
+  describe('release: the tag, the version and the changelog');
+
+  await it('a release tag is v followed by a whole version, and nothing else', () => {
+    eq(tagVersion('v2.1.0'), '2.1.0', 'plain tag:');
+    eq(tagVersion('v2.1.0-rc.1'), '2.1.0-rc.1', 'pre-release tag:');
+    eq(tagVersion('  v2.1.0  '), '2.1.0', 'surrounding whitespace:');
+    /* Each of these is a plausible thing to type and none of them is
+       interpreted, because a tag is permanent and two spellings of one
+       release pointing at different commits is unrecoverable. */
+    for (const bad of ['2.1.0', 'v2.1', 'v2', 'release-2.1.0', 'v2.1.0+build.7', 'v 2.1.0', 'vX.Y.Z', '', null, undefined]) {
+      eq(tagVersion(bad), null, `rejects ${JSON.stringify(bad)}:`);
+    }
+  });
+
+  await it('a pre-release suffix is what marks a pre-release', () => {
+    assert(!isPrerelease('2.1.0'), '2.1.0 is not a pre-release');
+    assert(isPrerelease('2.1.0-rc.1'), '2.1.0-rc.1 is a pre-release');
+    assert(isPrerelease('2.1.0-beta'), '2.1.0-beta is a pre-release');
+  });
+
+  const DOC = [
+    '# Changelog', '', 'preamble', '', '---', '',
+    '## Unreleased', '', 'nothing yet', '',
+    '## v2.1.0 — 2026-09-09', '', 'the notes', '', '### Added', '', '- a thing', '',
+    '---', '',
+    '## v2.0.0 — 2026-08-17', '', 'older notes', '',
+    '## v1.9.0 — 2026-01-01', '',
+  ].join('\n');
+
+  await it('a section stops at the next release and keeps its own subsections', () => {
+    const notes = section(DOC, 'v2.1.0');
+    assert(notes.includes('the notes'), 'the section body is missing');
+    assert(notes.includes('### Added'), 'a subsection of the release was dropped');
+    assert(notes.includes('- a thing'), 'a subsection\'s content was dropped');
+    assert(!notes.includes('older notes'), 'the next release bled into this one');
+    assert(!notes.includes('nothing yet'), 'the previous section bled into this one');
+    /* The rule between sections belongs to neither. */
+    assert(!/-{3,}\s*$/.test(notes), `a horizontal rule was kept: ${JSON.stringify(notes.slice(-20))}`);
+  });
+
+  await it('a date after the version does not stop the heading matching', () => {
+    assert(section(DOC, 'v2.0.0') !== null, 'a dated heading was not found');
+    eq(section(DOC, 'v2.0.0'), 'older notes', 'dated heading body:');
+  });
+
+  await it('a missing section and an empty one are told apart', () => {
+    eq(section(DOC, 'v3.0.0'), null, 'a heading that is not there:');
+    eq(section(DOC, 'v1.9.0'), '', 'a heading with nothing under it:');
+  });
+
+  await it('a version is not a prefix of another version', () => {
+    /* `v2.1.0` must not match `v2.1.0-rc.1`, or releasing the candidate would
+       publish the release's notes and vice versa. */
+    const doc = '## v2.1.0-rc.1\n\ncandidate\n\n## v2.1.0\n\nfinal\n';
+    eq(section(doc, 'v2.1.0'), 'final', 'the release:');
+    eq(section(doc, 'v2.1.0-rc.1'), 'candidate', 'the candidate:');
+  });
+
+  await it('every problem with a release is reported at once', () => {
+    /* Bumped neither package.json nor the changelog: two mistakes, and being
+       told about the second one after fixing the first costs another tag. */
+    const problems = releaseProblems('v2.1.0', { version: '2.0.0', changelog: DOC.replace('## v2.1.0 — 2026-09-09', '## v9.9.9') });
+    eq(problems.length, 2, 'problems found:');
+    assert(problems.some((p) => p.includes('2.0.0') && p.includes('2.1.0')), 'the version mismatch does not name both versions');
+    /* Specifically the *missing* one. A section that exists and is empty has
+       its own message, and the two must not be able to stand in for each
+       other — "add the section" and "fill the section in" are different
+       instructions. */
+    assert(problems.some((p) => p.includes('has no "## v2.1.0" section')), `the missing changelog section was not reported: ${problems.join(' | ')}`);
+  });
+
+  await it('a bad tag is the only thing reported, because nothing else can be checked', () => {
+    const problems = releaseProblems('2.1.0', { version: '2.1.0', changelog: DOC });
+    eq(problems.length, 1, 'problems found:');
+    assert(problems[0].includes('not a release tag'), `unexpected problem: ${problems[0]}`);
+  });
+
+  await it('an empty section is a problem in its own right', () => {
+    const problems = releaseProblems('v1.9.0', { version: '1.9.0', changelog: DOC });
+    eq(problems.length, 1, 'problems found:');
+    assert(problems[0].includes('nothing in it'), `unexpected problem: ${problems[0]}`);
+  });
+
+  await it('a release that lines up has no problems, and its notes are the section', () => {
+    eq(releaseProblems('v2.1.0', { version: '2.1.0', changelog: DOC }).length, 0, 'problems:');
+    eq(releaseNotes(DOC, '2.1.0'), section(DOC, 'v2.1.0'), 'notes:');
+  });
+
+  await it("this repository's own changelog satisfies the gates it will be judged by", () => {
+    const doc = readFileSync(join(REPO_ROOT, 'CHANGELOG.md'), 'utf8');
+    assert(section(doc, 'Unreleased') !== null, 'CHANGELOG.md has no Unreleased section');
+    /* Every release heading must name a version this tool would accept as a
+       tag, and carry something. A heading added by hand in the wrong shape
+       would otherwise only be discovered by a release failing. */
+    const headings = [...doc.matchAll(/^##\s+(v\S+)/gm)].map((m) => m[1]);
+    for (const h of headings) {
+      assert(tagVersion(h) !== null, `CHANGELOG.md heading "${h}" is not a version a tag could name`);
+      assert(section(doc, h), `CHANGELOG.md section "${h}" is empty`);
+    }
+  });
+
+  await it('the release workflow checks the cheap thing first', () => {
+    /* The gate above costs a second and the browser suite costs minutes.
+       Ordering them the other way round is a real temptation when adding a
+       step, and the cost of getting it wrong is invisible until a release
+       fails four minutes in. */
+    const yml = readFileSync(join(REPO_ROOT, '.github/workflows/release.yml'), 'utf8');
+    assert(/tags:\s*\['v\*'\]/.test(yml), 'the release workflow does not fire on v* tags');
+    const gate = yml.indexOf('node release.js');
+    const browser = yml.indexOf('playwright install');
+    assert(gate > 0, 'the release workflow does not run the release gate');
+    assert(browser > 0, 'the release workflow does not install a browser');
+    assert(gate < browser, 'the release gate runs after the browser download');
   });
 }
 

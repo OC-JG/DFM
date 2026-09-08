@@ -118,6 +118,44 @@ analyse, heatmaps, gate picking, two-shot, both exports, persistence, reset,
 and the main-thread fallback — and serves three.js and jsPDF from
 `node_modules` so it never depends on the network.
 
+## Releasing
+
+`dfm-tool.html` is a file people are handed, and once it has left the
+repository the only thing that says what it is is the banner inside it. So a
+release is a tag, and the tag has to agree with everything else:
+
+```sh
+# 1. bump the version and move the changelog entries under it
+npm version 2.1.0 --no-git-tag-version
+$EDITOR CHANGELOG.md          # "## Unreleased" -> "## v2.1.0 — 2026-09-09"
+
+# 2. rebuild, because the version is compiled into the artifact
+node build.js && git commit -am "Release 2.1.0" && git push
+
+# 3. check the three things a release can get wrong, before the tag exists
+npm run release:check v2.1.0
+
+# 4. tag it
+git tag v2.1.0 && git push origin v2.1.0
+```
+
+Step 3 is worth the ten seconds: a tag is permanent, and correcting one means
+deleting it from the remote. It checks that the tag names a version, that
+`package.json` says that same version, and that `CHANGELOG.md` has a section
+for it with something in it — and prints the notes it would publish. The same
+gate runs first in `.github/workflows/release.yml`, before the browser suite,
+so a mismatch costs a second rather than four minutes.
+
+The tag then runs the full suite again, refuses to publish from a commit that
+is not an ancestor of `main`, and attaches two builds stamped with the tag: the
+CDN-loading one and the `--vendor` one. Which of those a recipient wants
+depends on the machine they will open it on, so they get both.
+
+`CHANGELOG.md` calls out separately any change that can move a score for a
+reason other than the part. That is not housekeeping: `compare.js` tells anyone
+comparing two runs from different builds to *"check the release notes before
+reading a score change as progress"*, and that file is where it sends them.
+
 ## Layout
 
 ```
@@ -466,7 +504,7 @@ part, so they carry no weight, appear as no check, and cannot move the score —
 part scores the same whether or not anyone has entered a resin price. A test
 asserts it.
 
-## Comparing revisions## Comparing revisions
+## Comparing revisions
 
 **Compare with JSON** reads a previous export and says what moved: the score, the
 grade, which checks changed band, and which measurements shifted and in which
@@ -480,14 +518,18 @@ the part, and each raises a caveat above the diff.
 
 ## Roadmap
 
-`docs/ROADMAP.md` is what happens next and why, in order: getting the STEP path
-under test (it is the primary input path and the only untested one), consuming
-the B-rep face groups the parser already extracts, putting the Inventor loop
-under test, SpaceMouse navigation for the people who use one all day, and the
-one question — the `coolK` convention — that cycle time and every cost derived
-from it are waiting on. It also records what has been decided *against*, so it
-does not get re-proposed: a computed parting line, flow
-simulation, and authentication on a localhost-only bridge.
+`docs/ROADMAP.md` is what happens next and why, in order — and what has already
+happened, with the premises the work turned out to have wrong. R2.1 to R2.7 are
+done: the STEP path under test, the B-rep face groups consumed, the Inventor
+loop under test, the `coolK` convention settled by re-derivation, cycle time and
+cost, two-shot registration, the FPC insert, build identity, the findings
+package and 6-DoF navigation. Two things wait on something a keyboard cannot
+supply — sixteen Vicat softening points, which need datasheets, and half an
+hour with a SpaceMouse plugged in.
+
+It also records what has been decided *against*, so it does not get
+re-proposed: a computed parting line, flow simulation, and authentication on a
+localhost-only bridge.
 
 `docs/ASSESSMENT.md` is the review that preceded the rebuild and the record of
 what the five delivered phases actually changed.

@@ -601,14 +601,46 @@ mouse — **unverified**, for want of hardware.
   step in front of it was permanently red. A guard rail everyone has learned to
   ignore is worse than not having one — and the cost is not the guard rail
   itself, it is everything downstream of it that quietly stops being checked.
-- **Tag and release.** `package.json` says `2.0.0`; there are no tags and no
-  releases. CI already uploads `dfm-tool.html` as an artifact on every run
-  (`.github/workflows/ci.yml`); attaching it to a tagged release instead gives
-  the file a citable home. The deliverable is designed to be handed to people,
-  and right now nobody holding it can say which one they have.
-- **A CHANGELOG.** For a tool whose output is a scored report, a threshold change
-  is a user-visible change, and there is currently no record of when a score
-  moved for reasons other than the part.
+- **Tag and release.** *(done — the mechanism; the first tag is a decision, not
+  a commit)* `.github/workflows/release.yml` fires on a `v*` tag, re-runs the
+  whole suite, and attaches both builds stamped with the tag — the CDN-loading
+  one and the `--vendor` one, because which a recipient wants depends on the
+  machine they open it on.
+
+  Three gates run first, in `release.js`, and they run *before* the browser
+  download rather than after it: the tag must name a version, `package.json`
+  must say that same version, and `CHANGELOG.md` must have a non-empty section
+  for it. Each of the three fails silently in its own way if unchecked — a tag
+  ahead of `package.json` ships a file whose banner reads the old number, one
+  behind it ships a file claiming to be newer than it is, and a missing
+  changelog section ships a release whose notes are empty. `npm run
+  release:check v2.1.0` runs the same gates locally, which is the point: a tag
+  is permanent and correcting one means deleting it from the remote.
+
+  It also refuses to publish from a commit that is not an ancestor of `main`.
+  A release cut from an unmerged branch leaves no trace once the tag exists.
+
+  **Not done, deliberately: no tag was pushed.** `package.json` has read
+  `2.0.0` since the first modular commit and has never been tagged, so the
+  number to bump it to is a promise about what the tool is, which is the
+  owner's to make rather than a build step's. Everything mechanical is in
+  place; the release is one version bump and one tag away.
+- **A CHANGELOG.** *(done)* `CHANGELOG.md`, with the history reconstructed from
+  the 48 commits behind it. The structure follows from what the file is for: a
+  **Scores and thresholds** table first, with the measured effect of every
+  change that can move a number for a reason other than the part — sink
+  under-reported 10× on large meshes, a check that meant to cost 25 costing 15,
+  `ts_thermal` going 25 → 0 and PP + TPU stopping being condemned at 49, a
+  1200 mm² pair of slides becoming two lifters. Then the ordinary groups.
+
+  This is the file `compare.js` already points at. It tells anyone comparing
+  two runs from different builds to "check the release notes before reading a
+  score change as progress", and until now there were none. Worth noting what
+  the reconstruction turned up: two of the biggest score movements in the
+  tool's history — the weight/severity separation and the thermal check
+  standing down — happened under the same version number, which is precisely
+  the situation the fingerprint in the export exists to catch and the
+  changelog exists to explain.
 - **A linter and a formatter.** Neither is configured. The codebase has a clear,
   consistent house style and no mechanical enforcement of it, which makes review
   of an outside patch a style conversation. Whatever the choice, it should run in
@@ -617,9 +649,25 @@ mouse — **unverified**, for want of hardware.
   to 2,531 ms and names the two levers that control it, but nothing measures it,
   so the next regression will be found by feel. A benchmark script over a fixed
   fixture with a budget CI can fail on is a day's work.
-- **`.gitattributes` for the built file.** 579 kB of generated HTML is committed
-  and must stay committed. Marking it `linguist-generated` and `-diff` keeps it
-  out of diffs and reviews without changing what ships.
+- **`.gitattributes` for the built file.** *(done, with one of its two halves
+  refused)* `dfm-tool.html` — 820 kB now, not the 579 kB above — is marked
+  `linguist-generated=true`, which collapses it in GitHub diffs and keeps it
+  out of the repository's language statistics. Also `-merge`, since the only
+  correct resolution of a conflict in generated output is to rebuild it, and a
+  line-merge of two bundles produces something that parses and is wrong.
+
+  `-diff` was **not** added, and this item asked for it. Marking the file
+  binary makes `git diff` print "Binary files differ" and nothing else — and
+  the line-by-line diff is exactly what diagnosed the build's platform
+  dependence one item above: *33 lines differing by nothing but a path
+  separator* is a finding, "the files differ" is not. The check that reads that
+  diff is `verify:build`, which is the whole reason the file is committed.
+
+  `* text=auto eol=lf` is there too, for the same episode's other half: a CRLF
+  checkout put escaped `\r\n` into the embedded worker string. The build
+  normalises on read now, so this is belt to that braces — nothing in the index
+  currently has a CR in it, and this keeps a machine with `core.autocrlf` set
+  from reopening the question.
 - **The webfonts.** `test/offline.mjs:106` explicitly tolerates blocked requests
   to `fonts.` — so the `--vendor` build, whose whole purpose is needing no
   network, still reaches for Google Fonts and silently falls back to system

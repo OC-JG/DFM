@@ -1,0 +1,122 @@
+name: Release
+
+# Cut by pushing a tag:
+#
+#   npm version 2.1.0 --no-git-tag-version   # or edit package.json
+#   # move CHANGELOG.md's Unreleased entries under "## v2.1.0 — <date>"
+#   node build.js && git add -A && git commit && git push
+#   git tag v2.1.0 && git push origin v2.1.0
+#
+# `npm run release:check v2.1.0` runs the gates below locally, which is worth
+# doing before the push: a tag is permanent and a wrong one has to be deleted
+# from the remote to be corrected.
+on:
+  push:
+    tags: ['v*']
+
+# The default token is read-only. Creating the release needs write, and nothing
+# else here does.
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      # Full history: the ancestry check below needs to see main.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # First, and before anything expensive. The tag, package.json and
+      # CHANGELOG.md must agree, and the failure message says which of the
+      # three to fix. Finding this out after a four-minute browser suite is
+      # four minutes spent to learn something knowable in a second.
+      - name: The tag, the version and the changelog agree
+        id: notes
+        run: |
+          set -euo pipefail
+          node release.js "$GITHUB_REF_NAME" > release-notes.md
+          echo "--- release notes ---"
+          cat release-notes.md
+
+      # A release is what people are handed and cite. It should be cut from
+      # reviewed, merged work rather than from whatever branch happened to be
+      # tagged — which is a mistake that leaves no trace once the tag exists.
+      - name: The tag is on main
+        run: |
+          set -euo pipefail
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_REF_NAME points at $GITHUB_SHA, which is not an ancestor of origin/main. Merge the work first, then tag the merge."
+            exit 1
+          fi
+
+      # The same suite CI runs, in the same order, because a release is the one
+      # artifact that outlives the run that produced it. The tagged commit has
+      # almost certainly passed this already on its branch; re-running it costs
+      # four minutes and removes "almost".
+      - name: Markup/script contract
+        run: npm run test:contract
+
+      - name: Unit tests
+        run: npm run test:unit
+
+      - name: STEP path
+        run: npm run test:step
+
+      - name: Inventor bridge
+        run: npm run test:bridge
+
+      # Proves the committed deliverable is the one these sources build, which
+      # is what makes the fingerprint in the release asset mean anything.
+      - name: Built artifact matches src/
+        run: npm run verify:build
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Browser smoke test
+        run: npm run test:smoke
+
+      - name: Offline build works with no network
+        run: npm run test:offline
+
+      # Now the assets. `--stamp` puts the tag in the banner and in the header
+      # of the running tool, so a file found on a desktop in eight months can
+      # say which release it is. It is the one thing about a build that is not
+      # reproducible from the sources alone, which is why it is opt-in and why
+      # `verify:build` above ran without it.
+      - name: Build the release assets
+        run: |
+          set -euo pipefail
+          node build.js --stamp "$GITHUB_REF_NAME"
+          mv dfm-tool.html "dfm-tool-$GITHUB_REF_NAME.html"
+          node build.js --vendor --stamp "$GITHUB_REF_NAME"
+          mv dfm-tool.html "dfm-tool-$GITHUB_REF_NAME-offline.html"
+          ls -l dfm-tool-*.html
+
+      # Both assets, because the choice between them is the recipient's: the
+      # smaller one fetches three.js and jsPDF from a CDN, the larger one needs
+      # no network at all, and which of those matters depends on the machine it
+      # is opened on rather than on anything known here.
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          PRERELEASE=""
+          case "$GITHUB_REF_NAME" in *-*) PRERELEASE="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" \
+            --title "OnlyCat DFM $GITHUB_REF_NAME" \
+            --notes-file release-notes.md \
+            --verify-tag \
+            $PRERELEASE \
+            "dfm-tool-$GITHUB_REF_NAME.html#dfm-tool.html (loads three.js and jsPDF from a CDN)" \
+            "dfm-tool-$GITHUB_REF_NAME-offline.html#dfm-tool.html (offline build, needs no network)"
