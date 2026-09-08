@@ -339,6 +339,10 @@
         <button type="button" class="view-btn" data-view="front" aria-pressed="false">FRONT</button>
         <button type="button" class="view-btn" data-view="right" aria-pressed="false">RIGHT</button>
         <button type="button" class="view-btn" id="frameBtn" title="Frame to fit (F)">FRAME</button>
+        <!-- Hidden unless WebHID exists and a device can be asked for. A
+             browser or machine without one shows nothing at all: no button,
+             no error, no mention. -->
+        <button type="button" class="view-btn" id="spaceMouseBtn" hidden title="Connect a 3Dconnexion SpaceMouse">6DOF</button>
       </div>
       <div class="btn-group" id="heatModes" role="group" aria-label="Heatmap mode"></div>
     </div>

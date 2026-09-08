@@ -294,6 +294,101 @@ async function main() {
     }
     await page.click('.heat-btn[data-heat="flat"]');
 
+    /*
+     * ── the camera, which had no coverage at all ───────────────────────────
+     *
+     * The pose arithmetic is unit-tested; what only a browser can show is that
+     * the events still reach it. Compared by pixels rather than by reading the
+     * camera through a debug hook: the question is whether the view moved, and
+     * the rendered frame is the only honest answer to that. It is also the
+     * regression the camera refactor most needed watching for.
+     */
+    {
+      const viewer = page.locator('#viewer');
+      const vbox = await viewer.boundingBox();
+      const shot = async () => (await viewer.screenshot()).toString('base64');
+
+      await page.click('.view-btn[data-view="iso"]');
+      const iso = await shot();
+
+      await page.click('.view-btn[data-view="top"]');
+      const top = await shot();
+      check('a named view moves the camera', top !== iso,
+        `iso and top rendered ${top === iso ? 'identically' : 'differently'}`);
+      check('and marks itself as the current view',
+        (await page.getAttribute('.view-btn[data-view="top"]', 'aria-pressed')) === 'true'
+        && (await page.textContent('#viewMode')) === 'top');
+
+      /* Left-drag orbits, and orbiting is no longer any named view. */
+      await page.mouse.move(vbox.x + vbox.width / 2, vbox.y + vbox.height / 2);
+      await page.mouse.down();
+      await page.mouse.move(vbox.x + vbox.width / 2 + 90, vbox.y + vbox.height / 2 + 40, { steps: 8 });
+      await page.mouse.up();
+      const orbited = await shot();
+      check('dragging orbits the part', orbited !== top);
+      check('and the view is reported as free', (await page.textContent('#viewMode')) === 'free');
+
+      /* The wheel zooms. */
+      await page.mouse.move(vbox.x + vbox.width / 2, vbox.y + vbox.height / 2);
+      await page.mouse.wheel(0, -600);
+      check('the wheel zooms', (await shot()) !== orbited);
+
+      /* And F frames the part again, which is the escape hatch from all of it. */
+      await page.keyboard.press('f');
+      check('F reframes the part', (await shot()) !== orbited);
+      await page.click('.view-btn[data-view="iso"]');
+    }
+
+    /*
+     * ── the 6-DoF route, as far as it can be taken without hardware ────────
+     *
+     * The roadmap left the transport open between WebHID and 3Dconnexion's
+     * own local service, and named the deciding fact: whether `navigator.hid`
+     * exists on a `file://` page, which is how this tool is normally opened.
+     * It is measured here rather than remembered — a Chrome release could
+     * take it away, and this says so instead of the feature quietly dying.
+     */
+    {
+      const hid = await page.evaluate(() => ({
+        api: typeof navigator.hid,
+        secure: window.isSecureContext,
+      }));
+      check('WebHID is reachable from the page as served', hid.api === 'object' && hid.secure,
+        JSON.stringify(hid));
+
+      const filePage = await browser.newPage({ viewport: { width: 800, height: 600 } });
+      await filePage.goto(`file://${join(ROOT, 'dfm-tool.html')}`, { waitUntil: 'load' });
+      const fileHid = await filePage.evaluate(() => ({
+        api: typeof navigator.hid,
+        secure: window.isSecureContext,
+        button: !document.getElementById('spaceMouseBtn').hidden,
+      }));
+      /* The finding that settled the transport choice: Chromium treats a file
+         URL as potentially trustworthy, so WebHID is available there. */
+      check('and from a file:// page, which is how the tool is opened',
+        fileHid.api === 'object' && fileHid.secure, JSON.stringify(fileHid));
+      check('so the device button is offered rather than hidden',
+        fileHid.button === true, JSON.stringify(fileHid));
+
+      /* And where the API is absent it degrades to nothing: no button, no
+         error, no mention. Deleted rather than mocked, because that is what a
+         browser without WebHID actually presents. */
+      const noHid = await browser.newPage({ viewport: { width: 800, height: 600 } });
+      await noHid.addInitScript(() => {
+        Object.defineProperty(navigator, 'hid', { get: () => undefined });
+      });
+      await noHid.goto(url, { waitUntil: 'load' });
+      const absent = await noHid.evaluate(() => ({
+        button: document.getElementById('spaceMouseBtn').hidden,
+        mentions: document.body.innerText.match(/SpaceMouse|6DOF|6-DoF/gi) || [],
+      }));
+      check('with no WebHID the feature leaves no trace',
+        absent.button === true && absent.mentions.length === 0,
+        JSON.stringify(absent));
+      await filePage.close();
+      await noHid.close();
+    }
+
     // ── gate picking drives the flow check ────────────────────────────────
     await page.click('#pickGateBtn');
     const box = await page.locator('#viewer').boundingBox();

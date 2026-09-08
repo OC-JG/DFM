@@ -1,5 +1,7 @@
 import { MATERIALS } from '../core/materials.js';
 import { buildLabel, BUILD_FINGERPRINT } from '../core/build-info.js';
+import { createNavigatorLoop, NAVIGATOR_DEFAULTS } from './navigator.js';
+import { hidAvailable, requestSpaceMouse, alreadyGrantedSpaceMouse, createHidSource } from './spacemouse.js';
 import { effectiveMinDraft, SURFACE_FINISHES } from '../core/finishes.js';
 import { parseSTL } from '../geometry/stl.js';
 import { parseSTEP } from '../geometry/step.js';
@@ -981,6 +983,91 @@ function onFieldChange(key) {
   if (key === 'material') panel.updateOnboarding();
 }
 
+/* ══ 6-DoF device ════════════════════════════════════════════════════════ */
+
+/*
+ * A 3Dconnexion puck, if the browser has one and the user wants it connected.
+ *
+ * Chromium-only, so the whole thing degrades to silence: the button is hidden
+ * where `navigator.hid` does not exist, and nothing anywhere else in the page
+ * mentions the feature. A user without a device sees no change at all, which
+ * is the requirement.
+ */
+let spaceMouse = null;      // { source, loop }
+
+/*
+ * Rates, damped for a reduced-motion preference.
+ *
+ * The setting is about motion the page inflicts on someone. This is motion the
+ * user is producing themselves, one frame at a time, with their hand on the
+ * control — so refusing to move at all would be useless rather than kind. Half
+ * rate is the deliberate answer: the device still works, and it works more
+ * slowly for someone who asked for less movement.
+ */
+function navigatorSettings() {
+  const reduced = typeof matchMedia === 'function'
+    && matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (!reduced) return NAVIGATOR_DEFAULTS;
+  return {
+    ...NAVIGATOR_DEFAULTS,
+    rotateRate: NAVIGATOR_DEFAULTS.rotateRate / 2,
+    panRate: NAVIGATOR_DEFAULTS.panRate / 2,
+    dollyRate: NAVIGATOR_DEFAULTS.dollyRate / 2,
+  };
+}
+
+function attachSpaceMouse(device) {
+  const controls = viewer.getControls();
+  if (!device || !controls) return false;
+  if (spaceMouse) { spaceMouse.loop.stop(); spaceMouse.source.close(); }
+  const source = createHidSource(device);
+  const loop = createNavigatorLoop({ source, controls, settings: navigatorSettings() });
+  loop.start();
+  spaceMouse = { source, loop };
+
+  const btn = $('spaceMouseBtn');
+  btn.classList.add('active');
+  btn.setAttribute('aria-pressed', 'true');
+  btn.title = `${device.productName || '6-DoF device'} connected — ${source.axisCount} of 6 axes declared`;
+  /* Unplugging is the ordinary way this ends. */
+  if (navigator.hid && navigator.hid.addEventListener) {
+    navigator.hid.addEventListener('disconnect', (e) => {
+      if (e.device !== device || !spaceMouse) return;
+      spaceMouse.loop.stop();
+      spaceMouse = null;
+      btn.classList.remove('active');
+      btn.setAttribute('aria-pressed', 'false');
+      btn.title = 'Connect a 3Dconnexion SpaceMouse';
+    });
+  }
+  return true;
+}
+
+async function initSpaceMouse() {
+  if (!hidAvailable()) return;
+  const btn = $('spaceMouseBtn');
+  btn.hidden = false;
+  btn.addEventListener('click', async () => {
+    try {
+      /* requestDevice needs the user gesture this handler is running inside,
+         so it cannot be moved off the click. */
+      const device = await requestSpaceMouse();
+      if (!device) return;                    // the chooser was dismissed
+      if (attachSpaceMouse(device)) toast(`${device.productName || 'Device'} connected.`, 'info');
+    } catch (err) {
+      console.error(err);
+      toast(`Could not open the device: ${err.message}`, 'error');
+    }
+  });
+
+  /* Permission persists per origin, so someone who granted it once should not
+     have to click again. Silent either way. */
+  try {
+    const known = await alreadyGrantedSpaceMouse();
+    if (known) attachSpaceMouse(known);
+  } catch { /* nothing to say about a device that is not there */ }
+}
+
 /* ══ boot ════════════════════════════════════════════════════════════════ */
 
 function checkDependencies() {
@@ -1107,6 +1194,7 @@ function boot() {
     if (e.target.files.length) doCompare(e.target.files[0]);
     e.target.value = ''; // allow re-selecting the same file
   });
+  initSpaceMouse();
   $('pdfBtn').addEventListener('click', doExportPDF);
   $('packageBtn').addEventListener('click', doExportPackage);
 

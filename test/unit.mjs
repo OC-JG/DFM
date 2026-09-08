@@ -50,6 +50,15 @@ import { castRayAll } from '../src/geometry/bvh.js';
 import { effectiveMinDraft } from '../src/core/finishes.js';
 import { MATERIALS, MATERIAL_ORDER } from '../src/core/materials.js';
 import { DEFAULT_SETTINGS } from '../src/app/state.js';
+import {
+  createCameraState, quatFromThetaPhi, quatApply, quatMul, quatAxisAngle,
+  vDot, vLen, vSub, vUnit, vScale, PITCH_LIMIT, ZOOM_MIN_FACTOR, ZOOM_MAX_FACTOR,
+} from '../src/app/camera-state.js';
+import { applyRates, shape, isIdle, createNavigatorLoop, NAVIGATOR_DEFAULTS } from '../src/app/navigator.js';
+import {
+  axesFromCollections, decodeReport, readField, createHidSource,
+  AXIS_USAGES, hidAvailable,
+} from '../src/app/spacemouse.js';
 
 // ── harness ────────────────────────────────────────────────────────────────
 
@@ -2690,6 +2699,425 @@ describe('FPC — what the located insert changes in the rules');
 
 
 // ═══════════════════════════════════════════════════════════════════════════
+
+describe('camera — the pose the theta/phi pair used to hold');
+{
+  /*
+   * The camera was the most hand-tuned code in the repository and had no
+   * automated coverage: its correctness lived in whether an orbit felt right.
+   * The refactor to a quaternion is the moment to fix that, and the reference
+   * to assert against is the arithmetic it replaced — written out here from
+   * the old source rather than from the new.
+   */
+  const oldEye = (theta, phi, radius, t = [0, 0, 0]) => [
+    t[0] + radius * Math.sin(phi) * Math.cos(theta),
+    t[1] + radius * Math.cos(phi),
+    t[2] + radius * Math.sin(phi) * Math.sin(theta),
+  ];
+  const ORBIT_PER_PX = 0.008;
+  const make = (theta, phi, distance = 200, target = [0, 0, 0]) => createCameraState({
+    orientation: quatFromThetaPhi(theta, phi), distance, target, partSize: distance / 2.2,
+  });
+
+  it('puts the eye exactly where the old formula did', () => {
+    for (const [theta, phi] of [
+      [Math.PI / 4, Math.PI / 3],   // iso
+      [0, 0.01],                    // top
+      [Math.PI / 2, Math.PI / 2],   // front
+      [0, Math.PI / 2],             // right
+      [-1.2, 2.4], [5.1, 0.3],
+    ]) {
+      const cam = make(theta, phi, 200, [3, -4, 5]);
+      const want = oldEye(theta, phi, 200, [3, -4, 5]);
+      close(vLen(vSub(cam.eye, want)), 0, 1e-9, `θ=${theta} φ=${phi}:`);
+    }
+  });
+
+  it('orbits by the same amount a drag used to move theta and phi', () => {
+    /* The feel constant is unchanged, so a given drag has to land in the same
+       place it always did. */
+    for (const [dx, dy] of [[10, 0], [0, 10], [-7, 4], [120, -60]]) {
+      const cam = make(Math.PI / 4, Math.PI / 3);
+      cam.orbit(dx * ORBIT_PER_PX, -dy * ORBIT_PER_PX);
+      const want = oldEye(Math.PI / 4 - dx * ORBIT_PER_PX, Math.PI / 3 - dy * ORBIT_PER_PX, 200);
+      close(vLen(vSub(cam.eye, want)), 0, 1e-9, `drag ${dx},${dy}:`);
+    }
+  });
+
+  it('keeps the horizon level however far it is orbited', () => {
+    /* The property the theta/phi pair gave away for free and a quaternion has
+       to be made to hold: yaw about a world axis, pitch about the camera's
+       own. Doing both on one side is the classic way to get a camera that
+       slowly rolls as you circle a part — after a hundred drags it would be
+       visibly crooked. */
+    const cam = make(Math.PI / 4, Math.PI / 3);
+    for (let i = 0; i < 100; i++) cam.orbit(0.09, 0.03 * Math.sin(i));
+    const right = cam.right;
+    close(vDot(right, [0, 1, 0]), 0, 1e-9, 'the camera right axis should stay horizontal:');
+  });
+
+  it('will not orbit over the pole', () => {
+    for (const direction of [1, -1]) {
+      const cam = make(0, Math.PI / 3);
+      for (let i = 0; i < 200; i++) cam.orbit(0, direction * 0.05);
+      /* How far up or down the world axis the view has got: ±1 is straight
+         through the pole, which is the singularity being avoided. */
+      const upness = vDot(vUnit(vSub(cam.eye, cam.target)), [0, 1, 0]);
+      assert(Math.abs(upness) <= Math.cos(PITCH_LIMIT) + 1e-9,
+        `orbiting should stop short of the pole: cos=${upness}`);
+      assert(Math.abs(upness) > 0.9,
+        `and should have got most of the way there: cos=${upness}`);
+    }
+  });
+
+  it('holds a point still while zooming toward it', () => {
+    /* What makes a wheel zoom feel like a zoom rather than a jump. */
+    const cam = make(Math.PI / 4, Math.PI / 3, 200);
+    const point = [10, 5, -3];
+    const before = cam.distance;
+    cam.zoomToward(0.5, point);
+    close(cam.distance, before * 0.5, 1e-9, 'distance:');
+    /* The target moved half the way to the point, which is the same fraction
+       the distance shrank — that is the invariant, and it is what keeps the
+       point on the same screen position. */
+    const wanted = [0 + (10 - 0) * 0.5, 0 + (5 - 0) * 0.5, 0 + (-3 - 0) * 0.5];
+    close(vLen(vSub(cam.target, wanted)), 0, 1e-9, 'target:');
+  });
+
+  it('clamps the distance to the part it is looking at', () => {
+    const cam = make(0, Math.PI / 3, 200);
+    cam.setPartSize(100);
+    for (let i = 0; i < 100; i++) cam.zoom(0.5);
+    close(cam.distance, 100 * ZOOM_MIN_FACTOR, 1e-9, 'closest:');
+    for (let i = 0; i < 100; i++) cam.zoom(2);
+    close(cam.distance, 100 * ZOOM_MAX_FACTOR, 1e-9, 'furthest:');
+  });
+
+  it('pans across the view plane, not across the world axes', () => {
+    /* A pan has to move the target in the plane the user is looking at, which
+       is what makes dragging feel like sliding the part. */
+    const cam = make(Math.PI / 4, Math.PI / 3, 200);
+    const before = cam.target;
+    cam.pan(7, 0);
+    const moved = vSub(cam.target, before);
+    close(vLen(moved), 7, 1e-9, 'distance moved:');
+    close(vDot(vUnit(moved), cam.right), 1, 1e-9, 'direction:');
+    /* And the eye follows the target: a pan does not orbit. */
+    close(vLen(vSub(cam.eye, vSub(cam.target, vScale(cam.forward, cam.distance)))), 0, 1e-6,
+      'eye should stay at target − forward × distance:');
+  });
+
+  it('can roll, which is the whole reason for the change', () => {
+    /* A theta/phi camera cannot represent this at all: there is no pair of
+       angles that leaves the eye where it is and turns the horizon. */
+    const cam = make(Math.PI / 4, Math.PI / 3, 200);
+    const eyeBefore = cam.eye;
+    const rightBefore = cam.right;
+    cam.rotateLocal(0, 0, 0.4);
+    close(vLen(vSub(cam.eye, eyeBefore)), 0, 1e-9, 'a roll must not move the eye:');
+    const turned = Math.acos(Math.max(-1, Math.min(1, vDot(rightBefore, cam.right))));
+    close(turned, 0.4, 1e-9, 'and must turn the horizon by the angle asked for:');
+  });
+}
+
+describe('camera — a 6-DoF sample, integrated');
+{
+  const cam = () => createCameraState({
+    orientation: quatFromThetaPhi(Math.PI / 4, Math.PI / 3), distance: 200, partSize: 100,
+  });
+  const S6 = (o) => ({ tx: 0, ty: 0, tz: 0, rx: 0, ry: 0, rz: 0, ...o });
+
+  it('ignores a puck that is merely resting', () => {
+    /*
+     * A spring-centred device does not read zero at rest; it wanders. Without
+     * a dead zone that is a camera that drifts on its own, sixty times a
+     * second, while nobody is touching anything.
+     */
+    const dz = NAVIGATOR_DEFAULTS.deadZone;
+    eq(shape(0, dz), 0, 'dead centre:');
+    eq(shape(dz * 0.99, dz), 0, 'just inside:');
+    eq(shape(-dz * 0.99, dz), 0, 'just inside, the other way:');
+    assert(shape(dz * 1.5, dz) > 0, 'just outside should respond');
+    assert(isIdle(S6({ tx: dz * 0.9, ry: -dz * 0.5 }), dz), 'a resting puck should read idle');
+    assert(!isIdle(S6({ ry: 0.9 }), dz), 'a pushed puck should not');
+
+    const c = cam();
+    const before = c.eye;
+    eq(applyRates(c, S6({ tx: dz * 0.9 }), 1 / 60), false, 'a resting sample moves nothing:');
+    close(vLen(vSub(c.eye, before)), 0, 0, 'and the camera did not move:');
+  });
+
+  it('responds from zero at the edge of the dead zone, not with a step', () => {
+    /* Rescaled from the zone edge rather than passed through, so the first
+       perceptible push is a slow one. A step here is the difference between a
+       control that can line a part up and one that cannot. */
+    const dz = NAVIGATOR_DEFAULTS.deadZone;
+    close(shape(dz + 1e-9, dz), 0, 1e-9, 'at the edge:');
+    close(shape(1, dz), 1, 1e-12, 'at full deflection:');
+    close(shape(-1, dz), -1, 1e-12, 'and at full deflection the other way:');
+    /* Quadratic, so fine near centre and fast at the extremes. */
+    const half = shape(dz + (1 - dz) / 2, dz);
+    close(half, 0.25, 1e-9, 'halfway out should be a quarter speed:');
+  });
+
+  it('integrates over time rather than jumping', () => {
+    /* The axis value is a velocity. Two half-steps must land where one whole
+       step does, or the camera's speed depends on the frame rate. */
+    const one = cam();
+    applyRates(one, S6({ ry: 1 }), 0.1);
+    const two = cam();
+    applyRates(two, S6({ ry: 1 }), 0.05);
+    applyRates(two, S6({ ry: 1 }), 0.05);
+    close(vLen(vSub(one.eye, two.eye)), 0, 1e-9, 'one step vs two halves:');
+  });
+
+  it('turns a full push into the stated rate', () => {
+    /* Accumulated over enough frames to make a second, rather than asked for
+       in one — a whole second in a single step is exactly what maxStep
+       refuses, and the test below is what refuses it. */
+    const c = cam();
+    for (let i = 0; i < 100; i++) applyRates(c, S6({ ry: 1 }), 0.01);
+    const start = cam();
+    const a = vUnit(vSub(c.eye, c.target));
+    const b = vUnit(vSub(start.eye, start.target));
+    close(Math.acos(Math.max(-1, Math.min(1, vDot(a, b)))), NAVIGATOR_DEFAULTS.rotateRate, 1e-6,
+      'a second at full deflection:');
+  });
+
+  it('scales panning to the part, and dollying to the distance', () => {
+    /* Neither should need retuning between a 10 mm connector and a 400 mm
+       housing, which is what an absolute rate would force. */
+    const small = createCameraState({ distance: 22, partSize: 10 });
+    const large = createCameraState({ distance: 880, partSize: 400 });
+    applyRates(small, S6({ tx: 1 }), 0.1);
+    applyRates(large, S6({ tx: 1 }), 0.1);
+    close(vLen(small.target) / 10, vLen(large.target) / 400, 1e-9,
+      'the same push should cross the same fraction of each part:');
+
+    const near = createCameraState({ distance: 50, partSize: 100 });
+    const far = createCameraState({ distance: 500, partSize: 100 });
+    applyRates(near, S6({ tz: 1 }), 0.1);
+    applyRates(far, S6({ tz: 1 }), 0.1);
+    close((50 - near.distance) / 50, (500 - far.distance) / 500, 1e-9,
+      'and should close the same fraction of each distance:');
+  });
+
+  it('refuses to integrate a frame that never happened', () => {
+    /* A backgrounded tab comes back with an enormous dt. Integrating it would
+       fling the camera somewhere unrecoverable before the first frame draws. */
+    const c = cam();
+    applyRates(c, S6({ tz: 1 }), 60);
+    const capped = cam();
+    applyRates(capped, S6({ tz: 1 }), NAVIGATOR_DEFAULTS.maxStep);
+    close(c.distance, capped.distance, 1e-9, 'a minute-long frame is capped:');
+  });
+
+  it('can be told not to roll', () => {
+    const rolling = cam();
+    applyRates(rolling, S6({ rz: 1 }), 0.1, { ...NAVIGATOR_DEFAULTS, roll: true });
+    const level = cam();
+    const before = level.right;
+    eq(applyRates(level, S6({ rz: 1 }), 0.1, { ...NAVIGATOR_DEFAULTS, roll: false }), false,
+      'with roll off, a pure twist moves nothing:');
+    close(vLen(vSub(level.right, before)), 0, 0, 'and the horizon is untouched:');
+    assert(vLen(vSub(rolling.right, before)) > 1e-3, 'with roll on it should turn');
+  });
+
+  it('drives a camera from a source a test can feed', () => {
+    /*
+     * Nothing about a physical puck is testable in CI, so the transport sits
+     * behind an interface — `read()` returns a sample or null — and this is
+     * that interface being exercised end to end with a synthetic source and a
+     * synthetic clock. It is the same trick as the bridge fixture: the part
+     * that can be verified is kept on this side of the line.
+     */
+    const c = cam();
+    const controls = {
+      applyRates: (sample, dt) => applyRates(c, sample, dt),
+    };
+    let t = 1000;
+    const frames = [];
+    const samples = [S6({ ry: 1 }), S6({ ry: 1 }), null, S6({ ry: 1 })];
+    let i = 0;
+    const loop = createNavigatorLoop({
+      source: { read: () => (i < samples.length ? samples[i++] : (loop.stop(), null)) },
+      controls,
+      now: () => t,
+      schedule: (fn) => { t += 100; frames.push(t); if (frames.length < 12) fn(); },
+    });
+    const before = c.eye;
+    loop.start();
+    eq(loop.running, false, 'the loop stops when the source runs dry:');
+    assert(vLen(vSub(c.eye, before)) > 1, 'the samples should have moved the camera');
+    /*
+     * Three live samples at 0.1 s each; the null one contributes nothing, and
+     * neither does the first frame — it starts the clock and reads nothing,
+     * because a sample integrated over zero seconds is a sample thrown away.
+     */
+    eq(i, samples.length, 'every sample should have been offered:');
+    const expected = cam();
+    for (let k = 0; k < 3; k++) applyRates(expected, S6({ ry: 1 }), 0.1);
+    close(vLen(vSub(c.eye, expected.eye)), 0, 1e-6, 'and by exactly the live ones:');
+  });
+}
+
+describe('a 6-DoF device, read from its own descriptor');
+{
+  /*
+   * The layout comes from the device's report descriptor rather than a table
+   * of byte offsets per model, because a Compact is not a SpacePilot and a
+   * guessed offset produces a camera that lurches in the wrong axis on
+   * hardware nobody tested on. What that makes testable is everything from
+   * the descriptor onwards — which is all of the decoding.
+   *
+   * The descriptors below are the shape WebHID documents, built by hand: two
+   * reports, translation in one and rotation in the other, which is how these
+   * devices are usually laid out.
+   */
+  const GD = 0x0001;
+  const usage = (id) => (GD << 16) | id;
+  const axis16 = (usages, min = -350, max = 350) => ({
+    reportSize: 16, reportCount: usages.length, usages,
+    logicalMinimum: min, logicalMaximum: max,
+  });
+
+  const TWO_REPORT_PUCK = [{
+    inputReports: [
+      { reportId: 1, items: [axis16([usage(0x30), usage(0x31), usage(0x32)])] },
+      { reportId: 2, items: [axis16([usage(0x33), usage(0x34), usage(0x35)])] },
+    ],
+  }];
+
+  /* Little-endian 16-bit fields, which is what the descriptor above declares. */
+  const report = (...values) => {
+    const buf = new ArrayBuffer(values.length * 2);
+    const view = new DataView(buf);
+    values.forEach((v, i) => view.setInt16(i * 2, v, true));
+    return view;
+  };
+
+  it('finds each axis where the descriptor says it is', () => {
+    const axes = axesFromCollections(TWO_REPORT_PUCK);
+    eq(Object.keys(axes).sort().join(','), '1,2', 'reports:');
+    eq(axes[1].map((f) => f.axis).join(','), 'tx,ty,tz', 'translation report:');
+    eq(axes[2].map((f) => f.axis).join(','), 'rx,ry,rz', 'rotation report:');
+    eq(axes[1].map((f) => f.bitOffset).join(','), '0,16,32', 'offsets accumulate:');
+    eq(axes[1][0].bitSize, 16, 'field width:');
+  });
+
+  it('skips past fields it does not recognise rather than mis-aligning', () => {
+    /* A button array or a padding field occupies its bits like anything else.
+       Getting this wrong is precisely the failure descriptor-driven decoding
+       exists to avoid: every axis after the unknown field shifts. */
+    const withButtons = [{
+      inputReports: [{
+        reportId: 3,
+        items: [
+          /* Eight buttons, one bit each, on a page this does not care about. */
+          { reportSize: 1, reportCount: 8, usages: [0x00090001], logicalMinimum: 0, logicalMaximum: 1 },
+          /* Then the axes. */
+          axis16([usage(0x30), usage(0x31)]),
+        ],
+      }],
+    }];
+    const axes = axesFromCollections(withButtons);
+    eq(axes[3].map((f) => `${f.axis}@${f.bitOffset}`).join(','), 'tx@8,ty@24',
+      'the axes must sit after the eight button bits:');
+  });
+
+  it('decodes a report into normalised axes', () => {
+    const axes = axesFromCollections(TWO_REPORT_PUCK);
+    close(decodeReport(axes, 1, report(350, -350, 0)).tx, 1, 1e-12, 'full push:');
+    close(decodeReport(axes, 1, report(350, -350, 0)).ty, -1, 1e-12, 'full pull:');
+    close(decodeReport(axes, 1, report(350, -350, 0)).tz, 0, 1e-12, 'centred:');
+    close(decodeReport(axes, 1, report(175, 0, 0)).tx, 0.5, 1e-12, 'half:');
+    /* Signed, because the descriptor's minimum is negative — read unsigned, a
+       small pull would decode as an enormous push. */
+    close(decodeReport(axes, 1, report(-1, 0, 0)).tx, -1 / 350, 1e-12, 'the smallest pull:');
+  });
+
+  it('reports only the axes the report carries', () => {
+    /* Translation and rotation arrive separately, so a rotation report must
+       not blank the translation the previous one set. */
+    const axes = axesFromCollections(TWO_REPORT_PUCK);
+    const rotation = decodeReport(axes, 2, report(0, 350, 0));
+    eq(Object.keys(rotation).sort().join(','), 'rx,ry,rz', 'keys:');
+    close(rotation.ry, 1, 1e-12, 'value:');
+    eq(decodeReport(axes, 9, report(1, 2, 3)), null, 'an unknown report id:');
+  });
+
+  it('clamps a device that overshoots its own declared range', () => {
+    /* Firmware does report past its logical maximum. The camera's rate curve
+       assumes −1…1 and would otherwise be handed 1.4. */
+    const axes = axesFromCollections(TWO_REPORT_PUCK);
+    close(decodeReport(axes, 1, report(500, -500, 0)).tx, 1, 1e-12, 'over:');
+    close(decodeReport(axes, 1, report(500, -500, 0)).ty, -1, 1e-12, 'under:');
+  });
+
+  it('reads a field that is not byte-aligned', () => {
+    /* The descriptor is allowed to put an axis anywhere, so the reader works
+       in bits. A 12-bit field starting four bits in is the awkward case. */
+    const buf = new Uint8Array([0b0000_0000, 0b1010_0101, 0b0000_1111]);
+    const view = new DataView(buf.buffer);
+    /*
+     * Bits 4..15 of the little-endian bit stream, derived rather than written
+     * out: the field's bits 0..3 are the top four of byte 0, which are zero,
+     * and its bits 4..11 are the whole of byte 1. So the value is byte 1
+     * shifted up by four.
+     */
+    eq(readField(view, 4, 12, false), buf[1] << 4, 'unsigned:');
+    eq(readField(view, 4, 12, false), 2640, 'and the number that comes to:');
+    eq(readField(view, 0, 8, true), 0, 'signed zero:');
+    eq(readField(view, 8, 8, true), -91, 'signed negative:');
+    /* Past the end of the buffer stops rather than throwing. */
+    eq(readField(view, 20, 16, false), 0, 'past the end:');
+  });
+
+  it('holds the latest deflection of every axis, merged across reports', () => {
+    /*
+     * The whole source, driven by a fake device. This is what makes the
+     * transport testable at all: a HIDDevice is an event target with a
+     * `collections` array, and both of those a test can supply.
+     */
+    const listeners = [];
+    const device = {
+      collections: TWO_REPORT_PUCK,
+      opened: true,
+      addEventListener: (_, fn) => listeners.push(fn),
+      removeEventListener: (_, fn) => listeners.splice(listeners.indexOf(fn), 1),
+      close: () => { device.opened = false; },
+    };
+    const source = createHidSource(device);
+    eq(source.axisCount, 6, 'axes declared:');
+    eq(source.read(), null, 'silence before the first report:');
+
+    const send = (id, view) => listeners.forEach((fn) => fn({ reportId: id, data: view }));
+    send(1, report(350, 0, 0));
+    close(source.read().tx, 1, 1e-12, 'translation arrived:');
+    close(source.read().ry, 0, 1e-12, 'and rotation is still centred:');
+
+    send(2, report(0, 350, 0));
+    close(source.read().ry, 1, 1e-12, 'rotation arrived:');
+    close(source.read().tx, 1, 1e-12,
+      'and a rotation-only report must not blank the translation:');
+
+    /* Superseded rather than queued: a slow frame drops stale samples instead
+       of accumulating a backlog that plays back as a lurch. */
+    send(1, report(0, 0, 0));
+    close(source.read().tx, 0, 1e-12, 'the latest report wins:');
+
+    source.close();
+    eq(listeners.length, 0, 'closing detaches the listener:');
+    eq(device.opened, false, 'and closes the device:');
+  });
+
+  it('is absent, silently, where the API is not', () => {
+    /* Chromium-only, and it has to degrade to nothing at all: no error, no
+       chip, no mention. Node has no navigator.hid, which is the case. */
+    eq(hidAvailable(), false, 'in Node:');
+    eq(Object.keys(AXIS_USAGES).length, 6, 'the six axes are all mapped:');
+  });
+}
 
 describe('the findings package');
 {

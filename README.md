@@ -554,6 +554,17 @@ build.
   over-reports because most of a part is nowhere near the insert. Both versions
   say which one they are.
 
+- **6-DoF navigation is Chromium-only, and silent elsewhere.** A 3Dconnexion
+  puck is read through WebHID — which, contrary to the expectation that shaped
+  the plan, *is* available on a `file://` page, because Chromium treats a file
+  URL as potentially trustworthy. That is checked in the browser test rather
+  than assumed, since a Chrome release could take it away. Where the API is
+  absent there is no button, no error and no mention of the feature. The axis
+  layout is read from the device's own report descriptor rather than a table of
+  offsets per model, so a Compact and a SpacePilot both work without either
+  being the one that was tested; what no test here can cover is whether a real
+  puck's descriptor matches the shape WebHID documents.
+
 - **The findings package is assembled, not collected.** The report, the JSON
   record and the file that was measured leave in one archive, with a manifest
   naming the build that scored it and a CRC32 per member. That last part is the

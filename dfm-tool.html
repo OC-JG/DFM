@@ -3,7 +3,7 @@
 OnlyCat DFM — injection moulding design-for-manufacture analyser
 
 Version 2.0.0
-Source fingerprint 2f16245dc89d
+Source fingerprint f9800f51e37f
 
 Copyright (c) 2026 OnlyCat. Released under the MIT License.
 Full terms: the LICENSE file in the source repository, or
@@ -1908,6 +1908,10 @@ footer {
         <button type="button" class="view-btn" data-view="front" aria-pressed="false">FRONT</button>
         <button type="button" class="view-btn" data-view="right" aria-pressed="false">RIGHT</button>
         <button type="button" class="view-btn" id="frameBtn" title="Frame to fit (F)">FRAME</button>
+        <!-- Hidden unless WebHID exists and a device can be asked for. A
+             browser or machine without one shows nothing at all: no button,
+             no error, no mention. -->
+        <button type="button" class="view-btn" id="spaceMouseBtn" hidden title="Connect a 3Dconnexion SpaceMouse">6DOF</button>
       </div>
       <div class="btn-group" id="heatModes" role="group" aria-label="Heatmap mode"></div>
     </div>
@@ -2181,7 +2185,7 @@ function fpcCompatibility(material) {
  * directly — and they say so rather than claiming a version they are not.
  */
 const TOOL_VERSION = "2.0.0";
-const BUILD_FINGERPRINT = "2f16245dc89d";
+const BUILD_FINGERPRINT = "f9800f51e37f";
 const BUILD_STAMP = "";
 
 /* One short string for a banner or a footer. */
@@ -2206,6 +2210,408 @@ function buildIdentity() {
        hundreds of them — and it should not be mistaken for a release. */
     built: BUILD_FINGERPRINT !== 'source',
   };
+}
+
+/* ==== app/navigator.js ============================================== */
+/*
+ * Turning a 6-DoF sample into camera motion.
+ *
+ * A 3Dconnexion puck is a spring-centred displacement sensor: you push it a
+ * couple of millimetres and it pushes back, and what it reports is not where
+ * the camera should be but how fast it should be going. So a sample is
+ * integrated over the frame it arrived in, rather than applied as a position —
+ * and getting that wrong is what makes 6-DoF navigation feel seasick.
+ *
+ * ── What a sample is ─────────────────────────────────────────────────────
+ *
+ * Six numbers, each already normalised to −1…1 by whatever produced them:
+ *
+ *   tx, ty, tz   push the puck left/right, up/down, in/out
+ *   rx, ry, rz   tilt it, spin it, twist it
+ *
+ * Normalising is the transport's job, not this file's, and deliberately: a
+ * SpaceMouse Compact reports a different full-scale value from a SpacePilot,
+ * and putting that knowledge here would mean this file needing to know which
+ * device is attached. It does not, which is also what lets a test drive it.
+ *
+ * ── The dead zone ────────────────────────────────────────────────────────
+ *
+ * A puck at rest does not read zero. It reads a small wandering value, and
+ * integrated at sixty frames a second that is a camera that drifts on its own
+ * while nobody is touching anything. Anything inside the dead zone is zero;
+ * outside it, the response is rescaled from the edge of the zone rather than
+ * stepping — so the first perceptible push is a slow one, not a jump.
+ *
+ * The curve past that is quadratic (`|v|·v`), which is the usual choice for
+ * spring-centred controls: fine positioning near centre where a part is being
+ * lined up, and speed at the extremes where it is being flung round.
+ */
+
+const NAVIGATOR_DEFAULTS = {
+  /* Fraction of full scale ignored around centre. */
+  deadZone: 0.08,
+  /* Radians per second at full deflection. */
+  rotateRate: 1.8,
+  /* Screen-heights per second at full deflection; scaled by the part's size,
+     so panning across a 10 mm part and a 400 mm one both take the same push. */
+  panRate: 0.9,
+  /* Fraction of the current distance per second at full deflection. Relative
+     rather than absolute for the same reason: zooming is scale-free. */
+  dollyRate: 1.2,
+  /* Whether the puck may roll the view. Off keeps the horizon level, which is
+     what the mouse path does and what a turntable user expects; on is what a
+     6-DoF device is for. */
+  roll: true,
+  /* Longest frame that will be integrated, in seconds. A tab that was
+     backgrounded for a minute comes back with a vast dt, and integrating it
+     would fling the camera to somewhere unrecoverable before the first frame
+     is drawn. */
+  maxStep: 0.1,
+};
+
+/*
+ * Dead zone, rescale, and the response curve. Returns −1…1.
+ */
+function shape(value, deadZone) {
+  const v = Number.isFinite(value) ? Math.max(-1, Math.min(1, value)) : 0;
+  const m = Math.abs(v);
+  if (m <= deadZone) return 0;
+  /* Rescaled from the edge of the dead zone, so the response starts at zero
+     rather than at whatever the zone's width happened to be. */
+  const t = (m - deadZone) / (1 - deadZone);
+  return Math.sign(v) * t * t;
+}
+
+/* True when every axis of a sample is inside the dead zone — the ordinary
+   state of a puck nobody is touching. */
+function isIdle(sample, deadZone = NAVIGATOR_DEFAULTS.deadZone) {
+  if (!sample) return true;
+  for (const axis of ['tx', 'ty', 'tz', 'rx', 'ry', 'rz']) {
+    if (shape(sample[axis] || 0, deadZone) !== 0) return false;
+  }
+  return true;
+}
+
+/*
+ * Integrate one sample into a camera state.
+ *
+ * Returns whether anything moved, so a caller can skip a redraw on the frames
+ * — most of them — where the puck is sitting still.
+ *
+ * `state` is a camera-state object; nothing here touches three.js or the DOM.
+ */
+function applyRates(state, sample, dt, settings = NAVIGATOR_DEFAULTS) {
+  const s = { ...NAVIGATOR_DEFAULTS, ...settings };
+  if (!sample || !(dt > 0)) return false;
+  const step = Math.min(dt, s.maxStep);
+
+  const tx = shape(sample.tx || 0, s.deadZone);
+  const ty = shape(sample.ty || 0, s.deadZone);
+  const tz = shape(sample.tz || 0, s.deadZone);
+  const rx = shape(sample.rx || 0, s.deadZone);
+  const ry = shape(sample.ry || 0, s.deadZone);
+  const rz = s.roll ? shape(sample.rz || 0, s.deadZone) : 0;
+
+  if (!tx && !ty && !tz && !rx && !ry && !rz) return false;
+
+  /* Pan in world units: a full push crosses `panRate` part-sizes a second. */
+  if (tx || ty) {
+    const perSecond = s.panRate * state.partSize;
+    state.pan(tx * perSecond * step, ty * perSecond * step);
+  }
+  /* Push in and out. Proportional to the current distance, so the last
+     millimetre of approach is as controllable as the first metre. */
+  if (tz) state.dolly(tz * s.dollyRate * state.distance * step);
+
+  if (rx || ry || rz) {
+    state.rotateLocal(rx * s.rotateRate * step, ry * s.rotateRate * step, rz * s.rotateRate * step);
+  }
+  return true;
+}
+
+/*
+ * Drive a camera from a source of samples.
+ *
+ * `source` is anything with `read()` returning a sample or null, which is the
+ * whole interface a device transport has to satisfy — and the reason there is
+ * an interface at all: a physical puck cannot be exercised in CI, so the part
+ * that can be is kept on this side of a line that a test can also stand on.
+ *
+ * The loop is only running while samples are arriving. A source that reads
+ * null, or a puck sitting inside its dead zone, costs one function call per
+ * frame and no redraw.
+ */
+function createNavigatorLoop({ source, controls, settings, now = () => performance.now(), schedule = requestAnimationFrame }) {
+  let running = false;
+  let last = 0;
+
+  function tick() {
+    if (!running) return;
+    const t = now();
+    const dt = last ? (t - last) / 1000 : 0;
+    last = t;
+    /*
+     * The first frame only starts the clock. Reading the source there would
+     * consume a sample and integrate it over zero seconds — the sample is
+     * thrown away, which is harmless for a device reporting its current
+     * deflection and wrong for anything that queues them, and either way it
+     * makes the loop's behaviour depend on which it is.
+     */
+    if (dt > 0) {
+      const sample = source.read();
+      if (sample) controls.applyRates(sample, dt, settings);
+    }
+    schedule(tick);
+  }
+
+  return {
+    start() {
+      if (running) return;
+      running = true;
+      last = 0;
+      schedule(tick);
+    },
+    stop() { running = false; },
+    get running() { return running; },
+  };
+}
+
+/* ==== app/spacemouse.js ============================================= */
+/*
+ * A 3Dconnexion puck, read through WebHID.
+ *
+ * ── The question that had to be settled first ────────────────────────────
+ *
+ * The roadmap left the transport open between WebHID and 3Dconnexion's own
+ * local service, and said the deciding fact was whether `navigator.hid` exists
+ * at all on a `file://` page — which is how this tool is normally opened —
+ * rather than something to assume either way.
+ *
+ * It does. Chromium treats a file URL as a potentially trustworthy origin, so
+ * `window.isSecureContext` is true there and `navigator.hid` is present. That
+ * is measured, in the browser test, rather than remembered: it is the kind of
+ * fact a Chrome release could change, and if it does the test says so instead
+ * of the feature quietly dying.
+ *
+ * So WebHID it is, and the local-service detour is not needed. What WebHID
+ * cannot do is open a device without a user gesture and a permission prompt,
+ * which is why connecting is a button rather than something that happens at
+ * load.
+ *
+ * ── Reading the axes ─────────────────────────────────────────────────────
+ *
+ * From the device's own report descriptor, not from a table of byte offsets
+ * per model. Every 3Dconnexion device lays its reports out slightly
+ * differently — a Compact is not a SpacePilot, and firmware revisions move
+ * things — and a guessed offset produces a camera that lurches in the wrong
+ * axis on hardware nobody tested on. WebHID exposes the descriptor as
+ * collections of input reports whose items declare their usages and field
+ * widths, so the layout can be read from the declaration: Generic Desktop
+ * X/Y/Z and RX/RY/RZ, wherever the device chose to put them, at whatever
+ * width and range it chose to use.
+ *
+ * Walking the items in order to accumulate bit offsets is the HID spec's own
+ * rule, not an assumption about these devices. What is still untested here is
+ * only whether a real puck's descriptor matches the shape WebHID documents;
+ * everything from that shape onwards is exercised against synthetic
+ * descriptors in the unit tests.
+ *
+ * Translation and rotation usually arrive in separate reports, which is why
+ * the latest value of each axis is held rather than a whole sample being
+ * expected at once: a report carrying only rotation must not blank the
+ * translation the previous one set.
+ */
+
+/* Generic Desktop usage page, and the six axes on it. WebHID reports a usage
+   as `(page << 16) | usage`. */
+const GD = 0x0001;
+const AXIS_USAGES = {
+  [(GD << 16) | 0x30]: 'tx',
+  [(GD << 16) | 0x31]: 'ty',
+  [(GD << 16) | 0x32]: 'tz',
+  [(GD << 16) | 0x33]: 'rx',
+  [(GD << 16) | 0x34]: 'ry',
+  [(GD << 16) | 0x35]: 'rz',
+};
+
+/* 3Dconnexion's vendor id. Used only to filter the device chooser, so the
+   prompt does not list every keyboard on the machine. */
+const VENDOR_3DCONNEXION = 0x256f;
+/* Logitech's, under which the older SpaceNavigators shipped. */
+const VENDOR_LOGITECH = 0x046d;
+
+function hidAvailable() {
+  return typeof navigator !== 'undefined' && !!navigator.hid;
+}
+
+/*
+ * Where each axis lives, from the descriptor.
+ *
+ * Returns `{ [reportId]: [{ axis, bitOffset, bitSize, min, max }] }`. Items
+ * that are not one of the six axes still advance the offset — a button array
+ * or a padding field occupies its bits like anything else.
+ */
+function axesFromCollections(collections) {
+  const byReport = {};
+  for (const collection of collections || []) {
+    for (const report of collection.inputReports || []) {
+      const id = report.reportId || 0;
+      let bit = 0;
+      for (const item of report.items || []) {
+        const size = item.reportSize || 0;
+        const count = item.reportCount || 0;
+        const usages = item.usages || [];
+        for (let i = 0; i < count; i++) {
+          /* An item may declare fewer usages than it has fields, in which case
+             the last one repeats — the HID spec's own rule for arrays. */
+          const usage = usages.length ? usages[Math.min(i, usages.length - 1)] : null;
+          const axis = usage != null ? AXIS_USAGES[usage] : null;
+          if (axis) {
+            (byReport[id] = byReport[id] || []).push({
+              axis,
+              bitOffset: bit,
+              bitSize: size,
+              min: item.logicalMinimum != null ? item.logicalMinimum : -(2 ** (size - 1)),
+              max: item.logicalMaximum != null ? item.logicalMaximum : 2 ** (size - 1) - 1,
+            });
+          }
+          bit += size;
+        }
+      }
+    }
+  }
+  return byReport;
+}
+
+/*
+ * A field of `bits` bits at `offset`, little-endian, signed when the
+ * descriptor's logical minimum is negative.
+ *
+ * Bit-level rather than byte-level because the descriptor is allowed to put an
+ * axis anywhere: most pucks use whole 16-bit little-endian fields, and reading
+ * bit by bit costs nothing at six axes a report and removes the assumption.
+ */
+function readField(view, offset, bits, signed) {
+  let value = 0;
+  for (let i = 0; i < bits; i++) {
+    const at = offset + i;
+    const byte = at >> 3;
+    if (byte >= view.byteLength) break;
+    const bit = (view.getUint8(byte) >> (at & 7)) & 1;
+    value |= bit << i;
+  }
+  if (signed && bits > 0 && (value & (1 << (bits - 1)))) value -= 1 << bits;
+  return value;
+}
+
+/*
+ * Decode one report into the axes it carries, each normalised to −1…1.
+ *
+ * Only the axes present in this report are returned, so a caller can merge
+ * without a rotation-only report blanking the translation.
+ */
+function decodeReport(axes, reportId, view) {
+  const fields = axes[reportId || 0];
+  if (!fields) return null;
+  const out = {};
+  for (const f of fields) {
+    const signed = f.min < 0;
+    const raw = readField(view, f.bitOffset, f.bitSize, signed);
+    /* Normalised by the wider half of the declared range, so a device with an
+       asymmetric range still reports ±1 at its extremes without exceeding
+       them in the narrow direction. */
+    const scale = Math.max(Math.abs(f.min), Math.abs(f.max)) || 1;
+    out[f.axis] = Math.max(-1, Math.min(1, raw / scale));
+  }
+  return out;
+}
+
+/*
+ * A sample source over a WebHID device.
+ *
+ * `read()` returns the latest deflection of every axis, which is what a
+ * rate-controlled camera wants: the puck is a spring, and the current push is
+ * the whole state. Reports are merged into it as they arrive rather than
+ * queued, so a slow frame drops stale samples instead of accumulating a
+ * backlog that plays back as a lurch.
+ *
+ * `device` is a HIDDevice — already opened, or opened here. Injected rather
+ * than fetched so a test can pass a fake one, which is the only way any of
+ * this is exercisable without hardware.
+ */
+function createHidSource(device) {
+  const axes = axesFromCollections(device.collections);
+  const latest = { tx: 0, ty: 0, tz: 0, rx: 0, ry: 0, rz: 0 };
+  let sawAny = false;
+
+  function onInputReport(event) {
+    const decoded = decodeReport(axes, event.reportId, event.data);
+    if (!decoded) return;
+    Object.assign(latest, decoded);
+    sawAny = true;
+  }
+
+  device.addEventListener('inputreport', onInputReport);
+
+  return {
+    /* Which axes the descriptor actually declared, so a caller can say
+       "3 of 6 axes" rather than pretend to six. */
+    get axisCount() {
+      const found = new Set();
+      for (const fields of Object.values(axes)) for (const f of fields) found.add(f.axis);
+      return found.size;
+    },
+    /* Null until the device has said something, so the navigator loop does no
+       work for a device that is connected but idle at the driver level. */
+    read: () => (sawAny ? { ...latest } : null),
+    close() {
+      device.removeEventListener('inputreport', onInputReport);
+      if (device.opened && device.close) return device.close();
+      return undefined;
+    },
+  };
+}
+
+/*
+ * Ask the user to pick a device, and open it.
+ *
+ * Must be called from a user gesture — WebHID requires one, and there is no
+ * way around it, which is why this is behind a button. Returns null when the
+ * API is missing or the user picked nothing, and throws only on a real
+ * failure to open something they did choose.
+ */
+async function requestSpaceMouse() {
+  if (!hidAvailable()) return null;
+  const devices = await navigator.hid.requestDevice({
+    filters: [{ vendorId: VENDOR_3DCONNEXION }, { vendorId: VENDOR_LOGITECH }],
+  });
+  const device = devices && devices[0];
+  if (!device) return null;
+  if (!device.opened) await device.open();
+  return device;
+}
+
+/*
+ * A device the browser has already been granted, if any.
+ *
+ * Permission persists per origin, so a user who granted access once should not
+ * have to click again on the next visit. Silent by design: no device, no
+ * message, nothing on screen.
+ */
+async function alreadyGrantedSpaceMouse() {
+  if (!hidAvailable() || !navigator.hid.getDevices) return null;
+  try {
+    const devices = await navigator.hid.getDevices();
+    const device = (devices || []).find((d) =>
+      d.vendorId === VENDOR_3DCONNEXION || d.vendorId === VENDOR_LOGITECH);
+    if (!device) return null;
+    if (!device.opened) await device.open();
+    return device;
+  } catch {
+    /* A device that is listed but cannot be opened — unplugged between the
+       two calls, or claimed by another process. Not an error worth showing. */
+    return null;
+  }
 }
 
 /* ==== core/finishes.js ============================================== */
@@ -10733,6 +11139,295 @@ function buildLegend(mode, analysis) {
   ]);
 }
 
+/* ==== app/camera-state.js =========================================== */
+/*
+ * Where the camera is, as arithmetic.
+ *
+ * The controls used to hold orientation as `theta`, `phi` and `radius` about a
+ * target: two degrees of rotational freedom with world-up implied, which is
+ * why the viewer has never had roll. That is a perfectly good parameterisation
+ * for a mouse, which can only ever supply two numbers at a time. It cannot
+ * express what a 3Dconnexion puck sends, which is three translation and three
+ * rotation rates at once — and a shim that folded roll into a theta/phi pair
+ * would be a lie about what the device did.
+ *
+ * So the state is an orientation quaternion, a target and a distance, and
+ * every input path — mouse, touch, wheel, keyboard, and a device when one
+ * arrives — is written against that. This module holds it, and holds it with
+ * no reference to three.js and no reference to the DOM.
+ *
+ * That separation is the point rather than a tidiness preference. The camera
+ * was the most hand-tuned code in the repository and had no automated coverage
+ * at all: its correctness lived in whether an orbit *felt* right, which is not
+ * a thing CI can hold on to. Split this way, every claim about where the
+ * camera ends up is a number a test can assert, and what remains in camera.js
+ * is event plumbing.
+ *
+ * ── Conventions ──────────────────────────────────────────────────────────
+ *
+ * The same ones three.js uses, so the boundary is a copy rather than a
+ * conversion: a camera looks down its own −Z, with +Y up and +X right. The eye
+ * therefore sits at `target + orientation·(0, 0, distance)`.
+ *
+ * Quaternions are `[x, y, z, w]`, and multiplication is the usual convention:
+ * `mul(a, b)` applies b first, then a. Pre-multiplying rotates about a world
+ * axis; post-multiplying rotates about one of the camera's own.
+ */
+
+/* Turntable pitch stops this far short of the poles, in radians. Straight down
+   the world-up axis is a singularity for a horizon-keeping camera — there is
+   no unique "up" there — and the old theta/phi code clamped at the same 0.05
+   for the same reason. */
+const PITCH_LIMIT = 0.05;
+
+/* Distance is clamped to this multiple of the part's size at each end, which
+   is what stops a wheel-spin ending up inside the part or in deep space. */
+const ZOOM_MIN_FACTOR = 0.05;
+const ZOOM_MAX_FACTOR = 20;
+
+const WORLD_UP = [0, 1, 0];
+
+// ── vectors ────────────────────────────────────────────────────────────────
+
+const v3 = (x = 0, y = 0, z = 0) => [x, y, z];
+const vAdd = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+const vSub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+const vScale = (a, s) => [a[0] * s, a[1] * s, a[2] * s];
+const vDot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const vCross = (a, b) => [
+  a[1] * b[2] - a[2] * b[1],
+  a[2] * b[0] - a[0] * b[2],
+  a[0] * b[1] - a[1] * b[0],
+];
+const vLen = (a) => Math.hypot(a[0], a[1], a[2]);
+function vUnit(a) {
+  const m = vLen(a);
+  return m > 0 ? [a[0] / m, a[1] / m, a[2] / m] : [0, 0, 0];
+}
+
+// ── quaternions ────────────────────────────────────────────────────────────
+
+/* Rotation of `angle` radians about `axis`, which need not be unit length. */
+function quatAxisAngle(axis, angle) {
+  const n = vUnit(axis);
+  const h = angle / 2;
+  const s = Math.sin(h);
+  return [n[0] * s, n[1] * s, n[2] * s, Math.cos(h)];
+}
+
+/* b first, then a. */
+function quatMul(a, b) {
+  const [ax, ay, az, aw] = a;
+  const [bx, by, bz, bw] = b;
+  return [
+    aw * bx + ax * bw + ay * bz - az * by,
+    aw * by - ax * bz + ay * bw + az * bx,
+    aw * bz + ax * by - ay * bx + az * bw,
+    aw * bw - ax * bx - ay * by - az * bz,
+  ];
+}
+
+/*
+ * Renormalise. Composing thousands of small rotations — which is exactly what
+ * rate control does, sixty times a second — accumulates enough drift to shear
+ * the result; this costs a square root per frame and removes the question.
+ */
+function quatNormalise(q) {
+  const m = Math.hypot(q[0], q[1], q[2], q[3]);
+  return m > 0 ? [q[0] / m, q[1] / m, q[2] / m, q[3] / m] : [0, 0, 0, 1];
+}
+
+function quatApply(q, v) {
+  const [x, y, z, w] = q;
+  /* t = 2 · (q.xyz × v); result = v + w·t + q.xyz × t */
+  const tx = 2 * (y * v[2] - z * v[1]);
+  const ty = 2 * (z * v[0] - x * v[2]);
+  const tz = 2 * (x * v[1] - y * v[0]);
+  return [
+    v[0] + w * tx + y * tz - z * ty,
+    v[1] + w * ty + z * tx - x * tz,
+    v[2] + w * tz + x * ty - y * tx,
+  ];
+}
+
+/*
+ * The orientation that looks from `eye` at `target`, keeping world up.
+ *
+ * Built as a basis rather than by chaining Euler angles, because the basis is
+ * the definition: −Z toward the target, X across it and world up, Y whatever
+ * completes the frame.
+ */
+function quatLookAt(eye, target, up = WORLD_UP) {
+  const forward = vUnit(vSub(eye, target));   // camera +Z points back at the eye
+  let right = vCross(up, forward);
+  if (vLen(right) < 1e-6) {
+    /* Looking straight up or down the up axis: any right vector is as good as
+       another, so pick one deterministically rather than dividing by zero. */
+    right = Math.abs(forward[1]) > 0.9 ? [1, 0, 0] : vCross([0, 1, 0], forward);
+  }
+  right = vUnit(right);
+  const camUp = vCross(forward, right);
+  return quatFromBasis(right, camUp, forward);
+}
+
+/* Quaternion from an orthonormal basis given as its three column vectors. The
+   branch on the trace is the standard one: it picks whichever form keeps the
+   divisor away from zero. */
+function quatFromBasis(x, y, z) {
+  const m = [x[0], y[0], z[0], x[1], y[1], z[1], x[2], y[2], z[2]];
+  const trace = m[0] + m[4] + m[8];
+  if (trace > 0) {
+    const s = 0.5 / Math.sqrt(trace + 1);
+    return quatNormalise([(m[7] - m[5]) * s, (m[2] - m[6]) * s, (m[3] - m[1]) * s, 0.25 / s]);
+  }
+  if (m[0] > m[4] && m[0] > m[8]) {
+    const s = 2 * Math.sqrt(1 + m[0] - m[4] - m[8]);
+    return quatNormalise([0.25 * s, (m[1] + m[3]) / s, (m[2] + m[6]) / s, (m[7] - m[5]) / s]);
+  }
+  if (m[4] > m[8]) {
+    const s = 2 * Math.sqrt(1 + m[4] - m[0] - m[8]);
+    return quatNormalise([(m[1] + m[3]) / s, 0.25 * s, (m[5] + m[7]) / s, (m[2] - m[6]) / s]);
+  }
+  const s = 2 * Math.sqrt(1 + m[8] - m[0] - m[4]);
+  return quatNormalise([(m[2] + m[6]) / s, (m[5] + m[7]) / s, 0.25 * s, (m[3] - m[1]) / s]);
+}
+
+/*
+ * The orientation the old `setAngles(theta, phi)` produced.
+ *
+ * Kept exactly, rather than approximated, because four named views and every
+ * saved habit of using them go through it: the eye sat at
+ * `(sin φ cos θ, cos φ, sin φ sin θ)` scaled by the radius, looking at the
+ * target with world up. Converting rather than reimplementing means the views
+ * land where they always did.
+ */
+function quatFromThetaPhi(theta, phi) {
+  const eye = [Math.sin(phi) * Math.cos(theta), Math.cos(phi), Math.sin(phi) * Math.sin(theta)];
+  return quatLookAt(eye, [0, 0, 0]);
+}
+
+// ── the state ──────────────────────────────────────────────────────────────
+
+/*
+ * `partSize` is the largest dimension of whatever is on screen, and only sets
+ * the zoom clamps and the pan scale — nothing here knows what a mesh is.
+ */
+function createCameraState({ target = v3(), distance = 200, orientation = quatFromThetaPhi(Math.PI / 4, Math.PI / 3), partSize = 100 } = {}) {
+  const state = {
+    target: target.slice(),
+    distance,
+    orientation: quatNormalise(orientation),
+    partSize: Math.max(partSize, 1e-6),
+  };
+
+  const right = () => quatApply(state.orientation, [1, 0, 0]);
+  const up = () => quatApply(state.orientation, [0, 1, 0]);
+  const back = () => quatApply(state.orientation, [0, 0, 1]);
+
+  const api = {
+    /* Read-only views of the state, copied so a caller cannot reach in. */
+    get target() { return state.target.slice(); },
+    get distance() { return state.distance; },
+    get orientation() { return state.orientation.slice(); },
+    get partSize() { return state.partSize; },
+    /* The eye, which is what a renderer wants. */
+    get eye() { return vAdd(state.target, vScale(back(), state.distance)); },
+    get right() { return right(); },
+    get up() { return up(); },
+    get forward() { return vScale(back(), -1); },
+
+    setTarget(t) { state.target = t.slice(); return api; },
+    setDistance(d) { state.distance = clampDistance(state, d); return api; },
+    setPartSize(s) { state.partSize = Math.max(s, 1e-6); return api; },
+    setOrientation(q) { state.orientation = quatNormalise(q); return api; },
+    setAngles(theta, phi) { return api.setOrientation(quatFromThetaPhi(theta, phi)); },
+
+    /*
+     * Turntable orbit: yaw about world up, pitch about the camera's own right
+     * axis, with the horizon kept level.
+     *
+     * The two multiplications are on opposite sides on purpose. Yaw is about a
+     * *world* axis, so it pre-multiplies; pitch is about the camera's own X,
+     * so it post-multiplies. Doing both on the same side is the classic way to
+     * get a camera that slowly rolls as you circle a part.
+     */
+    orbit(yaw, pitch) {
+      let q = quatMul(quatAxisAngle(WORLD_UP, yaw), state.orientation);
+      const pitched = quatMul(q, quatAxisAngle([1, 0, 0], pitch));
+      /* Reject a pitch that would take the view over the pole rather than
+         clamping to it: clamping there makes the camera stick and then jump. */
+      const f = quatApply(pitched, [0, 0, 1]);
+      if (Math.abs(vDot(vUnit(f), WORLD_UP)) < Math.cos(PITCH_LIMIT)) q = pitched;
+      state.orientation = quatNormalise(q);
+      return api;
+    },
+
+    /*
+     * Free rotation, in the camera's own frame: pitch, yaw and roll together.
+     *
+     * This is what a 6-DoF device sends and what the theta/phi camera could
+     * not represent. No pole constraint, because there is no implied world up
+     * to lose — the user is driving every axis themselves, and a device that
+     * rolls the part is doing what it was asked.
+     */
+    rotateLocal(pitch, yaw, roll) {
+      const q = quatMul(state.orientation, quatMul(
+        quatAxisAngle([0, 1, 0], yaw),
+        quatMul(quatAxisAngle([1, 0, 0], pitch), quatAxisAngle([0, 0, 1], roll)),
+      ));
+      state.orientation = quatNormalise(q);
+      return api;
+    },
+
+    /* Move the target across the view plane, in world units. */
+    pan(dx, dy) {
+      state.target = vAdd(state.target, vAdd(vScale(right(), dx), vScale(up(), dy)));
+      return api;
+    },
+
+    /* And along the view direction, which is what a device's Z push does. */
+    dolly(dz) {
+      state.distance = clampDistance(state, state.distance - dz);
+      return api;
+    },
+
+    /* Screen pixels to world units at the target's depth, for the drag paths.
+       `fovY` in radians. */
+    worldPerPixel(fovY, viewportHeight) {
+      return (2 * Math.tan(fovY / 2) * state.distance) / Math.max(1, viewportHeight);
+    },
+
+    /* factor < 1 moves closer. */
+    zoom(factor) {
+      state.distance = clampDistance(state, state.distance * factor);
+      return api;
+    },
+
+    /*
+     * Zoom while holding a world point still on screen.
+     *
+     * The target slides toward that point by the same fraction the distance
+     * shrank, which is what keeps whatever is under the cursor under it.
+     */
+    zoomToward(factor, worldPoint) {
+      const before = state.distance;
+      const after = clampDistance(state, before * factor);
+      if (worldPoint && before > 0) {
+        const t = 1 - after / before;
+        state.target = vAdd(state.target, vScale(vSub(worldPoint, state.target), t));
+      }
+      state.distance = after;
+      return api;
+    },
+  };
+
+  return api;
+}
+
+function clampDistance(state, d) {
+  return Math.max(state.partSize * ZOOM_MIN_FACTOR, Math.min(state.partSize * ZOOM_MAX_FACTOR, d));
+}
+
 /* ==== app/camera.js ================================================= */
 /*
  * CAD-style camera controls.
@@ -10749,19 +11444,41 @@ function buildLegend(mode, analysis) {
  *   R                reset to iso
  *
  * Written against the global THREE from the CDN build.
+ *
+ * The pose itself lives in camera-state.js, which knows nothing about three.js
+ * or the DOM: an orientation quaternion, a target and a distance, replacing the
+ * theta/phi/radius pair this file used to carry. What is left here is event
+ * plumbing — reading pixels off events, unprojecting a cursor, and copying the
+ * result onto a THREE camera.
+ *
+ * The move was made for the 6-DoF device work, which needs a camera that can
+ * express roll, but it pays for itself immediately: the pose arithmetic now has
+ * tests, where before its correctness lived entirely in whether an orbit felt
+ * right. Every constant below is the one that was here before, and the eye
+ * positions the new state produces match the old formula to one part in 10¹³.
  */
+
+/* Radians of orbit per pixel dragged. Unchanged, and the feel depends on it. */
+const ORBIT_PER_PX = 0.008;
+
 function createCameraControls(viewerEl, camera, getMesh, onViewChange) {
-  let theta = Math.PI / 4;
-  let phi = Math.PI / 3;
-  let radius = 200;
-  let partDiag = 100;
-  const target = new THREE.Vector3();
+  const state = createCameraState({
+    orientation: quatFromThetaPhi(Math.PI / 4, Math.PI / 3),
+    distance: 200,
+    partSize: 100,
+  });
 
   function update() {
-    camera.position.x = target.x + radius * Math.sin(phi) * Math.cos(theta);
-    camera.position.y = target.y + radius * Math.cos(phi);
-    camera.position.z = target.z + radius * Math.sin(phi) * Math.sin(theta);
-    camera.lookAt(target);
+    const eye = state.eye;
+    camera.position.set(eye[0], eye[1], eye[2]);
+    /*
+     * The orientation is copied rather than recovered with `lookAt`. lookAt
+     * rebuilds it from the camera's `up`, which silently discards any roll —
+     * fine while only a mouse could drive this, and wrong the moment a device
+     * can.
+     */
+    const q = state.orientation;
+    camera.quaternion.set(q[0], q[1], q[2], q[3]);
   }
 
   let mode = null;              // 'orbit' | 'pan' | 'pinch' | null
@@ -10772,40 +11489,41 @@ function createCameraControls(viewerEl, camera, getMesh, onViewChange) {
 
   /* Convert screen pixels to world units at the target's depth. */
   function panBy(dxScreen, dyScreen) {
-    const fov = camera.fov * Math.PI / 180;
-    const worldPerPx = (2 * Math.tan(fov / 2) * radius) / Math.max(1, viewerEl.clientHeight);
-    const forward = new THREE.Vector3();
-    camera.getWorldDirection(forward);
-    const right = new THREE.Vector3().crossVectors(forward, camera.up).normalize();
-    const camUp = new THREE.Vector3().crossVectors(right, forward).normalize();
-    target.addScaledVector(right, -dxScreen * worldPerPx);
-    target.addScaledVector(camUp, dyScreen * worldPerPx);
+    const worldPerPx = state.worldPerPixel(camera.fov * Math.PI / 180, viewerEl.clientHeight);
+    state.pan(-dxScreen * worldPerPx, dyScreen * worldPerPx);
+  }
+
+  /*
+   * The world point under a screen position, at the target's depth.
+   *
+   * Where the cursor ray crosses the plane through the target square to the
+   * view direction — which is the depth a zoom should hold still, since it is
+   * the depth the part is at.
+   */
+  function planePointAt(anchorPx) {
+    const rect = viewerEl.getBoundingClientRect();
+    const ndc = new THREE.Vector3(
+      ((anchorPx.x - rect.left) / rect.width) * 2 - 1,
+      -((anchorPx.y - rect.top) / rect.height) * 2 + 1,
+      0.5,
+    );
+    ndc.unproject(camera);
+    const rayDir = ndc.sub(camera.position).normalize();
+    const viewDir = new THREE.Vector3();
+    camera.getWorldDirection(viewDir);
+    const t = state.target;
+    const camToTarget = new THREE.Vector3(t[0], t[1], t[2]).sub(camera.position);
+    const denom = rayDir.dot(viewDir);
+    if (Math.abs(denom) <= 1e-6) return null;
+    const tDist = camToTarget.dot(viewDir) / denom;
+    const p = camera.position.clone().addScaledVector(rayDir, tDist);
+    return [p.x, p.y, p.z];
   }
 
   /* factor < 1 zooms in. anchorPx keeps the point under the cursor roughly
      fixed by sliding the target along the cursor ray. */
   function zoomBy(factor, anchorPx) {
-    const newRadius = Math.max(partDiag * 0.05, Math.min(partDiag * 20, radius * factor));
-    if (anchorPx) {
-      const rect = viewerEl.getBoundingClientRect();
-      const ndc = new THREE.Vector3(
-        ((anchorPx.x - rect.left) / rect.width) * 2 - 1,
-        -((anchorPx.y - rect.top) / rect.height) * 2 + 1,
-        0.5,
-      );
-      ndc.unproject(camera);
-      const rayDir = ndc.sub(camera.position).normalize();
-      const viewDir = new THREE.Vector3();
-      camera.getWorldDirection(viewDir);
-      const camToTarget = new THREE.Vector3().subVectors(target, camera.position);
-      const denom = rayDir.dot(viewDir);
-      if (Math.abs(denom) > 1e-6) {
-        const tDist = camToTarget.dot(viewDir) / denom;
-        const cursorWorld = camera.position.clone().addScaledVector(rayDir, tDist);
-        target.lerp(cursorWorld, 1 - newRadius / radius);
-      }
-    }
-    radius = newRadius;
+    state.zoomToward(factor, anchorPx ? planePointAt(anchorPx) : null);
   }
 
   function pickPointAt(px, py) {
@@ -10832,9 +11550,9 @@ function createCameraControls(viewerEl, camera, getMesh, onViewChange) {
     g.boundingBox.getCenter(center);
     g.boundingBox.getSize(size);
     const maxDim = Math.max(size.x, size.y, size.z);
-    target.copy(center);
-    radius = maxDim * 2.2;
-    partDiag = Math.max(maxDim, 1);
+    state.setPartSize(Math.max(maxDim, 1));
+    state.setTarget([center.x, center.y, center.z]);
+    state.setDistance(maxDim * 2.2);
     update();
   }
 
@@ -10858,8 +11576,7 @@ function createCameraControls(viewerEl, camera, getMesh, onViewChange) {
     dragDist += Math.abs(dx) + Math.abs(dy);
     lastX = e.clientX; lastY = e.clientY;
     if (mode === 'orbit') {
-      theta -= dx * 0.008;
-      phi = Math.max(0.05, Math.min(Math.PI - 0.05, phi - dy * 0.008));
+      state.orbit(dx * ORBIT_PER_PX, -dy * ORBIT_PER_PX);
       if (onViewChange) onViewChange('free');
     } else if (mode === 'pan') {
       panBy(dx, dy);
@@ -10881,7 +11598,7 @@ function createCameraControls(viewerEl, camera, getMesh, onViewChange) {
 
   viewerEl.addEventListener('dblclick', (e) => {
     const p = pickPointAt(e.clientX, e.clientY);
-    if (p) { target.copy(p); update(); } else { frameToFit(); }
+    if (p) { state.setTarget([p.x, p.y, p.z]); update(); } else { frameToFit(); }
   });
 
   // ── touch ────────────────────────────────────────────────────────────────
@@ -10894,7 +11611,7 @@ function createCameraControls(viewerEl, camera, getMesh, onViewChange) {
       touch1 = { x: e.touches[0].clientX, y: e.touches[0].clientY };
       touch2 = { x: e.touches[1].clientX, y: e.touches[1].clientY };
       pinchStartDist = Math.hypot(touch2.x - touch1.x, touch2.y - touch1.y);
-      pinchStartRadius = radius;
+      pinchStartRadius = state.distance;
       mode = 'pinch';
     }
   }, { passive: true });
@@ -10905,15 +11622,14 @@ function createCameraControls(viewerEl, camera, getMesh, onViewChange) {
       const x = e.touches[0].clientX, y = e.touches[0].clientY;
       const dx = x - lastX, dy = y - lastY;
       dragDist += Math.abs(dx) + Math.abs(dy);
-      theta -= dx * 0.008;
-      phi = Math.max(0.05, Math.min(Math.PI - 0.05, phi - dy * 0.008));
+      state.orbit(dx * ORBIT_PER_PX, -dy * ORBIT_PER_PX);
       lastX = x; lastY = y;
       update();
     } else if (mode === 'pinch' && e.touches.length === 2) {
       const ax = e.touches[0].clientX, ay = e.touches[0].clientY;
       const bx = e.touches[1].clientX, by = e.touches[1].clientY;
       const dist = Math.hypot(bx - ax, by - ay);
-      radius = Math.max(partDiag * 0.05, Math.min(partDiag * 20, pinchStartRadius * (pinchStartDist / Math.max(dist, 0.001))));
+      state.setDistance(pinchStartRadius * (pinchStartDist / Math.max(dist, 0.001)));
       panBy((ax + bx) / 2 - (touch1.x + touch2.x) / 2, (ay + by) / 2 - (touch1.y + touch2.y) / 2);
       touch1 = { x: ax, y: ay }; touch2 = { x: bx, y: by };
       update();
@@ -10926,19 +11642,41 @@ function createCameraControls(viewerEl, camera, getMesh, onViewChange) {
 
   return {
     setTarget(t, r) {
-      target.copy(t);
-      radius = r;
-      /* radius is set to ~2.2 × maxDim by callers, so this recovers a usable
-         scale reference for the zoom clamps. */
-      partDiag = r * 0.45;
+      state.setTarget([t.x, t.y, t.z]);
+      /* partSize first: the distance is clamped against it, and setting them
+         the other way round clamps the new distance to the old part's scale.
+         `r` is ~2.2 × maxDim by every caller, so this recovers the size. */
+      state.setPartSize(r * 0.45);
+      state.setDistance(r);
       update();
     },
-    setAngles(theta_, phi_) { theta = theta_; phi = phi_; update(); },
+    setAngles(theta_, phi_) { state.setAngles(theta_, phi_); update(); },
     frame: frameToFit,
     zoomIn() { zoomBy(0.8, null); update(); },
     zoomOut() { zoomBy(1.25, null); update(); },
     dragDistance: () => dragDist,
     pickPointAt,
+
+    /*
+     * A 6-DoF sample, integrated over `dt` seconds.
+     *
+     * The seam the device work plugs into, and the seam a test drives: nothing
+     * about a physical puck is testable in CI, so the transport stays outside
+     * and what arrives here is six numbers. See navigator.js for what happens
+     * to them.
+     */
+    applyRates(sample, dt, settings = NAVIGATOR_DEFAULTS) {
+      const moved = applyRates(state, sample, dt, settings);
+      if (moved) {
+        if (onViewChange) onViewChange('free');
+        update();
+      }
+      return moved;
+    },
+
+    /* For tests and for anything that needs to read the pose without going
+       through three.js. */
+    state,
   };
 }
 
@@ -13526,6 +14264,91 @@ function onFieldChange(key) {
   if (key === 'material') panel.updateOnboarding();
 }
 
+/* ══ 6-DoF device ════════════════════════════════════════════════════════ */
+
+/*
+ * A 3Dconnexion puck, if the browser has one and the user wants it connected.
+ *
+ * Chromium-only, so the whole thing degrades to silence: the button is hidden
+ * where `navigator.hid` does not exist, and nothing anywhere else in the page
+ * mentions the feature. A user without a device sees no change at all, which
+ * is the requirement.
+ */
+let spaceMouse = null;      // { source, loop }
+
+/*
+ * Rates, damped for a reduced-motion preference.
+ *
+ * The setting is about motion the page inflicts on someone. This is motion the
+ * user is producing themselves, one frame at a time, with their hand on the
+ * control — so refusing to move at all would be useless rather than kind. Half
+ * rate is the deliberate answer: the device still works, and it works more
+ * slowly for someone who asked for less movement.
+ */
+function navigatorSettings() {
+  const reduced = typeof matchMedia === 'function'
+    && matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (!reduced) return NAVIGATOR_DEFAULTS;
+  return {
+    ...NAVIGATOR_DEFAULTS,
+    rotateRate: NAVIGATOR_DEFAULTS.rotateRate / 2,
+    panRate: NAVIGATOR_DEFAULTS.panRate / 2,
+    dollyRate: NAVIGATOR_DEFAULTS.dollyRate / 2,
+  };
+}
+
+function attachSpaceMouse(device) {
+  const controls = viewer.getControls();
+  if (!device || !controls) return false;
+  if (spaceMouse) { spaceMouse.loop.stop(); spaceMouse.source.close(); }
+  const source = createHidSource(device);
+  const loop = createNavigatorLoop({ source, controls, settings: navigatorSettings() });
+  loop.start();
+  spaceMouse = { source, loop };
+
+  const btn = $('spaceMouseBtn');
+  btn.classList.add('active');
+  btn.setAttribute('aria-pressed', 'true');
+  btn.title = `${device.productName || '6-DoF device'} connected — ${source.axisCount} of 6 axes declared`;
+  /* Unplugging is the ordinary way this ends. */
+  if (navigator.hid && navigator.hid.addEventListener) {
+    navigator.hid.addEventListener('disconnect', (e) => {
+      if (e.device !== device || !spaceMouse) return;
+      spaceMouse.loop.stop();
+      spaceMouse = null;
+      btn.classList.remove('active');
+      btn.setAttribute('aria-pressed', 'false');
+      btn.title = 'Connect a 3Dconnexion SpaceMouse';
+    });
+  }
+  return true;
+}
+
+async function initSpaceMouse() {
+  if (!hidAvailable()) return;
+  const btn = $('spaceMouseBtn');
+  btn.hidden = false;
+  btn.addEventListener('click', async () => {
+    try {
+      /* requestDevice needs the user gesture this handler is running inside,
+         so it cannot be moved off the click. */
+      const device = await requestSpaceMouse();
+      if (!device) return;                    // the chooser was dismissed
+      if (attachSpaceMouse(device)) toast(`${device.productName || 'Device'} connected.`, 'info');
+    } catch (err) {
+      console.error(err);
+      toast(`Could not open the device: ${err.message}`, 'error');
+    }
+  });
+
+  /* Permission persists per origin, so someone who granted it once should not
+     have to click again. Silent either way. */
+  try {
+    const known = await alreadyGrantedSpaceMouse();
+    if (known) attachSpaceMouse(known);
+  } catch { /* nothing to say about a device that is not there */ }
+}
+
 /* ══ boot ════════════════════════════════════════════════════════════════ */
 
 function checkDependencies() {
@@ -13652,6 +14475,7 @@ function boot() {
     if (e.target.files.length) doCompare(e.target.files[0]);
     e.target.value = ''; // allow re-selecting the same file
   });
+  initSpaceMouse();
   $('pdfBtn').addEventListener('click', doExportPDF);
   $('packageBtn').addEventListener('click', doExportPackage);
 
