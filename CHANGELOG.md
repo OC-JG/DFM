@@ -165,6 +165,11 @@ until it was settled.
   hang above — that no async test's result is dropped.
 - **`verify:build`** rebuilds `dfm-tool.html` and fails if it differs from the
   committed copy, so a source-only commit cannot ship a stale deliverable.
+- **A performance budget** (`test/perf.mjs`). It budgets the work the analysis
+  asks for — rays cast, BVH nodes visited, triangles tested, which are the same
+  integers on every machine — rather than the time it takes, which on an idle
+  machine varies by 1.8× between runs of the same analysis. Wall clock is
+  reported beside it with a deliberately loose backstop.
 - **A linter**: Biome, linter only, running first in CI with
   `--error-on-warnings` — without which it exits 0 on the warnings that are
   most of what it finds. The formatter is deliberately off; `biome.jsonc` has

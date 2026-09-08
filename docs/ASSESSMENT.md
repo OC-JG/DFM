@@ -1002,6 +1002,12 @@ slow, `SPHERE_SAMPLE_BUDGET` and `CONE_RINGS_DEG` in `src/analysis/mesh.js` are
 the two levers, and the measurements justifying their current values are in the
 comments beside them.
 
+*Since this was written, `test/perf.mjs` holds both levers still. Not by timing
+the run — the numbers above are a 1.8× spread away from being a threshold — but
+by counting the work: rays cast, BVH nodes visited, triangles tested, which are
+the same integers on every machine. Both levers are ray counts, so both are
+covered.*
+
 ### Still open, in priority order
 
 *Superseded by `docs/ROADMAP.md`, which sequences these into milestones with

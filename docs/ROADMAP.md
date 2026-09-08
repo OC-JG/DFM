@@ -700,10 +700,48 @@ mouse — **unverified**, for want of hardware.
   change with layout consequences and a keyboard path to re-test, so it is
   recorded here rather than made inside a lint pass. It is the one finding from
   this item left undone on purpose.
-- **A performance budget.** `docs/ASSESSMENT.md` records a run going from 1,469 ms
-  to 2,531 ms and names the two levers that control it, but nothing measures it,
-  so the next regression will be found by feel. A benchmark script over a fixed
-  fixture with a budget CI can fail on is a day's work.
+- **A performance budget.** *(done, and not the one this item described)*
+  `test/perf.mjs`, running in CI after the unit tests.
+
+  The item said "a benchmark script over a fixed fixture with a budget CI can
+  fail on", and the first thing the work found is that CI cannot fail on a
+  benchmark. Six runs of the same analysis over the same geometry in the same
+  process, on an idle machine, spread **274 ms to 497 ms** — and two separate
+  invocations disagreed about the *minimum* by 9%. A shared runner is worse. A
+  threshold loose enough to survive that cannot see a doubling; one tight
+  enough to see a doubling fails on Tuesdays. Either way it becomes a check
+  people learn to ignore, and the item three above this one is the record of
+  what that costs.
+
+  So what is budgeted is the *work*, not the time: rays cast, BVH nodes
+  visited, triangles tested, counted in `src/geometry/bvh.js`. Those are the
+  same integers on every run and on every machine — asserted, not assumed —
+  and they are directly downstream of both levers the assessment named
+  (`SPHERE_SAMPLE_BUDGET` *is* a ray count; `CONE_RINGS_DEG` ×
+  `CONE_AZIMUTHS` is 33 rays per sampled point). Wall clock is reported beside
+  them with an 8× backstop, which is there to catch a synchronous network call
+  or an accidental O(n²) and is honest about catching nothing else.
+
+  Two fixtures: a drafted shell subdivided to 24,576 triangles (224,216 rays,
+  12.3M node visits) and the internal-ledge cup at 1,536 triangles (123,424
+  rays, 4.7M node visits). The cup earns its place by being small and expensive
+  — ray count is driven by the sample budgets, not by the mesh — and by being
+  the undercut case, where rays go in the parting plane rather than along a
+  face normal.
+
+  Two design points worth keeping. A budget is a **ceiling, not a snapshot**:
+  work going down never fails, because an optimisation should not have to edit
+  a test to land. And work dropping far *below* the recorded figure does fail,
+  asking to be recorded — a budget nobody ratchets down lets the next change
+  give the whole saving back unnoticed.
+
+  Verified by mutation, and one of them is a better demonstration than
+  anything I would have designed: dropping `LEAF_THRESH` from 8 to 3 moves
+  node visits **+17%** and triangle tests **−65%**, and the budget reports
+  both, because the trade a BVH leaf size makes is exactly what a single
+  number would have hidden. Raising `SPHERE_SAMPLE_BUDGET` by 30% moves rays
+  8.6%, which is what set the tolerance: at the 10% I first wrote, that change
+  passed.
 - **`.gitattributes` for the built file.** *(done, with one of its two halves
   refused)* `dfm-tool.html` — 820 kB now, not the 579 kB above — is marked
   `linguist-generated=true`, which collapses it in GitHub diffs and keeps it

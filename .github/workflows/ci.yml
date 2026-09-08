@@ -50,6 +50,12 @@ jobs:
       - name: Inventor bridge
         run: npm run test:bridge
 
+      # Budgets the work the analysis asks for — rays, BVH nodes, triangles —
+      # rather than the time it takes, because the time is too noisy on a
+      # shared runner to fail a build on and the work is not noisy at all.
+      - name: Performance budget
+        run: npm run test:perf
+
       # dfm-tool.html is the deliverable and is committed to the repository. A
       # source-only commit would otherwise ship a stale one, silently.
       - name: Built artifact matches src/

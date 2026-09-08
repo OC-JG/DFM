@@ -77,6 +77,9 @@ jobs:
       - name: Inventor bridge
         run: npm run test:bridge
 
+      - name: Performance budget
+        run: npm run test:perf
+
       # Proves the committed deliverable is the one these sources build, which
       # is what makes the fingerprint in the release asset mean anything.
       - name: Built artifact matches src/

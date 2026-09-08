@@ -68,12 +68,13 @@ puts the normal one back. STEP import is not covered: the OpenCascade reader is
 ```sh
 npm install            # only needed for the tests
 npm run browser        # once: fetches the Chromium the smoke test drives
-npm test               # build + lint + unit tests + fixtures + browser smoke test
+npm test               # build + lint + unit + perf + fixtures + browser smoke test
 
 npm run lint           # Biome, linter only — see biome.jsonc for why the formatter is off
 npm run test:unit      # just the unit tests: no browser, no network, sub-second
 npm run test:step      # the STEP path, which is also the .ipt path
 npm run test:bridge    # the Inventor loop, against a fake InventorMCP
+npm run test:perf      # the work budget: rays, BVH nodes and triangles tested
 npm run test:offline   # proves the --vendor build runs with no network at all
 npm run verify:build   # asserts the committed dfm-tool.html matches src/
 ```

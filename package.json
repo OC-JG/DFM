@@ -15,9 +15,10 @@
     "test:contract": "node test/contract.mjs",
     "test:step": "node test/step.mjs",
     "test:bridge": "node test/bridge.mjs",
+    "test:perf": "node test/perf.mjs",
     "test:smoke": "node build.js && node test/make-fixtures.mjs && node test/smoke.mjs",
     "test:offline": "node build.js --vendor && node test/make-fixtures.mjs && node test/offline.mjs && node build.js",
-    "test": "node build.js && npm run lint && node test/contract.mjs && node test/unit.mjs && node test/step.mjs && node test/bridge.mjs && node test/make-fixtures.mjs && node test/smoke.mjs",
+    "test": "node build.js && npm run lint && node test/contract.mjs && node test/unit.mjs && node test/step.mjs && node test/bridge.mjs && node test/perf.mjs && node test/make-fixtures.mjs && node test/smoke.mjs",
     "verify:build": "node build.js && git diff --exit-code -- dfm-tool.html",
     "release:check": "node release.js"
   },
@@ -29,6 +30,7 @@
     "three": "0.128.0"
   },
   "comments": {
+    "test:perf": "The performance budget. Wall clock cannot carry one \u2014 six runs of the same analysis on an idle machine spread 274 to 497 ms \u2014 so what is budgeted is the work the analysis asks for: rays cast, BVH nodes visited, triangles tested, which are the same integers on every run and every machine. Wall clock is reported beside them with an 8x backstop, there to catch an accidental O(n\u00b2) rather than a 20% regression.",
     "lint": "Biome, linter only \u2014 the formatter is off, and biome.json says why: reformatting this codebase moves 11,000 lines and turns the 16-grade material table, whose columns line up so two grades can be compared by eye, into 252 lines of one property each. --error-on-warnings is not optional: biome exits 0 on warnings, and most of the rules worth having here report as warnings, so without it the step passes while finding things.",
     "release:check": "node release.js v2.1.0 checks the three things a release has to get right — the tag names a version, package.json says that version, and CHANGELOG.md has a non-empty section for it — and prints the release notes it would publish. The same gate runs first in .github/workflows/release.yml, before anything expensive; running it locally before pushing the tag is cheaper than deleting a bad tag from the remote.",
     "devDependencies": "None of these are shipped. occt-import-js is the same OpenCascade reader dfm-tool.html fetches from a CDN for STEP files, pinned to the same version, present here so the STEP path can be tested in Node. dfm-tool.html loads three.js and jsPDF from a CDN at runtime; the smoke test serves these local copies in their place so it never touches the network. playwright drives the browser it runs in.",
