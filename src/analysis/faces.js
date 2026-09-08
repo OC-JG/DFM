@@ -1,3 +1,5 @@
+import { jacobiEigen } from './linalg.js';
+
 /*
  * Per-face measurement.
  *
@@ -38,48 +40,6 @@ const CYL_FIT_TOL = 0.02;
 const FULL_ROUND_MIN_DEG = 300;
 
 // ── small linear algebra ────────────────────────────────────────────────────
-
-/* Eigen-decomposition of a symmetric 3×3 by cyclic Jacobi rotations. Written
-   out rather than pulled in because it is thirty lines and the alternative is
-   a dependency in a file that has none. Converges in a handful of sweeps for
-   a matrix this size. */
-function jacobiEigen(m) {
-  const a = [m[0].slice(), m[1].slice(), m[2].slice()];
-  const v = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
-
-  for (let sweep = 0; sweep < 24; sweep++) {
-    let off = 0;
-    for (let p = 0; p < 3; p++) for (let q = p + 1; q < 3; q++) off += a[p][q] * a[p][q];
-    if (off < 1e-30) break;
-
-    for (let p = 0; p < 2; p++) {
-      for (let q = p + 1; q < 3; q++) {
-        if (Math.abs(a[p][q]) < 1e-300) continue;
-        const theta = (a[q][q] - a[p][p]) / (2 * a[p][q]);
-        const t = Math.sign(theta || 1) / (Math.abs(theta) + Math.sqrt(theta * theta + 1));
-        const c = 1 / Math.sqrt(t * t + 1);
-        const s = t * c;
-        for (let k = 0; k < 3; k++) {
-          const akp = a[k][p], akq = a[k][q];
-          a[k][p] = c * akp - s * akq;
-          a[k][q] = s * akp + c * akq;
-        }
-        for (let k = 0; k < 3; k++) {
-          const apk = a[p][k], aqk = a[q][k];
-          a[p][k] = c * apk - s * aqk;
-          a[q][k] = s * apk + c * aqk;
-          const vkp = v[k][p], vkq = v[k][q];
-          v[k][p] = c * vkp - s * vkq;
-          v[k][q] = s * vkp + c * vkq;
-        }
-      }
-    }
-  }
-
-  const out = [0, 1, 2].map((i) => ({ value: a[i][i], vector: [v[0][i], v[1][i], v[2][i]] }));
-  out.sort((x, y) => x.value - y.value);
-  return out;
-}
 
 function normalise(v) {
   const m = Math.hypot(v[0], v[1], v[2]);

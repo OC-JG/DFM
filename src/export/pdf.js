@@ -165,6 +165,15 @@ function stripMarkup(text) {
   return String(text).replace(/<[^>]+>/g, '');
 }
 
+/* How the interface figures should be read: as the two files arrived, or
+   after shot 2 was moved onto shot 1. */
+function interfaceFrame(reg) {
+  if (!reg) return 'As loaded';
+  if (reg.applied) return `Registered — shot 2 moved ${reg.offsetMm.toFixed(2)} mm, ${reg.rotationDeg.toFixed(1)}\u00b0`;
+  if (reg.attempted) return 'As loaded — alignment tried, not applied';
+  return 'As loaded';
+}
+
 export async function exportPDF({ sessionId, dfm, analysis, twoShot, validation, shot, cycle, cost, tooling, settings }) {
   const jsPDF = await loadJsPDF();
   const doc = new jsPDF({ unit: 'mm', format: 'a4' });
@@ -400,6 +409,10 @@ export async function exportPDF({ sessionId, dfm, analysis, twoShot, validation,
       ['Shot 2 (overmould)', twoShot.mat2.name],
       ['Window type', settings.windowType],
       ['Adhesion', twoShot.compat.adhesion.toUpperCase()],
+      /* Beside the figures, not only in the finding below them: a printed
+         coverage means something different depending on whether shot 2 was
+         moved onto shot 1 to produce it. */
+      ['Interface frame', interfaceFrame(twoShot.registration)],
       ['Interface coverage', twoShot.iface ? `${twoShot.iface.coverPct.toFixed(0)}%` : '—'],
       ['Min overmould', twoShot.iface ? `${twoShot.iface.minThk.toFixed(2)} mm` : '—'],
       ['Avg overmould', twoShot.iface ? `${twoShot.iface.avgThk.toFixed(2)} mm` : '—'],

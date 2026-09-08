@@ -6,7 +6,7 @@ import { formatPullAxis } from '../analysis/stats.js';
  * Includes the two-shot block, which the original omitted: running an
  * overmould analysis and then exporting produced a file with no trace of it.
  */
-export function buildExportJSON({ sessionId, dfm, analysis, twoShot, interface: iface, validation, shot, cycle, cost, tooling, settings }) {
+export function buildExportJSON({ sessionId, dfm, analysis, twoShot, interface: iface, registration, validation, shot, cycle, cost, tooling, settings }) {
   const out = {
     tool: 'OnlyCat DFM',
     session: sessionId,
@@ -110,10 +110,33 @@ export function buildExportJSON({ sessionId, dfm, analysis, twoShot, interface: 
       adhesion: twoShot.compat.adhesion,
       adhesion_notes: twoShot.compat.notes,
       interface: iface ? {
+        /* Which frame these were measured in, alongside the numbers rather
+           than only in the finding text: an export travels, and a coverage
+           figure means something different depending on whether shot 2 was
+           moved to produce it. */
+        measured_in: (registration && registration.applied) ? 'registered' : 'as_loaded',
         coverage_pct: iface.coverPct,
         interface_area_mm2: iface.coverArea,
         min_thickness_mm: iface.minThk,
         avg_thickness_mm: iface.avgThk,
+      } : null,
+      registration: registration ? {
+        applied: registration.applied,
+        reason: registration.reason,
+        interface_gap_as_loaded_mm: registration.residualBefore,
+        mating_tolerance_mm: registration.engageTol,
+        residual_rms_mm: registration.residualRms,
+        residual_p95_mm: registration.residualP95,
+        offset_applied_mm: registration.applied ? registration.offsetMm : null,
+        rotation_applied_deg: registration.applied ? registration.rotationDeg : null,
+        /* The transform itself, so a reader can reproduce the pose the
+           figures above were measured in rather than take them on trust. */
+        transform: registration.transform
+          ? { rotation_row_major: Array.from(registration.transform.r), translation_mm: Array.from(registration.transform.t) }
+          : null,
+        coarse_start: registration.coarse || null,
+        poses_tried: registration.candidatesTried || null,
+        sample_points: registration.samples,
       } : null,
       checks: twoShot.checks.map((c) => ({
         key: c.key, name: c.name, status: c.status, detail: c.detail,

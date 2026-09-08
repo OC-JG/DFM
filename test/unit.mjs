@@ -13,7 +13,7 @@
 import * as S from './lib/shapes.mjs';
 import * as R from './lib/reference.mjs';
 import { weldGeometry } from '../src/geometry/weld.js';
-import { castRay } from '../src/geometry/bvh.js';
+import { buildBVH, castRay, closestPoint } from '../src/geometry/bvh.js';
 import { validateGeometry, rescaleGeometry, flipWinding } from '../src/geometry/validate.js';
 import { analyseMesh, suggestPullDirection, CONE_RINGS_DEG, CONE_AZIMUTHS } from '../src/analysis/mesh.js';
 import { stats, medianCI95, makeRandom } from '../src/analysis/stats.js';
@@ -31,6 +31,12 @@ import {
   PRACTICAL_COOLING_FACTOR, COOLING_SHARE,
 } from '../src/analysis/cost.js';
 import { searchGateCandidates, computeFlowLengths, buildAdjacency, geodesicFrom } from '../src/analysis/flow.js';
+import { jacobiEigen } from '../src/analysis/linalg.js';
+import {
+  registerShots, fitRigid, rotationDegOf, identityXform, xformPoint,
+  ENGAGE_FRACTION, ENGAGE_FLOOR_MM, RESIDUAL_IMPROVE, REGISTER_TRIM,
+} from '../src/analysis/register.js';
+import { analyseInterface } from '../src/analysis/interface.js';
 import { effectiveMinDraft } from '../src/core/finishes.js';
 import { MATERIALS, MATERIAL_ORDER } from '../src/core/materials.js';
 import { DEFAULT_SETTINGS } from '../src/app/state.js';
@@ -848,6 +854,46 @@ describe('scoring — one source of truth');
     }
     eq(json.scoring.budget, r.budget, 'exported budget:');
     close(json.scoring.deduction, r.totalDeduction, 0.05, 'exported deduction:');
+  });
+
+  it('the JSON export says which frame the interface figures are in', () => {
+    const IFACE = { coverPct: 45, coverArea: 5200, minThk: 2, avgThk: 2, totalArea2: 11936 };
+    const REG = {
+      attempted: true, applied: true, reason: 'registered',
+      transform: { r: [1, 0, 0, 0, 1, 0, 0, 0, 1], t: [3, 0, 0] },
+      coarse: 'centroid', candidatesTried: 7, engageTol: 0.54,
+      offsetMm: 3, rotationDeg: 0, residualBefore: 6.2,
+      residualRms: 0.001, residualP95: 0.002, inlierCount: 640,
+      coveragePctBefore: 42, coveragePctAfter: 45, samples: 1500,
+    };
+    const r = runDFM({ ...CLEAN_INPUT, mesh: meshFor(S.hollowBox([40, 30, 20], 2)) });
+    const base = {
+      sessionId: 'TEST', dfm: { input: CLEAN_INPUT, result: r }, analysis: null,
+      twoShot: runTwoShotDFM({ mat1: 'pcasa', mat2: 'asa_n', interface: IFACE, opticalWindow: 'ir' }),
+      interface: IFACE, validation: null,
+      settings: { analysisMode: 'twoshot', windowType: 'ir' },
+    };
+
+    const moved = buildExportJSON({ ...base, registration: REG });
+    eq(moved.two_shot.interface.measured_in, 'registered', 'frame:');
+    eq(moved.two_shot.registration.applied, true, 'applied:');
+    close(moved.two_shot.registration.interface_gap_as_loaded_mm, 6.2, 0, 'gap as loaded:');
+    close(moved.two_shot.registration.offset_applied_mm, 3, 0, 'offset:');
+    /* The transform itself, so the pose can be reproduced rather than trusted. */
+    eq(moved.two_shot.registration.transform.translation_mm.length, 3, 'translation:');
+    eq(moved.two_shot.registration.transform.rotation_row_major.length, 9, 'rotation:');
+
+    const asLoaded = buildExportJSON({ ...base, registration: null });
+    eq(asLoaded.two_shot.interface.measured_in, 'as_loaded', 'frame with no registration:');
+    eq(asLoaded.two_shot.registration, null, 'registration block:');
+
+    const declined = buildExportJSON({
+      ...base,
+      registration: { ...REG, applied: false, reason: 'no-improvement', transform: null },
+    });
+    eq(declined.two_shot.interface.measured_in, 'as_loaded', 'frame when declined:');
+    eq(declined.two_shot.registration.offset_applied_mm, null, 'no offset was applied:');
+    eq(declined.two_shot.registration.transform, null, 'no transform:');
   });
 
   it('two-shot scores through the same mechanism', () => {
@@ -1688,6 +1734,464 @@ describe('a check that costs points cannot look like a pass');
         }
       }
     }
+  });
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('closest point on a mesh');
+{
+  /* The primitive registration is built on, so it gets a reference of its own
+     rather than being trusted because the thing above it converged. */
+  const geom = weld(S.subdivideSoup(S.box([40, 30, 20]), 1));
+  const bvh = buildBVH(geom);
+  const out = new Float64Array(4);
+
+  const probes = [
+    ['outside a face', [20, 15, 30]],
+    ['outside a corner', [-7, -7, -7]],
+    ['outside an edge', [50, 15, -6]],
+    ['inside the solid', [20, 15, 10]],
+    ['on the surface', [20, 15, 20]],
+    ['far away, off-axis', [-40, 70, 55]],
+  ];
+
+  for (const [name, [px, py, pz]] of probes) {
+    it(`${name}: matches a brute-force sweep of every triangle`, () => {
+      const got = closestPoint(bvh, geom, px, py, pz, Infinity, out);
+      const want = R.referenceClosestPoint(geom, px, py, pz);
+      /* The reference samples a barycentric grid, so it can only over-report.
+         The shipped answer must not exceed it, and must not fall far below. */
+      assert(got <= want + 1e-9, `found ${got}, reference floor ${want}`);
+      close(got, want, Math.max(0.05, want * 0.02), `${name}:`);
+    });
+  }
+
+  it('the returned point lies on the surface, at the returned distance', () => {
+    const got = closestPoint(bvh, geom, -7, 40, 26, Infinity, out);
+    close(Math.hypot(out[0] + 7, out[1] - 40, out[2] - 26), got, 1e-9, 'point vs distance:');
+    assert(out[3] >= 0 && out[3] < geom.triCount, `triangle index ${out[3]} out of range`);
+  });
+
+  /*
+   * A lone triangle, so each of the seven regions of the point–triangle test
+   * is the only thing that can produce the answer. On a closed mesh they are
+   * not: a probe outside a box edge is in some triangle's edge region and some
+   * other triangle's vertex region, so a broken branch is covered for by a
+   * neighbour and the box probes above pass with it broken.
+   */
+  {
+    const lone = weld(S.toSoup([0, 0, 0, 10, 0, 0, 0, 8, 0]));
+    const loneBvh = buildBVH(lone);
+    for (const [region, [px, py, pz]] of [
+      ['vertex A', [-4, -3, 2]],
+      ['vertex B', [16, -3, -2]],
+      ['vertex C', [-3, 14, 1]],
+      ['edge AB', [5, -6, 3]],
+      ['edge AC', [-6, 4, -3]],
+      ['edge BC', [9, 8, 2]],
+      ['the face interior', [3, 2, 5]],
+    ]) {
+      it(`lone triangle, ${region} region: matches the definition`, () => {
+        const got = closestPoint(loneBvh, lone, px, py, pz, Infinity, out);
+        const want = R.referenceClosestPoint(lone, px, py, pz, 200);
+        assert(got <= want + 1e-9, `found ${got}, reference floor ${want}`);
+        close(got, want, 0.01, `${region}:`);
+      });
+    }
+  }
+
+  it('respects the search cap, and reports Infinity beyond it', () => {
+    /* 30 mm off the +z face: inside a 31 mm cap, outside a 29 mm one. */
+    assert(isFinite(closestPoint(bvh, geom, 20, 15, 50, 31, out)), 'should find within 31 mm');
+    eq(closestPoint(bvh, geom, 20, 15, 50, 29, out), Infinity, 'should not find within 29 mm:');
+  });
+}
+
+describe('rigid fit — Horn quaternion');
+{
+  /* Proves the convention, which is the part of Horn's method that is easy to
+     get transposed: a transposed correlation matrix yields the inverse
+     rotation, which converges just as prettily onto the wrong pose. */
+  const src = [];
+  let seed = makeRandom(7);
+  for (let i = 0; i < 40; i++) src.push(seed() * 60 - 30, seed() * 40 - 20, seed() * 20 - 10);
+
+  for (const [name, axis, deg, t] of [
+    ['pure translation', [0, 0, 1], 0, [12, -5, 3]],
+    ['90° about z', [0, 0, 1], 90, [0, 0, 0]],
+    ['25° about (1,2,3), translated', [1, 2, 3], 25, [15, -9, 7]],
+    ['179° about y', [0, 1, 0], 179, [-4, 4, -4]],
+  ]) {
+    it(`recovers ${name}`, () => {
+      const truth = S.transformSoup({ positions: new Float32Array(src), triCount: 0 },
+        { axis, deg, translate: t }).xform;
+      const p = new Float64Array(src);
+      const q = new Float64Array(src.length);
+      const tmp = [0, 0, 0];
+      for (let i = 0; i < src.length; i += 3) {
+        xformPoint(p[i], p[i + 1], p[i + 2], truth, tmp);
+        q[i] = tmp[0]; q[i + 1] = tmp[1]; q[i + 2] = tmp[2];
+      }
+      const idx = Uint32Array.from({ length: src.length / 3 }, (_, i) => i);
+      const fit = fitRigid(p, q, idx, idx.length);
+
+      /* Compare by what the transform does, not by its nine numbers: any two
+         that move every point to the same place are the same transform. */
+      for (let i = 0; i < src.length; i += 3) {
+        xformPoint(p[i], p[i + 1], p[i + 2], fit, tmp);
+        close(Math.hypot(tmp[0] - q[i], tmp[1] - q[i + 1], tmp[2] - q[i + 2]), 0, 1e-6, 'point:');
+      }
+      close(rotationDegOf(fit), deg, 1e-4, 'rotation angle:');
+    });
+  }
+
+  it('declines a fit with fewer than three correspondences', () => {
+    eq(fitRigid(new Float64Array(6), new Float64Array(6), Uint32Array.from([0, 1]), 2), null,
+      'two points cannot fix a rotation:');
+  });
+}
+
+describe('jacobiEigen at 4×4');
+{
+  /* Registration needs the 4×4 case, which the 3×3 cylinder fit never
+     exercised. Checked against the definition — A·v = λv — rather than
+     against a table of eigenvalues copied from somewhere. */
+  it('every eigenpair satisfies A·v = λv, and they come out ascending', () => {
+    const a = [
+      [4, 1, -2, 0.5],
+      [1, 3, 0.25, -1],
+      [-2, 0.25, 6, 2],
+      [0.5, -1, 2, -1],
+    ];
+    const eig = jacobiEigen(a);
+    eq(eig.length, 4, 'eigenpair count:');
+    for (let k = 1; k < 4; k++) {
+      assert(eig[k].value >= eig[k - 1].value, 'eigenvalues must ascend');
+    }
+    for (const { value, vector } of eig) {
+      close(Math.hypot(...vector), 1, 1e-9, 'eigenvector should be unit:');
+      for (let i = 0; i < 4; i++) {
+        let av = 0;
+        for (let j = 0; j < 4; j++) av += a[i][j] * vector[j];
+        close(av, value * vector[i], 1e-8, 'A·v vs λv:');
+      }
+    }
+  });
+}
+
+describe('two-shot registration');
+{
+  /*
+   * The fixture is a box and a shell whose cavity is exactly that box, so
+   * every answer is closed-form: overmould thickness is the shell wall
+   * everywhere, and the mating surface is the cavity.
+   *
+   * Subdivided because registration fits a pose: twenty-four face centres on
+   * a shelled box are both too few points and the most symmetric points the
+   * shape has.
+   */
+  const WALL = 2;
+  const SUB = 3;
+  const substrate = weld(S.subdivideSoup(S.box([40, 30, 20]), SUB));
+  const bvh1 = buildBVH(substrate);
+  const shellSoup = S.subdivideSoup(S.shellAround([0, 0, 0], [40, 30, 20], WALL), SUB);
+
+  const shot1 = analyse(substrate, { suggestGate: false });
+  const MAX_DIST = 20;
+
+  /* One place where the pair is measured, so a test can say "the same
+     interface figures" and mean it. */
+  function measure(soup2, { register = true } = {}) {
+    const geom2 = weld(soup2);
+    const shot2 = analyse(geom2, { material: MATERIALS.tpu, suggestGate: false });
+    const reg = register
+      ? registerShots({ geom1: substrate, bvh1, shot1, geom2, shot2, maxDist: MAX_DIST })
+      : null;
+    const iface = analyseInterface(substrate, bvh1, shot2, MAX_DIST,
+      reg && reg.applied ? reg.transform : null);
+    return { reg, iface, geom2 };
+  }
+
+  const MISALIGN = { axis: [1, 2, 3], deg: 25, translate: [15, -9, 7] };
+  const aligned = measure(shellSoup);
+  const movedSoup = S.transformSoup(shellSoup, MISALIGN);
+  const asLoaded = measure(movedSoup, { register: false });
+  const registered = measure(movedSoup);
+
+  it('a pair that arrives mated is left alone', () => {
+    eq(aligned.reg.applied, false, 'nothing to correct:');
+    eq(aligned.reg.reason, 'already-mated', 'reason:');
+    eq(aligned.reg.transform, null, 'no transform:');
+    close(aligned.reg.residualBefore, 0, 1e-3, 'residual at the interface:');
+    close(aligned.iface.minThk, WALL, 0.01, 'min overmould thickness:');
+    close(aligned.iface.avgThk, WALL, 0.01, 'avg overmould thickness:');
+  });
+
+  it('the mating surface is found by direction, not by keeping the closest few', () => {
+    /*
+     * Why the normal filter is there, in numbers. The shell's cavity is 5200
+     * mm² of its 11936 mm² — 43.6% — so any trim above that has to include
+     * outer-surface points sitting a full wall away, and the residual of a
+     * perfectly mated pair comes out around a millimetre. The test above
+     * would fail on that alone; this one records the figure so the reason
+     * cannot be lost.
+     */
+    assert(REGISTER_TRIM > 0.436,
+      'the trim is above the fixture mating fraction, which is the whole point');
+    const out = new Float64Array(4);
+    const dists = [];
+    const { triCount, triAreas, triCentroid } = analyse(weld(shellSoup), { suggestGate: false });
+    for (let t = 0; t < triCount; t++) {
+      if (!(triAreas[t] > 0)) continue;
+      dists.push(closestPoint(bvh1, substrate,
+        triCentroid[t * 3], triCentroid[t * 3 + 1], triCentroid[t * 3 + 2], Infinity, out));
+    }
+    dists.sort((a, b) => a - b);
+    const keep = Math.round(dists.length * REGISTER_TRIM);
+    let sumSq = 0;
+    for (let k = 0; k < keep; k++) sumSq += dists[k] * dists[k];
+    const unfiltered = Math.sqrt(sumSq / keep);
+    assert(unfiltered > 0.5,
+      `closest-${REGISTER_TRIM} residual on a mated pair should be polluted, got ${unfiltered.toFixed(3)}`);
+    assert(aligned.reg.residualBefore < unfiltered / 50,
+      `filtered ${aligned.reg.residualBefore} should be far below unfiltered ${unfiltered}`);
+  });
+
+  it('without registration a misaligned pair measures nonsense, not nothing', () => {
+    /* The defect this milestone exists for. Coverage barely moves — it is
+       higher than the mated pair's, which is why it cannot referee alignment —
+       while the thickness it reports has nothing to do with the part. */
+    assert(asLoaded.iface.coverPct > 10,
+      `a misaligned pair still reports coverage, got ${asLoaded.iface.coverPct.toFixed(1)}%`);
+    assert(asLoaded.iface.minThk < WALL / 2,
+      `min thickness should be wrong, got ${asLoaded.iface.minThk.toFixed(2)}`);
+    assert(asLoaded.iface.avgThk > WALL * 2,
+      `avg thickness should be wrong, got ${asLoaded.iface.avgThk.toFixed(2)}`);
+  });
+
+  it('registers a misaligned pair, and recovers the transform that was applied', () => {
+    eq(registered.reg.applied, true, 'should register:');
+    eq(registered.reg.reason, 'registered', 'reason:');
+
+    /* Composed with the misalignment, the recovered transform must be the
+       identity — the strongest available statement, and independent of any
+       tolerance the tool chose for itself. */
+    const truth = movedSoup.xform;
+    const rec = registered.reg.transform;
+    const probe = [[0, 0, 0], [40, 0, 0], [0, 30, 0], [0, 0, 20], [40, 30, 20]];
+    const a = [0, 0, 0], b = [0, 0, 0];
+    for (const [x, y, z] of probe) {
+      xformPoint(x, y, z, truth, a);
+      xformPoint(a[0], a[1], a[2], rec, b);
+      close(Math.hypot(b[0] - x, b[1] - y, b[2] - z), 0, 0.01, 'round trip:');
+    }
+    close(registered.reg.rotationDeg, MISALIGN.deg, 0.05, 'rotation recovered:');
+    close(registered.reg.offsetMm, Math.hypot(...MISALIGN.translate), 0.05, 'offset recovered:');
+  });
+
+  it('and the interface figures come back to the truth', () => {
+    close(registered.iface.minThk, WALL, 0.01, 'min overmould thickness:');
+    /* The mean sits slightly above the wall where the mated fixture's is exact:
+       rotated rays are no longer parallel to the substrate's faces, so a few
+       near the edge of the cavity footprint hit obliquely instead of missing.
+       An artefact of a fixture whose faces are exactly axis-aligned, not of the
+       registration — the minimum, which is the figure the thickness check
+       judges on, is exact. */
+    close(registered.iface.avgThk, WALL, 0.3, 'avg overmould thickness:');
+    assert(registered.reg.residualRms <= registered.reg.engageTol,
+      `residual ${registered.reg.residualRms} should be inside the mating tolerance`);
+    assert(registered.reg.residualRms < asLoaded.iface.minThk + 0.01
+        || registered.reg.residualRms < 0.01,
+      'the residual should be at measurement precision');
+  });
+
+  it('reports the residual it settled on, in millimetres', () => {
+    const r = registered.reg;
+    assert(r.residualRms >= 0 && r.residualP95 >= r.residualRms,
+      `p95 ${r.residualP95} should not be below rms ${r.residualRms}`);
+    assert(r.inlierCount > 100, `too few points behind the residual: ${r.inlierCount}`);
+    assert(r.candidatesTried >= 3, `too few starting poses: ${r.candidatesTried}`);
+    close(r.engageTol, Math.max(ENGAGE_FLOOR_MM, shot1.diag * ENGAGE_FRACTION), 1e-9, 'mating tolerance:');
+  });
+
+  it('leaves a pair no rigid move can mate alone, so the finding stands', () => {
+    /* A 6 mm cube against a shell built for a 100 mm one: the ordinary shape
+       of a wrong part or a units mistake. Every pose leaves the cavity tens of
+       millimetres off the substrate, so there is nothing to apply. */
+    const tiny = weld(S.subdivideSoup(S.box([6, 6, 6]), 2));
+    const tinyShot = analyse(tiny, { suggestGate: false });
+    const bigShell = weld(S.subdivideSoup(S.shellAround([0, 0, 0], [100, 100, 100], WALL), SUB));
+    const bigShot = analyse(bigShell, { material: MATERIALS.tpu, suggestGate: false });
+
+    const reg = registerShots({
+      geom1: tiny, bvh1: buildBVH(tiny), shot1: tinyShot,
+      geom2: bigShell, shot2: bigShot, maxDist: MAX_DIST,
+    });
+    eq(reg.attempted, true, 'should have tried:');
+    eq(reg.applied, false, 'nothing worth applying:');
+    eq(reg.reason, 'no-improvement', 'reason:');
+    eq(reg.transform, null, 'no transform:');
+    assert(reg.residualRms > reg.engageTol,
+      `best residual ${reg.residualRms} should still be outside the mating tolerance`);
+
+    const iface = analyseInterface(tiny, buildBVH(tiny), bigShot, MAX_DIST, null);
+    assert(iface.coverPct < 10, `the coverage finding must stand, got ${iface.coverPct.toFixed(1)}%`);
+  });
+
+  it('gives the same answer twice', () => {
+    /* Seeded sampling, so a report is reproducible. */
+    const again = measure(movedSoup);
+    for (let i = 0; i < 9; i++) {
+      close(again.reg.transform.r[i], registered.reg.transform.r[i], 0, `r[${i}]:`);
+    }
+    for (let i = 0; i < 3; i++) {
+      close(again.reg.transform.t[i], registered.reg.transform.t[i], 0, `t[${i}]:`);
+    }
+    close(again.reg.residualRms, registered.reg.residualRms, 0, 'residual:');
+  });
+
+  it('an improvement that stops short of mating is still not applied', () => {
+    /*
+     * The two halves of the accept test do different jobs, and this is the
+     * case that needs the second one. The same mismatched pair, loaded half a
+     * metre apart: alignment cuts the gap by more than the relative test asks
+     * — hundreds of millimetres down to tens — and the shots still do not
+     * touch. Without the absolute half that would be applied, and every
+     * overmould thickness below it would be measured in a pose the two parts
+     * never occupy.
+     */
+    const tiny = weld(S.subdivideSoup(S.box([6, 6, 6]), 2));
+    const tinyShot = analyse(tiny, { suggestGate: false });
+    const far = weld(S.transformSoup(
+      S.subdivideSoup(S.shellAround([0, 0, 0], [100, 100, 100], WALL), SUB),
+      { translate: [500, 0, 0] },
+    ));
+    const farShot = analyse(far, { material: MATERIALS.tpu, suggestGate: false });
+
+    const reg = registerShots({
+      geom1: tiny, bvh1: buildBVH(tiny), shot1: tinyShot,
+      geom2: far, shot2: farShot, maxDist: MAX_DIST,
+    });
+    assert(reg.residualRms <= reg.residualBefore * RESIDUAL_IMPROVE,
+      `the relative test should pass: ${reg.residualBefore.toFixed(1)} → ${reg.residualRms.toFixed(1)} mm`);
+    assert(reg.residualRms > reg.engageTol,
+      `and the absolute one should fail: ${reg.residualRms.toFixed(1)} mm vs ${reg.engageTol.toFixed(2)} mm`);
+    eq(reg.applied, false, 'so nothing is applied:');
+  });
+
+  it('reports the residual of the pose it returns, not of the one before it', () => {
+    /* Cut short after a single step, so the loop stops mid-refinement. The
+       residual reported has to describe the transform reported beside it: a
+       figure measured before the last step belongs to a pose the caller never
+       sees. A run allowed to converge cannot show the difference, which is why
+       the iteration counts are reachable from here at all. */
+    const geom2 = weld(movedSoup);
+    const shot2 = analyse(geom2, { material: MATERIALS.tpu, suggestGate: false });
+    const short = registerShots({
+      geom1: substrate, bvh1, shot1, geom2, shot2, maxDist: MAX_DIST,
+      probeIter: 0, maxIter: 1,
+    });
+    /* No probe, so the refinement starts from the identity — the same pose
+       `residualBefore` describes. One step later the two figures must differ,
+       and the reported one must be the better of them. */
+    eq(short.iterations, 1, 'iteration budget was honoured:');
+    assert(Math.abs(short.residualRms - short.residualBefore) > 1e-9,
+      `residual ${short.residualRms} should not still be the starting pose's ${short.residualBefore}`);
+    assert(short.residualRms < short.residualBefore,
+      `one step should have improved on ${short.residualBefore}, got ${short.residualRms}`);
+  });
+}
+
+describe('two-shot registration — how it is reported');
+{
+  const IFACE = { coverPct: 45, coverArea: 5200, minThk: 2, avgThk: 2, totalArea2: 11936 };
+  const baseline = runTwoShotDFM({
+    mat1: 'pcasa', mat2: 'asa_n', interface: IFACE, opticalWindow: 'ir',
+  });
+  const reg = (extra) => runTwoShotDFM({
+    mat1: 'pcasa', mat2: 'asa_n', interface: IFACE, opticalWindow: 'ir',
+    registration: extra,
+  });
+  const find = (res, key) => res.checks.find((c) => c.key === key);
+
+  const APPLIED = {
+    attempted: true, applied: true, reason: 'registered',
+    transform: identityXform(), coarse: 'centroid', candidatesTried: 7,
+    engageTol: 0.54, offsetMm: 18.84, rotationDeg: 25,
+    residualBefore: 6.2, residualRms: 0.0001, residualP95: 0.0002,
+    inlierCount: 640, coveragePctBefore: 42, coveragePctAfter: 45,
+    iterations: 56, converged: true, samples: 1500,
+  };
+
+  it('says, in the finding, that the figures below were measured after the move', () => {
+    const c = find(reg(APPLIED), 'ts_registration');
+    assert(c, 'ts_registration should be present when a transform was applied');
+    eq(c.status, 'warn', 'status:');
+    assert(/measured after that move/.test(c.detail), 'must say which frame the figures are in');
+    assert(c.detail.includes('18.8 mm'), 'must state how far shot 2 moved');
+    assert(c.detail.includes('25.0°'), 'must state how far it was rotated');
+    assert(c.detail.includes('0.000 mm'), 'must state the residual');
+  });
+
+  it('names both readings of a gap it cannot tell apart', () => {
+    const c = find(reg(APPLIED), 'ts_registration');
+    assert(/geometry cannot say/.test(c.detail), 'must not pick one');
+    assert(/does not reach the substrate/.test(c.detail), 'must state the design-error reading');
+    assert(/its own frame/.test(c.detail), 'must state the export-error reading');
+    assert(/[Rr]e-export/.test(c.detail), 'must say how to settle it');
+  });
+
+  it('costs nothing, either way — the score cannot move on it', () => {
+    const applied = reg(APPLIED);
+    const declined = reg({ ...APPLIED, applied: false, reason: 'no-improvement', transform: null });
+    eq(applied.score, baseline.score, 'applied vs no registration:');
+    eq(declined.score, baseline.score, 'declined vs no registration:');
+    eq(applied.budget, baseline.budget, 'budget must not widen:');
+    eq(find(applied, 'ts_registration').scoreDeduction, 0, 'deduction:');
+    eq(TWO_SHOT_RISK_PROFILES.ts_registration.weight, 0, 'weight:');
+  });
+
+  it('when nothing was applied, blames the geometry rather than the files', () => {
+    const c = find(reg({
+      ...APPLIED, applied: false, reason: 'no-improvement', transform: null,
+      residualRms: 57, coveragePctBefore: 0, coveragePctAfter: 0,
+    }), 'ts_registration');
+    eq(c.status, 'info', 'status:');
+    assert(/no transform was applied/.test(c.detail), 'must say nothing was moved');
+    assert(/measured as loaded/.test(c.detail), 'must say which frame the figures are in');
+    assert(/exported in millimetres/.test(c.detail), 'must name the likely causes');
+  });
+
+  it('and says so when the pair simply arrived mated', () => {
+    const c = find(reg({
+      attempted: false, applied: false, reason: 'already-mated', transform: null,
+      residualBefore: 0.0001, residualRms: 0.0001, residualP95: 0.0002,
+      coveragePctBefore: 45, coveragePctAfter: 45, inlierCount: 640, samples: 1500,
+      engageTol: 0.54,
+    }), 'ts_registration');
+    eq(c.status, 'ok', 'status:');
+    assert(/one coordinate system/.test(c.detail), 'must distinguish mated from unexamined');
+    assert(/as loaded/.test(c.detail), 'must say which frame the figures are in');
+  });
+
+  it('the coverage finding says which frame it was measured in', () => {
+    const applied = find(reg(APPLIED), 'ts_coverage');
+    assert(/after the alignment above/.test(applied.detail), 'registered case:');
+    const asLoaded = find(baseline, 'ts_coverage');
+    assert(!/after the alignment/.test(asLoaded.detail), 'unregistered case must not claim it:');
+  });
+
+  it('a coverage failure that survived alignment points at the geometry', () => {
+    const c = find(runTwoShotDFM({
+      mat1: 'pcasa', mat2: 'asa_n', opticalWindow: 'none',
+      interface: { ...IFACE, coverPct: 3, coverArea: 300 },
+      registration: { ...APPLIED, applied: false, reason: 'no-improvement', transform: null },
+    }), 'ts_coverage');
+    eq(c.status, 'warn', 'status:');
+    assert(/did not help/.test(c.detail), 'must say alignment was tried');
+    assert(/Shot alignment above/.test(c.detail), 'must point at the alignment finding');
   });
 }
 

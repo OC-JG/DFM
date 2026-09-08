@@ -477,3 +477,52 @@ export function earClipXZ(profile) {
   if (live.length === 3) tris.push([live[0], live[1], live[2]]);
   return tris;
 }
+
+/*
+ * A closed shell whose cavity is exactly the box [min, max], with a uniform
+ * wall. Paired with `box(...)` at the same coordinates this is a two-shot
+ * fixture with closed-form answers: every triangle of the outer surface sits
+ * exactly `wall` from the substrate along its inward normal, and the inner
+ * cavity surface faces away from it, so interface coverage is the outer half
+ * of the shell's area and the overmould thickness is `wall` throughout.
+ */
+export function shellAround(min, max, wall = 2) {
+  const outer = boxFaces(
+    [min[0] - wall, min[1] - wall, min[2] - wall],
+    [max[0] + wall, max[1] + wall, max[2] + wall],
+  );
+  const inner = boxFaces(min, max);
+  const out = [];
+  for (const v of Object.values(outer)) quad(out, v[0], v[1], v[2], v[3]);
+  /* Cavity normals point into the void, which is "outward from the solid". */
+  for (const v of Object.values(inner)) quad(out, v[0], v[3], v[2], v[1]);
+  return toSoup(out);
+}
+
+/*
+ * Rotate about an arbitrary unit axis (Rodrigues) then translate — the
+ * misalignment a part exported in its own coordinate system arrives with.
+ * Returns the soup and the exact transform applied, so a test can compare a
+ * recovered registration against the truth rather than against a tolerance
+ * pulled out of the air.
+ */
+export function transformSoup(soup, { axis = [0, 0, 1], deg = 0, translate = [0, 0, 0] } = {}) {
+  const n = Math.hypot(axis[0], axis[1], axis[2]) || 1;
+  const [ux, uy, uz] = [axis[0] / n, axis[1] / n, axis[2] / n];
+  const a = deg * Math.PI / 180;
+  const c = Math.cos(a), s = Math.sin(a), k = 1 - c;
+  const r = [
+    c + ux * ux * k,      ux * uy * k - uz * s, ux * uz * k + uy * s,
+    uy * ux * k + uz * s, c + uy * uy * k,      uy * uz * k - ux * s,
+    uz * ux * k - uy * s, uz * uy * k + ux * s, c + uz * uz * k,
+  ];
+  const p = soup.positions;
+  const out = new Float32Array(p.length);
+  for (let i = 0; i < p.length; i += 3) {
+    const x = p[i], y = p[i + 1], z = p[i + 2];
+    out[i]     = r[0] * x + r[1] * y + r[2] * z + translate[0];
+    out[i + 1] = r[3] * x + r[4] * y + r[5] * z + translate[1];
+    out[i + 2] = r[6] * x + r[7] * y + r[8] * z + translate[2];
+  }
+  return { positions: out, triCount: soup.triCount, xform: { r, t: translate.slice() } };
+}

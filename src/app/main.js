@@ -556,15 +556,17 @@ async function doRunAnalysis() {
            overmould layers without wandering across the part. */
         interfaceMaxDist: 20,
       };
-      const { shot1, shot2, iface } = await runAnalysis(job, updateProgress);
+      const { shot1, shot2, iface, registration } = await runAnalysis(job, updateProgress);
       runtime.analysis = shot1;
       runtime.analysis2 = shot2;
       runtime.interface = iface;
+      runtime.registration = registration;
       input.mesh = shot1;
     } else {
       runtime.analysis = null;
       runtime.analysis2 = null;
       runtime.interface = null;
+      runtime.registration = null;
     }
 
     updateProgress(1, 'Scoring');
@@ -603,6 +605,7 @@ async function doRunAnalysis() {
         mat1: settings.material,
         mat2: settings.material2,
         interface: runtime.interface,
+        registration: runtime.registration,
         opticalWindow: settings.windowType,
       });
       renderTwoShotResults(runtime.twoShot);
@@ -673,6 +676,7 @@ function currentRecord() {
     analysis: runtime.analysis,
     twoShot: runtime.twoShot,
     interface: runtime.interface,
+    registration: runtime.registration,
     validation: runtime.validation,
     shot: runtime.shot,
     cycle: runtime.cycle,

@@ -113,7 +113,7 @@ export const TWO_SHOT_RISK_PROFILES = {
   ts_adhesion:  { S: 5, L: 3, D: 3, weight: 34 }, // delamination in service
   ts_thickness: { S: 4, L: 3, D: 3, weight: 26 }, // short shot, or a window that will not transmit
   ts_shrinkage: { S: 3, L: 3, D: 4, weight: 24 }, // interface stress on cooling
-  ts_coverage:  { S: 2, L: 2, D: 2, weight: 8  }, // usually a mesh alignment problem
+  ts_coverage:  { S: 2, L: 2, D: 2, weight: 8  }, // often a mesh alignment problem — see ts_registration
   ts_order:     { S: 2, L: 2, D: 2, weight: 8  }, // convention, not physics
 
   /* Advisory, and the reason is worth stating here rather than only at the
@@ -125,6 +125,15 @@ export const TWO_SHOT_RISK_PROFILES = {
      what they already held, so the scored set still sums to 100 and no
      surviving check changed rank. */
   ts_thermal:   { S: 5, L: 3, D: 2, weight: 0  }, // needs Vicat, not HDT
+
+  /* Advisory for a different reason from ts_thermal: not missing data, but a
+     question geometry cannot answer. Two shots that do not touch look the same
+     whether one was exported in the wrong frame or the overmould genuinely
+     misses the substrate, and the rigid transform that explains one explains
+     the other. The first costs nothing and the second is fatal, so any weight
+     here would be an average of nothing and everything. Named and unscored;
+     the rule says what each reading would mean. */
+  ts_registration: { S: 5, L: 2, D: 2, weight: 0 }, // a fork, not a finding
 };
 
 /* Severity a check carries, falling back to its display status for any rule

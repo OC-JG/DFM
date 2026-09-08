@@ -278,3 +278,133 @@ export function castRay(bvh, geom, ox, oy, oz, dx, dy, dz, eps, excludeTri, maxD
   /* Reaching the cap means nothing was found inside it. */
   return nearest === maxDist ? Infinity : nearest;
 }
+
+/* Traversal scratch for the closest-point query. Separate from RAY_STACK
+   because the two are not mutually exclusive — registration evaluates
+   coverage by ray-cast between closest-point iterations. */
+const NEAR_STACK = new Int32Array(MAX_DEPTH * 2 + 8);
+
+/* Squared distance from a point to an axis-aligned box: zero inside, and
+   otherwise the sum over the axes on which the point falls outside. */
+function pointAABBDistSq(px, py, pz, bounds, b6) {
+  let d = 0;
+  const dx = px < bounds[b6] ? bounds[b6] - px : (px > bounds[b6 + 3] ? px - bounds[b6 + 3] : 0);
+  const dy = py < bounds[b6 + 1] ? bounds[b6 + 1] - py : (py > bounds[b6 + 4] ? py - bounds[b6 + 4] : 0);
+  const dz = pz < bounds[b6 + 2] ? bounds[b6 + 2] - pz : (pz > bounds[b6 + 5] ? pz - bounds[b6 + 5] : 0);
+  d = dx * dx + dy * dy + dz * dz;
+  return d;
+}
+
+/*
+ * Closest point on one triangle, by the region test in Ericson,
+ * "Real-Time Collision Detection" §5.1.5: the barycentric solution is only
+ * valid inside the triangle, so each vertex and edge Voronoi region is
+ * checked first and the answer clamped onto whichever feature owns the point.
+ *
+ * Writing the result into a caller-supplied array rather than returning an
+ * object matters here: this runs a few million times over a registration.
+ */
+function closestOnTri(px, py, pz, vertices, indices, t, out) {
+  const ia = indices[t * 3] * 3, ib = indices[t * 3 + 1] * 3, ic = indices[t * 3 + 2] * 3;
+  const ax = vertices[ia], ay = vertices[ia + 1], az = vertices[ia + 2];
+  const bx = vertices[ib], by = vertices[ib + 1], bz = vertices[ib + 2];
+  const cx = vertices[ic], cy = vertices[ic + 1], cz = vertices[ic + 2];
+
+  const abx = bx - ax, aby = by - ay, abz = bz - az;
+  const acx = cx - ax, acy = cy - ay, acz = cz - az;
+  const apx = px - ax, apy = py - ay, apz = pz - az;
+
+  const d1 = abx * apx + aby * apy + abz * apz;
+  const d2 = acx * apx + acy * apy + acz * apz;
+  if (d1 <= 0 && d2 <= 0) { out[0] = ax; out[1] = ay; out[2] = az; return; }
+
+  const bpx = px - bx, bpy = py - by, bpz = pz - bz;
+  const d3 = abx * bpx + aby * bpy + abz * bpz;
+  const d4 = acx * bpx + acy * bpy + acz * bpz;
+  if (d3 >= 0 && d4 <= d3) { out[0] = bx; out[1] = by; out[2] = bz; return; }
+
+  const vc = d1 * d4 - d3 * d2;
+  if (vc <= 0 && d1 >= 0 && d3 <= 0) {
+    const v = d1 / (d1 - d3);
+    out[0] = ax + abx * v; out[1] = ay + aby * v; out[2] = az + abz * v; return;
+  }
+
+  const cpx = px - cx, cpy = py - cy, cpz = pz - cz;
+  const d5 = abx * cpx + aby * cpy + abz * cpz;
+  const d6 = acx * cpx + acy * cpy + acz * cpz;
+  if (d6 >= 0 && d5 <= d6) { out[0] = cx; out[1] = cy; out[2] = cz; return; }
+
+  const vb = d5 * d2 - d1 * d6;
+  if (vb <= 0 && d2 >= 0 && d6 <= 0) {
+    const w = d2 / (d2 - d6);
+    out[0] = ax + acx * w; out[1] = ay + acy * w; out[2] = az + acz * w; return;
+  }
+
+  const va = d3 * d6 - d5 * d4;
+  if (va <= 0 && (d4 - d3) >= 0 && (d5 - d6) >= 0) {
+    const w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+    out[0] = bx + (cx - bx) * w; out[1] = by + (cy - by) * w; out[2] = bz + (cz - bz) * w; return;
+  }
+
+  const denom = 1 / (va + vb + vc);
+  const v = vb * denom, w = vc * denom;
+  out[0] = ax + abx * v + acx * w;
+  out[1] = ay + aby * v + acy * w;
+  out[2] = az + abz * v + acz * w;
+}
+
+/* Scratch for closestOnTri, reused per call rather than per triangle. */
+const NEAR_HIT = new Float64Array(3);
+
+/*
+ * Nearest point on the mesh surface to (px, py, pz), unsigned.
+ *
+ * `out` receives the surface point and, when a caller wants it, the owning
+ * triangle in out[3]; the return value is the distance, or Infinity when
+ * nothing lies within `maxDist`. A cap is not an optimisation here so much as
+ * a statement of intent: a correspondence further away than the search radius
+ * is not a correspondence, and the traversal should not pay to find it.
+ */
+export function closestPoint(bvh, geom, px, py, pz, maxDist, out) {
+  const { bounds, meta, triIdx } = bvh;
+  const { vertices, indices } = geom;
+
+  const stack = NEAR_STACK;
+  let sp = 0;
+  stack[sp++] = 0;
+  let bestSq = maxDist > 0 ? maxDist * maxDist : Infinity;
+  let bestTri = -1;
+  let bx = 0, by = 0, bz = 0;
+
+  while (sp > 0) {
+    const ni = stack[--sp];
+    const b6 = ni * 6, m3 = ni * 3;
+    if (pointAABBDistSq(px, py, pz, bounds, b6) >= bestSq) continue;
+
+    if (meta[m3 + 2] === 1) {
+      const first = meta[m3];
+      const count = meta[m3 + 1];
+      for (let k = 0; k < count; k++) {
+        const t = triIdx[first + k];
+        closestOnTri(px, py, pz, vertices, indices, t, NEAR_HIT);
+        const dx = NEAR_HIT[0] - px, dy = NEAR_HIT[1] - py, dz = NEAR_HIT[2] - pz;
+        const dSq = dx * dx + dy * dy + dz * dz;
+        if (dSq < bestSq) {
+          bestSq = dSq; bestTri = t;
+          bx = NEAR_HIT[0]; by = NEAR_HIT[1]; bz = NEAR_HIT[2];
+        }
+      }
+    } else {
+      /* Descend into the nearer child first: it usually tightens bestSq
+         enough to reject the sibling outright at the top of the loop. */
+      const l = meta[m3], r = meta[m3 + 1];
+      const dl = pointAABBDistSq(px, py, pz, bounds, l * 6);
+      const dr = pointAABBDistSq(px, py, pz, bounds, r * 6);
+      if (dl < dr) { stack[sp++] = r; stack[sp++] = l; } else { stack[sp++] = l; stack[sp++] = r; }
+    }
+  }
+
+  if (bestTri < 0) return Infinity;
+  if (out) { out[0] = bx; out[1] = by; out[2] = bz; out[3] = bestTri; }
+  return Math.sqrt(bestSq);
+}

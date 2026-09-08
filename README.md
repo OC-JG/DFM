@@ -546,5 +546,12 @@ build.
   it on a network interface.
 - **Wall transitions remain advisory on STL.** Thickness sampling is genuinely
   unreliable at corners and rim edges; the check is off by default and says so.
-- **Two-shot alignment is assumed.** The interface pass expects both meshes to
-  be exported in a shared coordinate system; there is no registration step.
+- **Two-shot alignment is corrected, not diagnosed.** Where shot 2's mating
+  surface sits more than 1% of the part's size off shot 1, the tool searches
+  for the rigid transform that puts them together, applies it if it finds one,
+  and reports how far it moved shot 2 and what residual is left. What it cannot
+  do is say *why* they were apart: a part exported in its own coordinate system
+  and an overmould that genuinely misses its substrate produce the identical
+  gap. The finding names both readings and leaves the choice with the reader,
+  which is also why it carries no score. Scale is not fitted — a pair 25.4×
+  apart is a units mistake and correcting it silently would hide one.

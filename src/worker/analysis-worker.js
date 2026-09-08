@@ -1,5 +1,6 @@
 import { analyseMesh } from '../analysis/mesh.js';
 import { analyseInterface } from '../analysis/interface.js';
+import { registerShots } from '../analysis/register.js';
 
 /*
  * Analysis worker.
@@ -27,18 +28,36 @@ export function runAnalysisJob(job, onProgress) {
 
   let shot2 = null;
   let iface = null;
+  let registration = null;
   if (job.geom2) {
     report(0.7, 'Analysing overmould');
     shot2 = analyseMesh(job.geom2, {
       ...job.opts2,
       onProgress: (p, label) => report(0.7 + p * 0.2, label),
     });
+
+    /* Registration before the interface pass, and skippable: `register: false`
+       measures the pair exactly as they arrived, which is what a test needs to
+       show the difference registration makes. */
+    if (job.register !== false) {
+      report(0.9, 'Registering shots');
+      registration = registerShots({
+        geom1: job.geom1,
+        bvh1: shot1.bvh,
+        shot1,
+        geom2: job.geom2,
+        shot2,
+        maxDist: job.interfaceMaxDist,
+      });
+    }
+
     report(0.92, 'Measuring interface');
-    iface = analyseInterface(job.geom1, shot1.bvh, shot2, job.interfaceMaxDist);
+    iface = analyseInterface(job.geom1, shot1.bvh, shot2, job.interfaceMaxDist,
+      registration && registration.applied ? registration.transform : null);
   }
 
   report(1, 'Done');
-  return { shot1, shot2, iface };
+  return { shot1, shot2, iface, registration };
 }
 
 /*
