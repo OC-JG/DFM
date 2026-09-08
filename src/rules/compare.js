@@ -36,7 +36,7 @@ function dig(obj, path) {
     if (node == null || typeof node !== 'object') return null;
     node = node[key];
   }
-  return typeof node === 'number' && isFinite(node) ? node : null;
+  return Number.isFinite(node) ? node : null;
 }
 
 export function compareRuns(before, after) {

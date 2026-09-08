@@ -60,7 +60,7 @@ async function main() {
     'a comment before the doctype puts browsers into quirks mode');
   check('built file names the runtime dependencies it does not contain',
     /fetched from a CDN/.test(source) && /NOTICE/.test(source));
-  const server = createServer((req, res) => {
+  const server = createServer((_req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(html);
   });
@@ -536,7 +536,11 @@ async function main() {
     await fallbackPage.route(/^https:\/\/(cdnjs\.cloudflare\.com|cdn\.jsdelivr\.net)\//, serveVendored);
     await fallbackPage.route(/^https:\/\/fonts\./, (route) => route.fulfill({ status: 200, contentType: 'text/css', body: '' }));
     await fallbackPage.addInitScript(() => {
-      window.Worker = function () { throw new Error('workers blocked (simulating file:// origin)'); };
+      /* A class, not an arrow — `new Worker(url)` has to fail the way it
+         fails on file://, which is a constructor throwing. An arrow function
+         fails earlier and differently ("not a constructor"), which would
+         exercise a path the real browser never takes. */
+      window.Worker = class { constructor() { throw new Error('workers blocked (simulating file:// origin)'); } };
     });
     await fallbackPage.goto(url, { waitUntil: 'networkidle' });
 

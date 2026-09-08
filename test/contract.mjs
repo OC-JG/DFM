@@ -16,7 +16,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const SRC = path.join(HERE, '..', 'src');
+const ROOT = path.join(HERE, '..');
+const SRC = path.join(ROOT, 'src');
 const TESTS = HERE;
 
 /* Ids the scripts create at runtime rather than expecting in the markup. */
@@ -69,7 +70,7 @@ const MODULE_SLOTS = [
   ["/*@FINGERPRINT@*/'source'", 'core/build-info.js'],
   ["/*@STAMP@*/''", 'core/build-info.js'],
   ['/*@VENDORED@*/false', 'export/pdf.js'],
-  ['/*@WORKER_SRC@*/', 'app/analysis-runner.js'],
+  ["/*@WORKER_SRC@*/''", 'app/analysis-runner.js'],
 ];
 const lostModuleSlots = MODULE_SLOTS
   .filter(([slot, file]) => !readFileSync(path.join(SRC, file), 'utf8').includes(slot))
@@ -97,6 +98,19 @@ for (const file of readdirSync(TESTS).filter((f) => f.endsWith('.mjs'))) {
   });
 }
 
+/*
+ * The linter has to fail on what it finds.
+ *
+ * `biome lint` exits 0 when it reports warnings, and most of the rules worth
+ * having here — unused variables, unused imports, the global `isNaN`
+ * coercions — report as warnings rather than errors. So a CI step running it
+ * without `--error-on-warnings` passes while finding things, which is the
+ * exact shape of the failure this repository has already had once: a check
+ * that is green for reasons unrelated to whether the thing it guards is true.
+ */
+const lintScript = JSON.parse(readFileSync(path.join(ROOT, 'package.json'), 'utf8')).scripts.lint || '';
+const lintToothless = !lintScript.includes('--error-on-warnings');
+
 let failed = false;
 
 if (missing.length) {
@@ -110,6 +124,10 @@ if (lostSlots.length) {
 if (lostModuleSlots.length) {
   failed = true;
   console.error(`\n  build slot(s) missing from src/:\n${lostModuleSlots.join('\n')}`);
+}
+if (lintToothless) {
+  failed = true;
+  console.error(`\n  the lint script exits 0 on warnings: ${lintScript || '(missing)'}\n  add --error-on-warnings, or the step passes while reporting findings`);
 }
 if (asyncHarnessSlips.length) {
   failed = true;

@@ -247,7 +247,7 @@ export function analyseMesh(geom, opts = {}) {
   let sinkArea = 0, sinkAreaModerate = 0, sinkAreaSevere = 0;
   for (let t = 0; t < triCount; t++) {
     const th = triThickness[t];
-    if (isNaN(th)) continue;
+    if (!Number.isFinite(th)) continue;
     const ratio = th / nominalWall;
     const risk = ratio > 1.6 ? Math.min(1, (ratio - 1.6) / 1.4) : 0;
     triSinkRisk[t] = risk;

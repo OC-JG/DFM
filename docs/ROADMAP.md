@@ -641,10 +641,65 @@ mouse — **unverified**, for want of hardware.
   standing down — happened under the same version number, which is precisely
   the situation the fingerprint in the export exists to catch and the
   changelog exists to explain.
-- **A linter and a formatter.** Neither is configured. The codebase has a clear,
-  consistent house style and no mechanical enforcement of it, which makes review
-  of an outside patch a style conversation. Whatever the choice, it should run in
-  CI next to the contract test.
+- **A linter and a formatter.** *(the linter, done. The formatter, measured and
+  refused.)* Biome, one devDependency and a platform binary, `biome.jsonc`,
+  running first in CI and first in `npm test` because it finishes before you
+  have finished reading its name.
+
+  **`--error-on-warnings` is the whole thing.** `biome lint` exits 0 while
+  reporting warnings, and almost every rule worth having here — unused
+  variables, unused imports, the `isNaN` coercions — reports as a warning. A CI
+  step without that flag is green while finding things, which is the same shape
+  as the failure two items above: a check that is green for reasons unrelated
+  to what it guards. `test/contract.mjs` now fails if the flag goes missing.
+
+  What it found on its first run, none of which was known:
+
+  - **`row-gap: 4px` followed by `gap: 14px`** on the viewer's nav hint. The
+    shorthand resets the longhand, so the tight gap between wrapped rows —
+    the only reason the `row-gap` was written — had never applied. A visual
+    defect, found by a linter, in a file nobody would have re-read.
+  - **`const WORKER_SOURCE = /*@WORKER_SRC@*\/;`** — not valid JavaScript until
+    the build substitutes it, which made `src/app/analysis-runner.js` the one
+    file in the repository no tool could parse. The other three build slots
+    already use a token-beside-a-literal precisely so the source stays valid;
+    this one did not. Now it does, and the unbuilt fallback is an empty worker
+    source rather than a syntax error.
+  - **19 uses of the global `isNaN`/`isFinite`**, which coerce. Every one is
+    now `Number.isFinite`, which is not the mechanical conversion: `isNaN(x)`
+    became `!Number.isFinite(x)` rather than `!Number.isNaN(x)`, because these
+    are all "is this a real measurement" tests over arrays where NaN is the
+    not-measured sentinel — and `Number.isNaN(undefined)` is `false` where
+    `isNaN(undefined)` was `true`, so the mechanical conversion would have
+    turned an out-of-range read from *skipped* into *used*. The auto-fix would
+    have made it worse quietly.
+  - **A `window.Worker` stub written as an arrow function**, which cannot be
+    constructed. The fallback test means to simulate `file://` refusing a
+    blob-backed worker, which is a constructor throwing; an arrow fails one
+    step earlier, in a way no browser does. Now a class.
+  - Four unused imports and one unused destructure, three `let`s that never
+    move, and two `forEach` callbacks returning a value.
+
+  **The formatter was measured and refused.** Over this codebase, with settings
+  matched to its own style, it rewrites 57 files: **+8,052 / −2,930**. Two of
+  its effects are the argument: `src/core/materials.js` goes from 22 lines to
+  324, because the 16-grade table is written as aligned columns so that ABS's
+  `coolK` and PC's can be compared by eye — which is how the full-wall reading
+  was settled — and one property per line ends that; and `git blame` and
+  `git log -S` stop reaching past the reformat, on a repository whose commit
+  messages are the design record. `biome.jsonc` carries the numbers and the
+  honest way in if it is ever wanted: an `overrides` block excluding the
+  tables, in a commit that does nothing else.
+
+  Four rules are off, each with its reason in the config rather than in
+  someone's memory. One of them is an accessibility rule and deserves saying
+  out loud: `useSemanticElements` fires four times, twice wrongly (it wants a
+  `<fieldset>` for a button group that is not in a form, replacing correct ARIA
+  with a form control) and **twice rightly** — both drop zones are
+  `<div role="button" tabindex="0">` and should be `<button>`. That is a UI
+  change with layout consequences and a keyboard path to re-test, so it is
+  recorded here rather than made inside a lint pass. It is the one finding from
+  this item left undone on purpose.
 - **A performance budget.** `docs/ASSESSMENT.md` records a run going from 1,469 ms
   to 2,531 ms and names the two levers that control it, but nothing measures it,
   so the next regression will be found by feel. A benchmark script over a fixed

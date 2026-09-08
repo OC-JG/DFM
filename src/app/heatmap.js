@@ -60,7 +60,7 @@ export function computeHeatColours(analysis, mode) {
     const lo = material.wallLo, hi = material.wallHi;
     for (let t = 0; t < triCount; t++) {
       const th = triThickness[t];
-      if (isNaN(th))           { paint(t, P.NEUTRAL.rgb); continue; }
+      if (!Number.isFinite(th)) { paint(t, P.NEUTRAL.rgb); continue; }
       if (th < lo * 0.5)        paint(t, P.THIN.rgb);
       else if (th < lo)         paint(t, P.CAUTION.rgb);
       else if (th <= hi)        paint(t, P.OK.rgb);
@@ -89,7 +89,7 @@ export function computeHeatColours(analysis, mode) {
     for (let t = 0; t < triCount; t++) {
       if (!fa) { paint(t, P.NEUTRAL.rgb); continue; }
       const lt = fa.triLT[t];
-      if (isNaN(lt))               paint(t, P.NEUTRAL.rgb);
+      if (!Number.isFinite(lt))    paint(t, P.NEUTRAL.rgb);
       else if (lt < fa.ltMax * 0.5) paint(t, P.OK.rgb);
       else if (lt < fa.ltMax * 0.8) paint(t, P.CAUTION.rgb);
       else if (lt < fa.ltMax)       paint(t, P.WARN.rgb);
@@ -108,7 +108,7 @@ export function computeInterfaceColours(shot2, iface, mat2) {
   for (let t = 0; t < shot2.triCount; t++) {
     if (!iface.interfaceTris[t]) { paint(t, P.NEUTRAL.rgb); continue; }
     const th = iface.thicknesses[t];
-    if (isNaN(th))                  paint(t, P.NEUTRAL.rgb);
+    if (!Number.isFinite(th))       paint(t, P.NEUTRAL.rgb);
     else if (th < mat2.wallLo * 0.5) paint(t, P.BAD.rgb);
     else if (th < mat2.wallLo)       paint(t, P.WARN.rgb);
     else if (th < mat2.wallLo * 1.5) paint(t, P.CAUTION.rgb);

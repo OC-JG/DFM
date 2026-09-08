@@ -145,6 +145,14 @@ until it was settled.
   gigabytes, because the size was checked after the bytes were materialised.
 - The navigator loop threw away its first sample, integrating it over zero
   elapsed time.
+- **The viewer's navigation hint never had its tight row gap.** `row-gap: 4px`
+  was followed by `gap: 14px`, and the shorthand resets the longhand, so
+  wrapped rows sat 14px apart. Found by the linter.
+- Every use of the global `isNaN`/`isFinite` is now `Number.isFinite`. These
+  are "is this a real measurement" tests over arrays where NaN means
+  not-measured, so an out-of-range read is skipped rather than used — which is
+  what the global versions did by accident and the obvious replacement,
+  `Number.isNaN`, would have stopped doing.
 
 ### Testing and infrastructure
 
@@ -157,6 +165,10 @@ until it was settled.
   hang above — that no async test's result is dropped.
 - **`verify:build`** rebuilds `dfm-tool.html` and fails if it differs from the
   committed copy, so a source-only commit cannot ship a stale deliverable.
+- **A linter**: Biome, linter only, running first in CI with
+  `--error-on-warnings` — without which it exits 0 on the warnings that are
+  most of what it finds. The formatter is deliberately off; `biome.jsonc` has
+  the measurement that decided it.
 - **CI** runs the cheap checks first: a broken thickness calculation should not
   wait on a Chromium download to report itself.
 

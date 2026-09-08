@@ -326,8 +326,9 @@ for (const [token, value] of Object.entries(slots)) {
 
 /* Worker source is injected into the app bundle rather than the HTML so it
    sits next to the code that consumes it. JSON.stringify handles escaping. */
-if (!html.includes('/*@WORKER_SRC@*/')) fail('slot /*@WORKER_SRC@*/ not found');
-html = html.replace('/*@WORKER_SRC@*/', () => JSON.stringify(workerCode));
+const WORKER_SLOT = "/*@WORKER_SRC@*/''";
+if (!html.includes(WORKER_SLOT)) fail(`slot ${WORKER_SLOT} not found`);
+html = html.replace(WORKER_SLOT, () => JSON.stringify(workerCode));
 
 /* With the libraries inlined, the CDN tags must go — otherwise the page still
    reaches out for a second copy and the offline promise is not kept. */

@@ -57,7 +57,7 @@ async function main() {
   if (!existsSync(join(FIXTURES, 'part.stl'))) throw new Error('fixtures missing — run `node test/make-fixtures.mjs`');
 
   const { chromium } = require('playwright');
-  const server = createServer((req, res) => {
+  const server = createServer((_req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(html);
   });

@@ -1088,7 +1088,7 @@ function checkDependencies() {
 
 function startClock() {
   const tick = () => {
-    $('timestamp').textContent = new Date().toISOString().slice(0, 19).replace('T', ' ') + ' UTC';
+    $('timestamp').textContent = `${new Date().toISOString().slice(0, 19).replace('T', ' ')} UTC`;
   };
   tick();
   setInterval(tick, 1000);

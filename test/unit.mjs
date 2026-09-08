@@ -39,7 +39,7 @@ import {
   estimateCycle, estimatePartCost, toolingDrivers,
   PRACTICAL_COOLING_FACTOR, COOLING_SHARE,
 } from '../src/analysis/cost.js';
-import { searchGateCandidates, computeFlowLengths, buildAdjacency, geodesicFrom } from '../src/analysis/flow.js';
+import { searchGateCandidates, buildAdjacency, geodesicFrom } from '../src/analysis/flow.js';
 import { jacobiEigen } from '../src/analysis/linalg.js';
 import {
   registerShots, fitRigid, rotationDegOf, identityXform, xformPoint,
@@ -53,7 +53,7 @@ import { effectiveMinDraft } from '../src/core/finishes.js';
 import { MATERIALS, MATERIAL_ORDER } from '../src/core/materials.js';
 import { DEFAULT_SETTINGS } from '../src/app/state.js';
 import {
-  createCameraState, quatFromThetaPhi, quatApply, quatMul, quatAxisAngle,
+  createCameraState, quatFromThetaPhi,
   vDot, vLen, vSub, vUnit, vScale, PITCH_LIMIT, ZOOM_MIN_FACTOR, ZOOM_MAX_FACTOR,
 } from '../src/app/camera-state.js';
 import { applyRates, shape, isIdle, createNavigatorLoop, NAVIGATOR_DEFAULTS } from '../src/app/navigator.js';
@@ -1393,7 +1393,7 @@ describe('gate placement — searching instead of guessing');
     eq(dist[0], 0, 'distance to the source:');
     let reached = 0, maxD = 0;
     for (let v = 0; v < geom.vertCount; v++) {
-      if (isFinite(dist[v])) { reached++; maxD = Math.max(maxD, dist[v]); }
+      if (Number.isFinite(dist[v])) { reached++; maxD = Math.max(maxD, dist[v]); }
     }
     eq(reached, geom.vertCount, 'a closed mesh must be fully reachable:');
     assert(maxD > 100, `a 200 mm bar should have paths over 100 mm, got ${maxD.toFixed(1)}`);
@@ -1926,7 +1926,7 @@ describe('closest point on a mesh');
 
   await it('respects the search cap, and reports Infinity beyond it', () => {
     /* 30 mm off the +z face: inside a 31 mm cap, outside a 29 mm one. */
-    assert(isFinite(closestPoint(bvh, geom, 20, 15, 50, 31, out)), 'should find within 31 mm');
+    assert(Number.isFinite(closestPoint(bvh, geom, 20, 15, 50, 31, out)), 'should find within 31 mm');
     eq(closestPoint(bvh, geom, 20, 15, 50, 29, out), Infinity, 'should not find within 29 mm:');
   });
 }
@@ -1937,7 +1937,7 @@ describe('rigid fit — Horn quaternion');
      get transposed: a transposed correlation matrix yields the inverse
      rotation, which converges just as prettily onto the wrong pose. */
   const src = [];
-  let seed = makeRandom(7);
+  const seed = makeRandom(7);
   for (let i = 0; i < 40; i++) src.push(seed() * 60 - 30, seed() * 40 - 20, seed() * 20 - 10);
 
   for (const [name, axis, deg, t] of [
@@ -2957,7 +2957,13 @@ describe('camera — a 6-DoF sample, integrated');
     const samples = [S6({ ry: 1 }), S6({ ry: 1 }), null, S6({ ry: 1 })];
     let i = 0;
     const loop = createNavigatorLoop({
-      source: { read: () => (i < samples.length ? samples[i++] : (loop.stop(), null)) },
+      source: {
+        read: () => {
+          if (i < samples.length) return samples[i++];
+          loop.stop();
+          return null;
+        },
+      },
       controls,
       now: () => t,
       schedule: (fn) => { t += 100; frames.push(t); if (frames.length < 12) fn(); },
@@ -3009,7 +3015,7 @@ describe('a 6-DoF device, read from its own descriptor');
   const report = (...values) => {
     const buf = new ArrayBuffer(values.length * 2);
     const view = new DataView(buf);
-    values.forEach((v, i) => view.setInt16(i * 2, v, true));
+    values.forEach((v, i) => { view.setInt16(i * 2, v, true); });
     return view;
   };
 
@@ -3108,7 +3114,7 @@ describe('a 6-DoF device, read from its own descriptor');
     eq(source.axisCount, 6, 'axes declared:');
     eq(source.read(), null, 'silence before the first report:');
 
-    const send = (id, view) => listeners.forEach((fn) => fn({ reportId: id, data: view }));
+    const send = (id, view) => { listeners.forEach((fn) => { fn({ reportId: id, data: view }); }); };
     send(1, report(350, 0, 0));
     close(source.read().tx, 1, 1e-12, 'translation arrived:');
     close(source.read().ry, 0, 1e-12, 'and rotation is still centred:');

@@ -62,6 +62,9 @@ jobs:
       # artifact that outlives the run that produced it. The tagged commit has
       # almost certainly passed this already on its branch; re-running it costs
       # four minutes and removes "almost".
+      - name: Lint
+        run: npm run lint
+
       - name: Markup/script contract
         run: npm run test:contract
 

@@ -133,7 +133,7 @@ export function computeFlowLengths(geom, gateLoc, triCentroid, triThickness, tri
     const d2 = dx * dx + dy * dy + dz * dz;
     if (d2 < nearestTriD2) { nearestTriD2 = d2; nearestTri = t; }
   }
-  const gateLocalThickness = (nearestTri >= 0 && triThickness && !isNaN(triThickness[nearestTri]))
+  const gateLocalThickness = (nearestTri >= 0 && triThickness && Number.isFinite(triThickness[nearestTri]))
     ? triThickness[nearestTri] : null;
 
   // 2. Dijkstra over the vertex graph, edges weighted by Euclidean length.
@@ -149,11 +149,11 @@ export function computeFlowLengths(geom, gateLoc, triCentroid, triThickness, tri
   for (let t = 0; t < triCount; t++) {
     const a = indices[t * 3], b = indices[t * 3 + 1], c = indices[t * 3 + 2];
     const fl = (dist[a] + dist[b] + dist[c]) / 3;
-    triFlow[t] = isFinite(fl) ? fl : NaN;
-    if (isFinite(fl) && fl > maxFlow) maxFlow = fl;
+    triFlow[t] = Number.isFinite(fl) ? fl : NaN;
+    if (Number.isFinite(fl) && fl > maxFlow) maxFlow = fl;
 
     const th = triThickness[t];
-    if (!isNaN(th) && isFinite(fl) && th > 0.01) {
+    if (Number.isFinite(th) && Number.isFinite(fl) && th > 0.01) {
       const lt = fl / th;
       triLT[t] = lt;
       if (lt > maxLT) { maxLT = lt; tMaxLT = t; }
@@ -174,7 +174,7 @@ export function computeFlowLengths(geom, gateLoc, triCentroid, triThickness, tri
   const candidates = [];
   const order = [];
   for (let t = 0; t < triCount; t++) {
-    if (isFinite(triFlow[t]) && !isNaN(triThickness[t])) order.push(t);
+    if (Number.isFinite(triFlow[t]) && Number.isFinite(triThickness[t])) order.push(t);
   }
   order.sort((a, b) => triFlow[b] - triFlow[a]);
   const minSep = maxFlow * 0.1;
@@ -260,14 +260,14 @@ export function searchGateCandidates({
   geom, triCentroid, triThickness, triAreas, triFaceSide, triCount, ltMax,
   candidateCount = 12, adjacency,
 }) {
-  const { vertices, indices, vertCount } = geom;
+  const { indices, vertCount } = geom;
   if (!(candidateCount > 0) || triCount < 4) return null;
 
   /* Eligible: outward-facing, with a thickness reading to divide by. */
   let eligible = [];
   for (let t = 0; t < triCount; t++) {
     if (triFaceSide && triFaceSide[t] === 1) continue;
-    if (isNaN(triThickness[t])) continue;
+    if (!Number.isFinite(triThickness[t])) continue;
     eligible.push(t);
   }
   if (eligible.length < 2) return null;
