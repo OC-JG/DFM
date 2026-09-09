@@ -78,8 +78,9 @@ build they were sent.
 
 ## Milestones
 
-Version numbers are targets for the `version` field in `package.json`, which is
-at `2.0.0` and has never been tagged. Effort is calendar days of focused work,
+Version numbers are targets for the `version` field in `package.json`, which
+reads `2.1.0` — prepared for the first tag, and the reason `2.0.0` was retired
+unreleased is in `CHANGELOG.md`. Effort is calendar days of focused work,
 in the same units the delivered phases in `docs/ASSESSMENT.md` were estimated
 in — those ran roughly to estimate, which is the only reason to trust these.
 
@@ -626,11 +627,15 @@ item below records what shipped and what it found.
   It also refuses to publish from a commit that is not an ancestor of `main`.
   A release cut from an unmerged branch leaves no trace once the tag exists.
 
-  **Not done, deliberately: no tag was pushed.** `package.json` has read
-  `2.0.0` since the first modular commit and has never been tagged, so the
-  number to bump it to is a promise about what the tool is, which is the
-  owner's to make rather than a build step's. Everything mechanical is in
-  place; the release is one version bump and one tag away.
+  **The version is chosen and the release is prepared; the tag is not pushed.**
+  The number was the one part of this that a build step could not decide — it
+  is a promise about what the tool is — and it is now `2.1.0`, with the reason
+  for leaving `2.0.0` behind recorded in the changelog entry rather than only
+  in a commit. `package.json`, `CHANGELOG.md` and the committed
+  `dfm-tool.html` all agree, and `node release.js v2.1.0` passes. What remains
+  is `git tag v2.1.0 && git push origin v2.1.0`, from a commit that is an
+  ancestor of `main` — which is the workflow's own check, and the reason the
+  tag is the owner's to push rather than a branch's to carry.
 - **A CHANGELOG.** *(done)* `CHANGELOG.md`, with the history reconstructed from
   the 48 commits behind it. The structure follows from what the file is for: a
   **Scores and thresholds** table first, with the measured effect of every
@@ -876,16 +881,17 @@ five of its seven items turned up a defect, and two of those were defects in
 the checks themselves.
 
 R2.1 to R2.7 and release discipline are all done, bar three things that need
-something a keyboard cannot supply and one that is a judgement rather than a
-task:
+something a keyboard cannot supply:
 
 - R2.5's sixteen Vicat softening points need datasheet access, which this
   environment does not have.
 - R2.7's device layer needs a SpaceMouse plugged in for half an hour.
 - The SRI hashes need a machine that can reach cdnjs and jsdelivr, which both
   answer 403 here. `npm run sri` does the rest of that job.
-- The first tag is a version number, which is a promise about what the tool is
-  and belongs to whoever makes it. Everything mechanical around it is in place.
+
+The fourth was a judgement rather than a task, and it has been made: the first
+tag is `v2.1.0`, prepared and gated but not pushed, because a tag has to be cut
+from a commit already on `main`.
 
 Each is recorded at its own milestone with what is missing and what to run.
 
