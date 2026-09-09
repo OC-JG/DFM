@@ -22,6 +22,34 @@ carries the built `dfm-tool.html`; see `.github/workflows/release.yml`.
 
 ## Unreleased
 
+### Scores and thresholds
+
+The same part, scored by the build before and the build after, does not
+necessarily get the same number across this.
+
+| Landed | What moved | Measured effect |
+|---|---|---|
+| 2026-09-09 | `ts_thermal` scores again, on Vicat instead of HDT: weight **0 → 10**, and the other five interface checks rescaled from 34/26/24/8/8 to 31/24/22/7/6 | **180 of the 256 material pairs change score and 17 change grade** — 80 rise, 100 fall, the largest movements being abs+pe at **+11** and abs+pa6 at **−7**. Fifteen pairs go INTERFACE OK → MINOR REWORK on a new finding that is real: shot 2 arriving above the substrate's own melt point, which is every hard material overmoulded onto TPU, plus PA66-GF30 onto PP and ABS onto PMMA. Two go the other way, NOT COMPATIBLE → MAJOR REWORK (pp+pom 42→51, pa6+pp 48→55) — see the caveat below. |
+
+Why `ts_thermal` took 10 rather than the 25 it held before HDT was removed: the
+check that lost those points fired on nearly every pair, and the one replacing
+it is two narrow sign tests that stay silent on ordinary practice. A silent
+check still fills the denominator, so at 25 it credited every pair a quarter of
+the interface score for free and diluted the findings that did fire by the same
+quarter — ABS + PP, which will not bond at all, came out at 60 and read MAJOR
+REWORK. At 10 it reads 47 and NOT COMPATIBLE.
+
+**The caveat, because it is a signal getting weaker.** Trimming `ts_adhesion`
+from 34 to 31 to make room means a critical adhesion failure now spends
+slightly less of the budget, and two unbondable pairs cross the 50 boundary out
+of NOT COMPATIBLE into MAJOR REWORK: PP + POM at 51 and PA6 + PP at 55. Both
+still carry the critical adhesion finding and both still say the pair does not
+bond; it is the headline grade that softens. The cause is that the interface
+grade for a single critical finding is decided by arithmetic — `gradeFloorIndex`
+floors one critical at MINOR REWORK, which is weaker than the score in these
+cases. Fixing it properly means an interface-specific floor, which is a change
+to grading rather than to this check, and is not made here.
+
 ### Fixed
 
 - **A SpaceMouse whose descriptor declares no axis range no longer reads as

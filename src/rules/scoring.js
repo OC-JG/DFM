@@ -105,26 +105,46 @@ export const CHECK_RISK_PROFILES = {
  * of their own. They previously summed raw penalties to a maximum of 105,
  * which meant a two-shot 70 and a single-part 70 were not the same claim.
  *
- * Five checks score, summing to 100; `ts_thermal` is advisory at 0. Coverage
- * and thickness only run when an interface mesh is loaded, so normalisation
- * handles the two-mesh and one-mesh cases the same way it does for FPC.
+ * Six checks score, summing to 100. Coverage and thickness only run when an
+ * interface mesh is loaded, so normalisation handles the two-mesh and one-mesh
+ * cases the same way it does for FPC.
  */
 export const TWO_SHOT_RISK_PROFILES = {
-  ts_adhesion:  { S: 5, L: 3, D: 3, weight: 34 }, // delamination in service
-  ts_thickness: { S: 4, L: 3, D: 3, weight: 26 }, // short shot, or a window that will not transmit
-  ts_shrinkage: { S: 3, L: 3, D: 4, weight: 24 }, // interface stress on cooling
-  ts_coverage:  { S: 2, L: 2, D: 2, weight: 8  }, // often a mesh alignment problem — see ts_registration
-  ts_order:     { S: 2, L: 2, D: 2, weight: 8  }, // convention, not physics
+  ts_adhesion:  { S: 5, L: 3, D: 3, weight: 31 }, // delamination in service
+  ts_thickness: { S: 4, L: 3, D: 3, weight: 24 }, // short shot, or a window that will not transmit
+  ts_shrinkage: { S: 3, L: 3, D: 4, weight: 22 }, // interface stress on cooling
+  ts_coverage:  { S: 2, L: 2, D: 2, weight: 7  }, // often a mesh alignment problem — see ts_registration
+  ts_order:     { S: 2, L: 2, D: 2, weight: 6  }, // convention, not physics
 
-  /* Advisory, and the reason is worth stating here rather than only at the
-     rule. It held 25 points and decided the grade from melt temperature
-     against HDT, which is a sustained-load deflection property and not what
-     seconds of contact with a hot melt does to a cold substrate. Vicat
-     softening point would answer it; the material table does not carry Vicat.
-     The 25 points were redistributed across the five above in proportion to
-     what they already held, so the scored set still sums to 100 and no
-     surviving check changed rank. */
-  ts_thermal:   { S: 5, L: 3, D: 2, weight: 0  }, // needs Vicat, not HDT
+  /*
+   * Scoring again, at 10 rather than the 25 it held before — and the reason
+   * is what the check now does, not a haggle.
+   *
+   * The history: it scored melt against HDT plus a 120 °C margin, and when
+   * that stopped scoring its 25 points were redistributed across the five
+   * above in proportion (25/20/18/6/6 became 34/26/24/8/8). `materials.js`
+   * now carries Vicat, so the obvious move was to reverse that exactly. It
+   * was tried, and it is wrong, for a reason worth recording.
+   *
+   * The check that lost the points fired on nearly every pair. The one
+   * replacing it is two narrow sign tests — a fusion pair whose melt is too
+   * cool to reach the substrate's softening point, and an interface bond
+   * whose melt is above the substrate's own melt — and it is silent on
+   * ordinary practice by design. A silent check still contributes its weight
+   * to the denominator, because normalisation counts the budget that ran
+   * rather than the budget that fired. At 25 it therefore credited every
+   * pair a quarter of the interface score for free, and diluted the findings
+   * that did fire by the same quarter: ABS + PP, which will not bond at all,
+   * came out at 60 and read MAJOR REWORK where it had read NOT COMPATIBLE.
+   * Restoring a number is not worth understating that.
+   *
+   * So the weight follows the exposure. 10 keeps thermal below the three
+   * checks that speak on most parts and above the two conventions, which is
+   * the rank its two conditions deserve: real, severe, and rare. The other
+   * five are scaled from their current shares to fill the remaining 90, so
+   * none of them changes rank either.
+   */
+  ts_thermal:   { S: 5, L: 3, D: 2, weight: 10 }, // substrate deforms during shot 2
 
   /* Advisory for a different reason from ts_thermal: not missing data, but a
      question geometry cannot answer. Two shots that do not touch look the same

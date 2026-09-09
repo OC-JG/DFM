@@ -387,20 +387,74 @@ for a reason — and both had rules that could not do their job.
   and the distance from the gate to it. Where nothing is marked the part-wide
   comparison still runs and now says that it over-reports.
 
-**What did not, and why.** `ts_thermal` is still dark. The check needs a Vicat
-softening point per grade, and Vicat is data rather than modelling: sixteen
-values, each from the datasheet of a specific grade. Every datasheet host —
-CAMPUS, UL Prospector, MatWeb, the resin makers' own sites — is refused by this
-environment's network policy, and a web search returns summaries attributed to
-datasheets that cannot then be opened. Entering sixteen numbers on that footing
-and switching on a scored check would recreate exactly what the previous work
-removed: a threshold resting on a property nobody had actually read.
+**What did not at the time, and how it was settled since.** `ts_thermal` stayed
+dark because the check needs a Vicat softening point per material, and every
+datasheet host — CAMPUS, UL Prospector, MatWeb, the resin makers' own sites —
+is refused by this environment's network policy. The reasoning was that
+entering sixteen numbers from search-engine summaries of datasheets nobody
+opened would recreate what the previous work removed: a threshold resting on a
+property nobody had read.
 
-So it stays advisory, and the instruction not to restore a melt-versus-HDT
-threshold without Vicat is now enforced rather than commented. A test locks the
-check's weight to the presence of `vicatC` in both directions: entering the data
-without switching the check on fails, and switching it on without the data
-fails. Whoever finishes this will see the failure name the other half.
+That framing turned out to contain a false premise, and the owner named it:
+the check does not need graded materials. This is an in-house DFM screen whose
+job is to save an external DFM loop, not a contractual gate — and a row called
+"ABS" could never have had a single grade's datasheet behind it anyway, because
+it covers hundreds of grades whose VST spreads over tens of degrees. Every
+other column in that table (shrinkage, wall range, draft, `ltMax`, `coolK`) is
+class-typical reference data on exactly the same footing. So the standard was
+never "a datasheet per row"; it was consistency with the rest of the table,
+which is achievable without network access.
+
+**Delivered.** Sixteen class-typical VST/B/50 values at the conservative end of
+each class's range, and the check scoring again — but not the check that lost
+the points. The old rule's defect was not HDT alone, it was the 120 °C margin
+bolted onto it, so the replacement has no tunable number anywhere: every band
+boundary compares two tabulated properties, melt against the substrate's
+softening point and melt against the substrate's own melt. It forks on whether
+the pair fusion-welds, because remelting the skin is the bond on one side of
+that fork and pure cost on the other — collapsing those two is what condemned
+the ASA-natural window this material table exists for.
+
+**Found while doing the work.**
+
+- *The obvious band was almost always true.* "Interface bond, and the skin
+  softens" looks like the finding, and it fires on very nearly every overmould
+  ever moulded — most substrates soften below 140 °C and every melt in the
+  table is above 200 °C. Deducting on it would have been the old rule's defect
+  in a milder form: a standing penalty on ordinary practice, the classic
+  ABS-with-a-TPU-grip included. It is reported and costs nothing, and only the
+  two rare conditions score.
+
+- *Restoring the old weight was wrong, and the reason generalises.* The 25
+  points looked like a clean reversal of a documented redistribution. But a
+  check that is silent by design still contributes its weight to the
+  denominator, because normalisation counts the budget that ran rather than the
+  budget that fired — so 25 credited every pair a quarter of the interface
+  score for free and diluted the findings that did fire by the same quarter.
+  ABS + PP, which will not bond at all, went from NOT COMPATIBLE to MAJOR
+  REWORK. Weight has to follow how often a check can speak, not what it used
+  to hold.
+
+- *One arm of the fork cannot fire, structurally.* A fusion pair whose melt is
+  too cool to reach the substrate's softening point is unreachable from this
+  table: `fusion` means the same polymer both sides, so shot 2's melt is shot
+  1's melt and is necessarily above its softening point. Kept, because the flag
+  is also set on cross-polymer pairs that weld through a shared phase, and
+  tested with a synthetic pair rather than left as the one untested branch.
+
+- *The `hdtC` column is not what it says it is.* Noticed while working
+  alongside it: the published figures it was built from are inconsistent about
+  load, and two entries look like HDT/A at 1.8 MPa rather than the 0.45 MPa the
+  field documents. Nothing scores on it, which is why it has not been chased —
+  but it is now labelled indicative rather than left to be trusted.
+
+**Not fixed, and named in the changelog.** Making room for the new weight trimmed
+`ts_adhesion` from 34 to 31, so two unbondable pairs cross out of NOT
+COMPATIBLE into MAJOR REWORK (PP + POM at 51, PA6 + PP at 55). Both still carry
+the critical adhesion finding. The cause is that a single critical finding's
+interface grade is decided by arithmetic — `gradeFloorIndex` floors one
+critical at MINOR REWORK — and the fix is an interface-specific floor, which is
+a change to grading rather than to this check.
 
 **Found while doing the work.**
 
@@ -445,8 +499,11 @@ register and report a residual rather than a coverage finding — met, with the
 transform recovered to within 0.01 mm of the inverse of the one applied. The
 FPC coverage rule scores on a measured cover — met, end to end in a browser
 against a STEP fixture whose answer is 1.90 mm by construction. `ts_thermal`
-carries a weight and sixteen cited `vicatC` values — **not met**, blocked as
-above.
+carries a weight and sixteen `vicatC` values — met, on the terms above: the
+values are class-typical rather than per-grade, which is the standard every
+other column in that table already meets and the one an in-house screen needs.
+The weight is 10 rather than the 25 it held, because the replacement check is
+silent on ordinary practice and a silent check still fills the denominator.
 
 ### R2.6 — Findings that survive leaving the tool *(done)*
 
@@ -903,11 +960,15 @@ if the file had existed while they landed. The half that was wrong is "cheap":
 five of its seven items turned up a defect, and two of those were defects in
 the checks themselves.
 
-R2.1 to R2.7 and release discipline are all done, bar three things that need
-something a keyboard cannot supply:
+R2.1 to R2.7 and release discipline are all done, bar two things that need
+something a keyboard cannot supply — the third turned out to need a decision
+rather than a datasheet:
 
-- R2.5's sixteen Vicat softening points need datasheet access, which this
-  environment does not have.
+- ~~R2.5's sixteen Vicat softening points need datasheet access.~~ *Settled: the
+  premise was wrong. An in-house screen does not need graded materials, and no
+  row in that table could have had one grade's datasheet behind it anyway.
+  Sixteen class-typical values, on the same footing as every other column
+  there, and the check scores again.*
 - R2.7's device layer needs a SpaceMouse plugged in for half an hour — now
   for two named questions rather than a general shakedown, the rest having
   been settled against implementations that have run on real hardware.
@@ -971,10 +1032,12 @@ oversights.
 - **Upgrading three.js past r128.** r128 is the last release with a UMD build
   usable from a plain `<script>` tag; moving costs the single-file property for
   no gain in what the viewer does.
-- **Scoring melt against HDT.** Removed on purpose. HDT cannot answer the
-  question that was being asked of it. Vicat can, and that is what remains of
-  R2.5 — data entry against sixteen datasheets, with the check's weight locked
-  to it by a test so neither half can land without the other.
+- **Scoring melt against HDT.** Removed on purpose, and not restored. HDT
+  cannot answer the question that was being asked of it; Vicat can, and
+  `ts_thermal` now scores on Vicat with no margin in it — see R2.5. The
+  `hdtC` column stays for context, labelled indicative, and nothing scores on
+  it. What is deliberately not coming back is the shape of the old rule: a
+  property that cannot answer the question, plus a margin to make it fit.
 
 ## Keeping this document honest
 
