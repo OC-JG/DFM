@@ -448,13 +448,26 @@ the ASA-natural window this material table exists for.
   field documents. Nothing scores on it, which is why it has not been chased —
   but it is now labelled indicative rather than left to be trusted.
 
-**Not fixed, and named in the changelog.** Making room for the new weight trimmed
-`ts_adhesion` from 34 to 31, so two unbondable pairs cross out of NOT
-COMPATIBLE into MAJOR REWORK (PP + POM at 51, PA6 + PP at 55). Both still carry
-the critical adhesion finding. The cause is that a single critical finding's
-interface grade is decided by arithmetic — `gradeFloorIndex` floors one
-critical at MINOR REWORK — and the fix is an interface-specific floor, which is
-a change to grading rather than to this check.
+**And the grading bug it exposed, since fixed.** Making room for the new weight
+trimmed `ts_adhesion` from 34 to 31, and two unbondable pairs crossed out of
+NOT COMPATIBLE into MAJOR REWORK (PP + POM at 51, PA6 + PP at 55). The weights
+were not really the cause. `gradeFloorIndex` applied the part rule to the
+interface — one critical steps down one band — and that rule does not transfer:
+a part is many independent features, so one bad one is fixable in the tool,
+while an interface is one thing and a critical finding on it says the two shots
+will not hold together. There is no partially-bonded pair to grade as MINOR
+REWORK. Any critical now floors the interface at the bottom band, which moved
+50 of 256 pairs' grades and no scores at all. The floor is keyed by the grade
+scale rather than passed in, so a caller cannot pick a scale and forget its
+floor, and a test asserts every scale has one.
+
+Worth noting what that fix did *not* need: a judgement about how bad a
+shrinkage differential is. 48 of the 70 pairs carrying a critical are critical
+on shrinkage rather than adhesion, and it was tempting to treat those
+differently — but the rule already calls a >1.5% differential critical and says
+it delaminates on cooling, which is the same fatal condition. Checked rather
+than assumed: no pair the compatibility table rates as a chemical bond is
+condemned by this, and no fusion pair is.
 
 **Found while doing the work.**
 

@@ -39,16 +39,24 @@ the interface score for free and diluted the findings that did fire by the same
 quarter — ABS + PP, which will not bond at all, came out at 60 and read MAJOR
 REWORK. At 10 it reads 47 and NOT COMPATIBLE.
 
-**The caveat, because it is a signal getting weaker.** Trimming `ts_adhesion`
-from 34 to 31 to make room means a critical adhesion failure now spends
-slightly less of the budget, and two unbondable pairs cross the 50 boundary out
-of NOT COMPATIBLE into MAJOR REWORK: PP + POM at 51 and PA6 + PP at 55. Both
-still carry the critical adhesion finding and both still say the pair does not
-bond; it is the headline grade that softens. The cause is that the interface
-grade for a single critical finding is decided by arithmetic — `gradeFloorIndex`
-floors one critical at MINOR REWORK, which is weaker than the score in these
-cases. Fixing it properly means an interface-specific floor, which is a change
-to grading rather than to this check, and is not made here.
+| 2026-09-09 | A critical finding on a two-shot interface now floors the grade at NOT COMPATIBLE, instead of stepping down one band as it does for a part | **50 of the 256 pairs read NOT COMPATIBLE where they read MAJOR REWORK, and no score changes at all** — the floor moves the headline, never the arithmetic. Every pair moved was already carrying a critical finding: 14 on adhesion, 48 on shrinkage, 8 on both. No pair the compatibility table rates as a chemical bond is affected, and no fusion pair is. |
+
+**Why the interface floor is not the part floor.** A part is many independent
+features, so one critical finding on it — an internal undercut needing a
+lifter, a boss that will not fill — is a real defect in one place, fixable in
+the tool without the rest being wrong; it steps the grade down one band per
+critical and reaches the bottom at three. An interface is one thing. There is
+no partially-bonded pair: a critical interface finding says the two shots will
+not hold together, and a headline of MINOR REWORK over that is a verdict nobody
+should act on.
+
+This closes the caveat the entry above used to carry. Trimming `ts_adhesion`
+from 34 to 31 had let two unbondable pairs cross the 50 boundary out of NOT
+COMPATIBLE — PP + POM at 51, PA6 + PP at 55 — because the grade for one
+critical was decided by arithmetic. Their scores are unchanged; their grades
+are not. The floor is keyed by the grade scale rather than passed in, so a
+caller cannot choose a scale and forget the floor belonging to it, and a test
+asserts every scale is registered.
 
 ### Fixed
 

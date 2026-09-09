@@ -25,7 +25,7 @@ import { stats, medianCI95, makeRandom } from '../src/analysis/stats.js';
 import { runDFM } from '../src/rules/engine.js';
 import { runTwoShotDFM, substrateSoftening } from '../src/rules/twoshot.js';
 import {
-  CHECK_RISK_PROFILES, TWO_SHOT_RISK_PROFILES, SEVERITY_FACTOR,
+  CHECK_RISK_PROFILES, CRITICAL_FLOORS, TWO_SHOT_RISK_PROFILES, SEVERITY_FACTOR,
   scoreChecks, escalate, PART_GRADES, INTERFACE_GRADES,
 } from '../src/rules/scoring.js';
 import { buildExportJSON } from '../src/export/json.js';
@@ -849,6 +849,74 @@ describe('scoring — grade cannot outrun the findings');
     ];
     const { grade } = scoreChecks(checks, PART_GRADES);
     assert(['MAJOR REWORK', 'NOT MANUFACTURABLE'].includes(grade.label), `got ${grade.label}`);
+  });
+
+  await it('one critical rules out everything but the bottom band on an interface', () => {
+    /*
+     * The part rule steps down one band per critical, because a part is many
+     * independent features and one bad one is fixable in the tool. An
+     * interface is one thing: a critical finding there says the two shots will
+     * not hold together, and there is no partially-bonded pair. So the floor
+     * differs by scale, and this is the half that differs.
+     *
+     * Driven with a deliberately high score so the floor is doing the work
+     * rather than the arithmetic agreeing by accident.
+     */
+    const checks = Object.keys(TWO_SHOT_RISK_PROFILES)
+      .map((key) => ({ key, status: 'ok', severity: 'none' }));
+    /* One critical on the lightest scoring check, so the arithmetic leaves a
+       high score and the floor is the only thing that can pull the grade
+       down. Padding with passes matters: a one-check list makes the budget
+       that check's own weight, and a critical then spends all of it. */
+    checks.find((c) => c.key === 'ts_order').status = 'fail';
+    checks.find((c) => c.key === 'ts_order').severity = 'critical';
+    const r = scoreChecks(checks, INTERFACE_GRADES, TWO_SHOT_RISK_PROFILES);
+    eq(r.criticalCount, 1, 'critical findings:');
+    assert(r.score >= 85, `score should be high for this test to mean anything, got ${r.score}`);
+    eq(r.grade.label, 'NOT COMPATIBLE', `score ${r.score} must not soften the verdict:`);
+
+    /* The part scale, one critical, the same high-score construction: it must
+       still step down exactly one band, so this did not quietly go global. */
+    const partChecks = Object.keys(CHECK_RISK_PROFILES)
+      .map((key) => ({ key, status: 'ok', severity: 'none' }));
+    partChecks.find((c) => c.key === 'undercut').status = 'fail';
+    partChecks.find((c) => c.key === 'undercut').severity = 'critical';
+    const asPart = scoreChecks(partChecks, PART_GRADES);
+    eq(asPart.criticalCount, 1, 'part criticals:');
+    assert(asPart.score >= 85, `part score should stay high, got ${asPart.score}`);
+    eq(asPart.grade.label, 'MINOR REWORK', 'the part rule is untouched:');
+  });
+
+  await it('the two pairs that read MAJOR REWORK over a bond failure no longer do', () => {
+    /* The concrete regression the interface floor exists for. Both carry a
+       critical "these do not bond" finding and both scored above 50, so the
+       headline softened to MAJOR REWORK over a pair that will not bond. The
+       score is not the claim here — the adhesion check is. */
+    for (const [a, b] of [['pp', 'pom'], ['pa6', 'pp']]) {
+      const ts = runTwoShotDFM({ mat1: a, mat2: b, interface: null, opticalWindow: 'none' });
+      eq(ts.checks.find((c) => c.key === 'ts_adhesion').severity, 'critical', `${a}+${b} adhesion:`);
+      assert(ts.score > 50, `${a}+${b} must still score above 50 for this to mean anything, got ${ts.score}`);
+      eq(ts.grade.label, 'NOT COMPATIBLE', `${a}+${b} grade at score ${ts.score}:`);
+    }
+  });
+
+  await it('every grade scale declares the floor that belongs to it', () => {
+    /* The floor is keyed by the table so a call site cannot choose a scale and
+       then forget its floor. That only holds while every scale is registered,
+       which is what this asserts — a new scale added without one would fall
+       back to the part rule and grade too kindly. */
+    for (const [name, table] of [['PART_GRADES', PART_GRADES], ['INTERFACE_GRADES', INTERFACE_GRADES]]) {
+      assert(CRITICAL_FLOORS.has(table), `${name} has no critical floor registered`);
+      eq(typeof CRITICAL_FLOORS.get(table), 'function', `${name} floor:`);
+      eq(CRITICAL_FLOORS.get(table)(0), 0, `${name} with no criticals must not be floored:`);
+    }
+    /* Neither scale may floor past the end of its own table. */
+    for (const table of [PART_GRADES, INTERFACE_GRADES]) {
+      for (let n = 0; n <= 5; n++) {
+        const i = CRITICAL_FLOORS.get(table)(n);
+        assert(i >= 0 && i < table.length, `floor index ${i} is outside a ${table.length}-band table at n=${n}`);
+      }
+    }
   });
 
   await it('the advisory checks cannot contribute a critical', () => {

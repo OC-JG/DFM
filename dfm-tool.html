@@ -3,7 +3,7 @@
 OnlyCat DFM — injection moulding design-for-manufacture analyser
 
 Version 2.1.0
-Source fingerprint a2b84a62b064
+Source fingerprint 65f3786a7db5
 
 Copyright (c) 2026 OnlyCat. Released under the MIT License.
 Full terms: the LICENSE file in the source repository, or
@@ -2352,7 +2352,7 @@ function fpcCompatibility(material) {
  * directly — and they say so rather than claiming a version they are not.
  */
 const TOOL_VERSION = "2.1.0";
-const BUILD_FINGERPRINT = "a2b84a62b064";
+const BUILD_FINGERPRINT = "65f3786a7db5";
 const BUILD_STAMP = "";
 
 /* One short string for a banner or a footer. */
@@ -7229,14 +7229,44 @@ function gradeFor(score, table) {
   return table.find((g) => score >= g.min);
 }
 
-/* Best grade a part with this many critical findings may hold, as an index
-   into the grade table: one critical is not production ready, two are not
-   minor rework, three or more are not manufacturable as drawn. */
-function gradeFloorIndex(criticalCount) {
-  if (criticalCount >= 3) return 3;
-  if (criticalCount === 2) return 2;
-  if (criticalCount === 1) return 1;
-  return 0;
+/*
+ * Best grade a given number of critical findings may hold, as an index into
+ * that scale's table — and it is not the same rule for a part as for an
+ * interface, which is what this map exists to say.
+ *
+ * A part is many independent features. One critical finding on it — an
+ * internal undercut needing a lifter, a boss that will not fill — is a real
+ * defect in one place, fixable in the tool without the rest of the part being
+ * wrong, so it steps the grade down one band per critical and reaches "not
+ * manufacturable" at three.
+ *
+ * An interface is one thing. There is no such step for it, because there is no
+ * partially-bonded pair: a critical interface finding says the two shots will
+ * not hold together — incompatible materials, or a shrinkage differential that
+ * delaminates on cooling — and a headline of MINOR REWORK over that is a
+ * verdict nobody should act on. So any critical finding puts the interface at
+ * the bottom band, whatever the arithmetic left.
+ *
+ * The concrete failure this fixes: PP + POM scored 51 and PA6 + PP 55, both
+ * carrying a critical "these do not bond" finding, and both read MAJOR REWORK
+ * because one critical only floored them at MINOR REWORK and the score
+ * happened to land above 50. The scores were never the claim — the adhesion
+ * check was — and the grade now follows the check.
+ *
+ * Keyed by the table rather than passed in, so a call site cannot pick the
+ * scale and then forget the floor that belongs to it. Locked by a test that
+ * every exported scale appears here.
+ */
+const CRITICAL_FLOORS = new Map([
+  [PART_GRADES, (criticalCount) => Math.min(criticalCount, 3)],
+  [INTERFACE_GRADES, (criticalCount) => (criticalCount > 0 ? 3 : 0)],
+]);
+
+function gradeFloorIndex(criticalCount, gradeTable) {
+  const floor = CRITICAL_FLOORS.get(gradeTable);
+  /* An unknown scale gets the part rule rather than no floor at all: the
+     failure mode of guessing wrong here is a grade that is too kind. */
+  return floor ? floor(criticalCount) : Math.min(criticalCount, 3);
 }
 
 /*
@@ -7278,7 +7308,7 @@ function scoreChecks(checks, gradeTable, profiles = CHECK_RISK_PROFILES) {
     : 100;
 
   const byScore = gradeTable.indexOf(gradeFor(score, gradeTable));
-  const grade = gradeTable[Math.max(byScore, gradeFloorIndex(criticalCount))];
+  const grade = gradeTable[Math.max(byScore, gradeFloorIndex(criticalCount, gradeTable))];
 
   return { score, grade, totalDeduction, budget, criticalCount };
 }
