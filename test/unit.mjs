@@ -23,9 +23,9 @@ import { validateGeometry, rescaleGeometry, flipWinding } from '../src/geometry/
 import { analyseMesh, suggestPullDirection, CONE_RINGS_DEG, CONE_AZIMUTHS } from '../src/analysis/mesh.js';
 import { stats, medianCI95, makeRandom } from '../src/analysis/stats.js';
 import { runDFM } from '../src/rules/engine.js';
-import { runTwoShotDFM } from '../src/rules/twoshot.js';
+import { runTwoShotDFM, substrateSoftening } from '../src/rules/twoshot.js';
 import {
-  CHECK_RISK_PROFILES, TWO_SHOT_RISK_PROFILES, SEVERITY_FACTOR,
+  CHECK_RISK_PROFILES, CRITICAL_FLOORS, TWO_SHOT_RISK_PROFILES, SEVERITY_FACTOR,
   scoreChecks, escalate, PART_GRADES, INTERFACE_GRADES,
 } from '../src/rules/scoring.js';
 import { buildExportJSON } from '../src/export/json.js';
@@ -60,7 +60,7 @@ import {
 import { applyRates, shape, isIdle, createNavigatorLoop, NAVIGATOR_DEFAULTS } from '../src/app/navigator.js';
 import {
   axesFromCollections, decodeReport, readField, createHidSource,
-  AXIS_USAGES, hidAvailable,
+  AXIS_USAGES, hidAvailable, DEFAULT_AXIS_FULL_SCALE,
 } from '../src/app/spacemouse.js';
 
 const REPO_ROOT = join(fileURLToPath(new URL('.', import.meta.url)), '..');
@@ -746,11 +746,20 @@ describe('scoring — the weight table');
 
   await it('the two-shot table sums to 100 as well', () => {
     /* The thermal check gave up its 25 points when melt-versus-HDT stopped
-       being scored; they were redistributed across the surviving five in
-       proportion, so the interface score is still out of a full 100. */
+       being scored, and takes 10 back now that Vicat can answer the question —
+       not 25, because the check that replaced it is deliberately silent on
+       ordinary practice, and a silent check still fills the denominator. The
+       reasoning is at the profile. */
     const total = Object.values(TWO_SHOT_RISK_PROFILES).reduce((sum, p) => sum + p.weight, 0);
     eq(total, 100, 'two-shot budget:');
-    eq(TWO_SHOT_RISK_PROFILES.ts_thermal.weight, 0, 'thermal advisory weight:');
+    eq(TWO_SHOT_RISK_PROFILES.ts_thermal.weight, 10, 'thermal weight:');
+    /* Rank matters more than the exact split: thermal screens for two rare
+       conditions, so it must sit below the checks that speak on most parts. */
+    const w = TWO_SHOT_RISK_PROFILES;
+    assert(w.ts_thermal.weight < w.ts_shrinkage.weight,
+      `thermal (${w.ts_thermal.weight}) must rank below shrinkage (${w.ts_shrinkage.weight})`);
+    assert(w.ts_thermal.weight > w.ts_order.weight,
+      `thermal (${w.ts_thermal.weight}) must rank above the order convention (${w.ts_order.weight})`);
   });
 
   await it('the corner advisory holds no budget it could never spend', () => {
@@ -840,6 +849,74 @@ describe('scoring — grade cannot outrun the findings');
     ];
     const { grade } = scoreChecks(checks, PART_GRADES);
     assert(['MAJOR REWORK', 'NOT MANUFACTURABLE'].includes(grade.label), `got ${grade.label}`);
+  });
+
+  await it('one critical rules out everything but the bottom band on an interface', () => {
+    /*
+     * The part rule steps down one band per critical, because a part is many
+     * independent features and one bad one is fixable in the tool. An
+     * interface is one thing: a critical finding there says the two shots will
+     * not hold together, and there is no partially-bonded pair. So the floor
+     * differs by scale, and this is the half that differs.
+     *
+     * Driven with a deliberately high score so the floor is doing the work
+     * rather than the arithmetic agreeing by accident.
+     */
+    const checks = Object.keys(TWO_SHOT_RISK_PROFILES)
+      .map((key) => ({ key, status: 'ok', severity: 'none' }));
+    /* One critical on the lightest scoring check, so the arithmetic leaves a
+       high score and the floor is the only thing that can pull the grade
+       down. Padding with passes matters: a one-check list makes the budget
+       that check's own weight, and a critical then spends all of it. */
+    checks.find((c) => c.key === 'ts_order').status = 'fail';
+    checks.find((c) => c.key === 'ts_order').severity = 'critical';
+    const r = scoreChecks(checks, INTERFACE_GRADES, TWO_SHOT_RISK_PROFILES);
+    eq(r.criticalCount, 1, 'critical findings:');
+    assert(r.score >= 85, `score should be high for this test to mean anything, got ${r.score}`);
+    eq(r.grade.label, 'NOT COMPATIBLE', `score ${r.score} must not soften the verdict:`);
+
+    /* The part scale, one critical, the same high-score construction: it must
+       still step down exactly one band, so this did not quietly go global. */
+    const partChecks = Object.keys(CHECK_RISK_PROFILES)
+      .map((key) => ({ key, status: 'ok', severity: 'none' }));
+    partChecks.find((c) => c.key === 'undercut').status = 'fail';
+    partChecks.find((c) => c.key === 'undercut').severity = 'critical';
+    const asPart = scoreChecks(partChecks, PART_GRADES);
+    eq(asPart.criticalCount, 1, 'part criticals:');
+    assert(asPart.score >= 85, `part score should stay high, got ${asPart.score}`);
+    eq(asPart.grade.label, 'MINOR REWORK', 'the part rule is untouched:');
+  });
+
+  await it('the two pairs that read MAJOR REWORK over a bond failure no longer do', () => {
+    /* The concrete regression the interface floor exists for. Both carry a
+       critical "these do not bond" finding and both scored above 50, so the
+       headline softened to MAJOR REWORK over a pair that will not bond. The
+       score is not the claim here — the adhesion check is. */
+    for (const [a, b] of [['pp', 'pom'], ['pa6', 'pp']]) {
+      const ts = runTwoShotDFM({ mat1: a, mat2: b, interface: null, opticalWindow: 'none' });
+      eq(ts.checks.find((c) => c.key === 'ts_adhesion').severity, 'critical', `${a}+${b} adhesion:`);
+      assert(ts.score > 50, `${a}+${b} must still score above 50 for this to mean anything, got ${ts.score}`);
+      eq(ts.grade.label, 'NOT COMPATIBLE', `${a}+${b} grade at score ${ts.score}:`);
+    }
+  });
+
+  await it('every grade scale declares the floor that belongs to it', () => {
+    /* The floor is keyed by the table so a call site cannot choose a scale and
+       then forget its floor. That only holds while every scale is registered,
+       which is what this asserts — a new scale added without one would fall
+       back to the part rule and grade too kindly. */
+    for (const [name, table] of [['PART_GRADES', PART_GRADES], ['INTERFACE_GRADES', INTERFACE_GRADES]]) {
+      assert(CRITICAL_FLOORS.has(table), `${name} has no critical floor registered`);
+      eq(typeof CRITICAL_FLOORS.get(table), 'function', `${name} floor:`);
+      eq(CRITICAL_FLOORS.get(table)(0), 0, `${name} with no criticals must not be floored:`);
+    }
+    /* Neither scale may floor past the end of its own table. */
+    for (const table of [PART_GRADES, INTERFACE_GRADES]) {
+      for (let n = 0; n <= 5; n++) {
+        const i = CRITICAL_FLOORS.get(table)(n);
+        assert(i >= 0 && i < table.length, `floor index ${i} is outside a ${table.length}-band table at n=${n}`);
+      }
+    }
   });
 
   await it('the advisory checks cannot contribute a critical', () => {
@@ -970,25 +1047,108 @@ describe('scoring — one source of truth');
     eq(score, 100); eq(budget, 100); eq(grade.label, 'INTERFACE OK');
   });
 
-  await it('substrate softening is an advisory, not a graded verdict', () => {
-    /* Melt-versus-HDT was 25 of the interface's 100 points, which condemned
-       every fusion pair in the compatibility table — two grades of the same
-       polymer necessarily have shot 2's melt far above shot 1's HDT — while
-       the adhesion check on the same page called them the strongest bond
-       available. The ASA-natural window on a PC/ASA body, the reason those
-       grades are in the table at all, came out MAJOR REWORK. HDT is a
-       sustained-load deflection property and cannot settle the question, so
-       the check now reports and does not score. */
+  await it('every material softens below the temperature it melts at', () => {
+    /* The cheapest guard against a typo in sixteen hand-entered numbers, and
+       the one that matters: the check's middle band is the gap between these
+       two, so a Vicat above its own melt point would invert a verdict rather
+       than fail loudly. */
+    for (const key of MATERIAL_ORDER) {
+      const m = MATERIALS[key];
+      assert(m.vicatC != null, `${key} has no Vicat point`);
+      assert(m.vicatC < m.meltC,
+        `${key} softens at ${m.vicatC}°C but melts at ${m.meltC}°C — one of the two is wrong`);
+      /* A plausibility band, not a threshold: these are polymers, and a
+         softening point outside this range is a transcription error. */
+      assert(m.vicatC >= 40 && m.vicatC <= 280, `${key} Vicat ${m.vicatC}°C is not plausible`);
+    }
+  });
+
+  await it('the pairs melt-versus-HDT condemned are not condemned by Vicat', () => {
+    /*
+     * Melt-versus-HDT was 25 of the interface's 100 points, and it condemned
+     * every fusion pair in the compatibility table — two grades of the same
+     * polymer necessarily have shot 2's melt far above shot 1's HDT — while
+     * the adhesion check on the same page called them the strongest bond
+     * available. The ASA-natural window on a PC/ASA body, the reason those
+     * grades are in the table at all, came out MAJOR REWORK.
+     *
+     * The check scores again, on Vicat and with no margin in it. This is the
+     * test that it did not simply reacquire the old behaviour: every pair
+     * below must still cost nothing on thermal. The fusion four because
+     * remelting the skin is the bond, and the three TPU overmoulds because a
+     * softened skin on an interface bond is ordinary practice managed by
+     * process, not a design defect.
+     */
     const pairs = [['pcasa', 'asa_n'], ['asa_n', 'pcasa'], ['asa', 'asa_n'], ['asa', 'asa'],
                    ['abs', 'tpu'], ['pp', 'tpu'], ['pc', 'tpu']];
     for (const [a, b] of pairs) {
       const ts = runTwoShotDFM({ mat1: a, mat2: b, interface: null, opticalWindow: 'none' });
       const thermal = ts.checks.find((c) => c.key === 'ts_thermal');
-      eq(thermal.status, 'info', `${a}+${b} thermal status:`);
+      eq(thermal.status, 'ok', `${a}+${b} thermal status:`);
       eq(thermal.severity, 'none', `${a}+${b} thermal severity:`);
       eq(thermal.scoreDeduction, 0, `${a}+${b} thermal deduction:`);
-      eq(thermal.weight, 0, `${a}+${b} thermal weight:`);
+      /* Scoring, though: a weight it declines to spend, not an advisory. */
+      eq(thermal.weight, 10, `${a}+${b} thermal weight:`);
     }
+  });
+
+  await it('every band boundary is a comparison of two tabulated properties', () => {
+    /*
+     * The old rule's defect was not HDT alone — it was the 120 °C margin
+     * bolted onto it. So the invariant worth locking is that no number in
+     * this check is tunable: each verdict follows from melt against the
+     * substrate's softening point, and melt against the substrate's own melt.
+     * Asserted by driving all four verdicts from the material table and
+     * checking each against the inequality that is supposed to produce it.
+     */
+    const verdictOf = (a, b) => {
+      const ts = runTwoShotDFM({ mat1: a, mat2: b, interface: null, opticalWindow: 'none' });
+      const thermal = ts.checks.find((c) => c.key === 'ts_thermal');
+      return { verdict: thermal.metrics.find((m) => m[0] === 'Verdict')[1], thermal };
+    };
+
+    /* PA66-GF30 softens at 240 °C, above TPU's 200 °C melt: nothing softens. */
+    const below = verdictOf('pa66gf', 'tpu');
+    eq(below.verdict, 'Substrate stays below softening', 'melt under the softening point:');
+    eq(below.thermal.scoreDeduction, 0, 'and costs nothing:');
+
+    /* ABS softens at 95 °C and melts at 240 °C; TPU arrives at 200 °C —
+       between the two, which is where almost every overmould sits. */
+    const between = verdictOf('abs', 'tpu');
+    eq(between.verdict, 'Skin softens — process matter', 'melt between the two:');
+    eq(between.thermal.scoreDeduction, 0, 'reported, not deducted:');
+
+    /* PC arrives at 300 °C, above ABS's own 240 °C melt, with no fusion
+       benefit to show for it. */
+    const above = verdictOf('abs', 'pc');
+    eq(above.verdict, 'Above the substrate melt', 'melt above the substrate melt:');
+    eq(above.thermal.severity, 'major', 'and that is a major finding:');
+    assert(above.thermal.scoreDeduction > 0,
+      `it has to cost something, deducted ${above.thermal.scoreDeduction}`);
+
+    /* Same polymer both sides: the skin is meant to remelt. */
+    const fusion = verdictOf('asa', 'asa_n');
+    eq(fusion.verdict, 'Heat is the mechanism', 'a fusion pair:');
+    eq(fusion.thermal.scoreDeduction, 0, 'costs nothing:');
+  });
+
+  await it('a fusion pair too cool to reach softening is not called a weld', () => {
+    /*
+     * Unreachable from the material table, and deliberately still covered.
+     * `fusion` marks the same polymer on both sides, so shot 2's melt is
+     * shot 1's melt and is necessarily above shot 1's softening point — but
+     * the flag is also set on cross-polymer pairs that weld through a shared
+     * phase, where a cool enough shot 2 could reach this. Without the branch
+     * such a pair would read "heat is the mechanism" while the heat never
+     * arrived, so it is driven here with a synthetic pair rather than left
+     * as untested code.
+     */
+    const m1 = { ...MATERIALS.pa66gf, name: 'High-VST substrate' };  // VST 240
+    const m2 = { ...MATERIALS.tpu, name: 'Cool shot 2' };            // melt 200
+    const thermal = substrateSoftening(m1, m2, { adhesion: 'chemical', fusion: true, notes: 'synthetic' });
+    eq(thermal.metrics.find((m) => m[0] === 'Verdict')[1], 'Weld may not develop', 'verdict:');
+    eq(thermal.status, 'warn', 'status:');
+    eq(thermal.severity, 'minor', 'severity:');
   });
 
   await it('the check and the property it needs are locked to each other', () => {
@@ -3012,6 +3172,21 @@ describe('a 6-DoF device, read from its own descriptor');
     ],
   }];
 
+  /*
+   * The other layout, and the one every current device uses: all six axes in
+   * a single 12-byte report. The SpaceNavigator and the Compact split
+   * translation and rotation across two reports; the Pro, the Wireless and the
+   * Universal Receiver do not. Both shapes are covered because the split one
+   * was the only fixture here, and the merged one is the commoner device.
+   */
+  const ONE_REPORT_PUCK = [{
+    inputReports: [
+      { reportId: 1, items: [axis16([
+        usage(0x30), usage(0x31), usage(0x32), usage(0x33), usage(0x34), usage(0x35),
+      ])] },
+    ],
+  }];
+
   /* Little-endian 16-bit fields, which is what the descriptor above declares. */
   const report = (...values) => {
     const buf = new ArrayBuffer(values.length * 2);
@@ -3076,6 +3251,81 @@ describe('a 6-DoF device, read from its own descriptor');
     const axes = axesFromCollections(TWO_REPORT_PUCK);
     close(decodeReport(axes, 1, report(500, -500, 0)).tx, 1, 1e-12, 'over:');
     close(decodeReport(axes, 1, report(500, -500, 0)).ty, -1, 1e-12, 'under:');
+  });
+
+  await it('decodes a puck that puts all six axes in one report', () => {
+    /* Six axes, one report, 12 bytes — and the offsets have to keep
+       accumulating across a single item whose count is 6 rather than 3. */
+    const axes = axesFromCollections(ONE_REPORT_PUCK);
+    eq(Object.keys(axes).join(','), '1', 'one report:');
+    eq(axes[1].map((f) => `${f.axis}@${f.bitOffset}`).join(','),
+      'tx@0,ty@16,tz@32,rx@48,ry@64,rz@80', 'all six, in order:');
+    const all = decodeReport(axes, 1, report(350, -350, 0, 175, 0, -175));
+    eq(Object.keys(all).sort().join(','), 'rx,ry,rz,tx,ty,tz', 'every axis in one go:');
+    close(all.tx, 1, 1e-12, 'tx:');
+    close(all.ty, -1, 1e-12, 'ty:');
+    close(all.rx, 0.5, 1e-12, 'rx:');
+    close(all.rz, -0.5, 1e-12, 'rz:');
+  });
+
+  await it('falls back to a 6-DoF full scale when the descriptor declares no range', () => {
+    /*
+     * The fallback used to be the width of the field, which is not a neutral
+     * default: a 16-bit axis became ±32768, so a puck swinging its real ±350
+     * normalised to 0.011 — inside the navigator's 0.08 dead zone. The device
+     * connected, reported, and never moved the camera.
+     */
+    const noBounds = [{
+      inputReports: [{
+        reportId: 1,
+        items: [{ reportSize: 16, reportCount: 3, usages: [usage(0x30), usage(0x31), usage(0x32)] }],
+      }],
+    }];
+    const axes = axesFromCollections(noBounds);
+    eq(axes[1][0].min, -DEFAULT_AXIS_FULL_SCALE, 'assumed minimum:');
+    eq(axes[1][0].max, DEFAULT_AXIS_FULL_SCALE, 'assumed maximum:');
+    close(decodeReport(axes, 1, report(350, 0, 0)).tx, 1, 1e-12, 'a full push reads as full:');
+    /* The point of the fallback, stated as the thing that was broken. */
+    const deflection = decodeReport(axes, 1, report(350, 0, 0)).tx;
+    eq(shape(deflection, NAVIGATOR_DEFAULTS.deadZone) > 0, true,
+      'and it has to clear the dead zone, which is what the old fallback did not:');
+  });
+
+  await it('falls back rather than saturating when the declared range is empty', () => {
+    /* 0/0 is what an item that never set its bounds looks like once WebHID has
+       filled the gaps. Scaling by it collapsed the divisor to 1, so a single
+       count read as full deflection and the camera slammed to full rate. */
+    const zeroBounds = [{
+      inputReports: [{
+        reportId: 1,
+        items: [{
+          reportSize: 16, reportCount: 3,
+          usages: [usage(0x30), usage(0x31), usage(0x32)],
+          logicalMinimum: 0, logicalMaximum: 0,
+        }],
+      }],
+    }];
+    const axes = axesFromCollections(zeroBounds);
+    eq(axes[1][0].max, DEFAULT_AXIS_FULL_SCALE, 'assumed maximum:');
+    close(decodeReport(axes, 1, report(1, 0, 0)).tx, 1 / DEFAULT_AXIS_FULL_SCALE, 1e-12,
+      'one count is one count, not full deflection:');
+  });
+
+  await it('believes a descriptor that does declare a usable range', () => {
+    /* The fallback must not become a policy. A device declaring something
+       unusual is still the authority on its own range. */
+    const wide = [{
+      inputReports: [{
+        reportId: 1,
+        items: [{
+          reportSize: 16, reportCount: 1, usages: [usage(0x30)],
+          logicalMinimum: -32768, logicalMaximum: 32767,
+        }],
+      }],
+    }];
+    const axes = axesFromCollections(wide);
+    eq(axes[1][0].min, -32768, 'declared minimum is kept:');
+    close(decodeReport(axes, 1, report(32767)).tx, 1, 1e-3, 'and scales to it:');
   });
 
   await it('reads a field that is not byte-aligned', () => {

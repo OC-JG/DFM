@@ -22,7 +22,71 @@ carries the built `dfm-tool.html`; see `.github/workflows/release.yml`.
 
 ## Unreleased
 
-Nothing since `v2.1.0`.
+### Scores and thresholds
+
+The same part, scored by the build before and the build after, does not
+necessarily get the same number across this.
+
+| Landed | What moved | Measured effect |
+|---|---|---|
+| 2026-09-09 | `ts_thermal` scores again, on Vicat instead of HDT: weight **0 → 10**, and the other five interface checks rescaled from 34/26/24/8/8 to 31/24/22/7/6 | **180 of the 256 material pairs change score and 17 change grade** — 80 rise, 100 fall, the largest movements being abs+pe at **+11** and abs+pa6 at **−7**. Fifteen pairs go INTERFACE OK → MINOR REWORK on a new finding that is real: shot 2 arriving above the substrate's own melt point, which is every hard material overmoulded onto TPU, plus PA66-GF30 onto PP and ABS onto PMMA. Two go the other way, NOT COMPATIBLE → MAJOR REWORK (pp+pom 42→51, pa6+pp 48→55) — see the caveat below. |
+
+Why `ts_thermal` took 10 rather than the 25 it held before HDT was removed: the
+check that lost those points fired on nearly every pair, and the one replacing
+it is two narrow sign tests that stay silent on ordinary practice. A silent
+check still fills the denominator, so at 25 it credited every pair a quarter of
+the interface score for free and diluted the findings that did fire by the same
+quarter — ABS + PP, which will not bond at all, came out at 60 and read MAJOR
+REWORK. At 10 it reads 47 and NOT COMPATIBLE.
+
+| 2026-09-09 | A critical finding on a two-shot interface now floors the grade at NOT COMPATIBLE, instead of stepping down one band as it does for a part | **50 of the 256 pairs read NOT COMPATIBLE where they read MAJOR REWORK, and no score changes at all** — the floor moves the headline, never the arithmetic. Every pair moved was already carrying a critical finding: 14 on adhesion, 48 on shrinkage, 8 on both. No pair the compatibility table rates as a chemical bond is affected, and no fusion pair is. |
+
+**Why the interface floor is not the part floor.** A part is many independent
+features, so one critical finding on it — an internal undercut needing a
+lifter, a boss that will not fill — is a real defect in one place, fixable in
+the tool without the rest being wrong; it steps the grade down one band per
+critical and reaches the bottom at three. An interface is one thing. There is
+no partially-bonded pair: a critical interface finding says the two shots will
+not hold together, and a headline of MINOR REWORK over that is a verdict nobody
+should act on.
+
+This closes the caveat the entry above used to carry. Trimming `ts_adhesion`
+from 34 to 31 had let two unbondable pairs cross the 50 boundary out of NOT
+COMPATIBLE — PP + POM at 51, PA6 + PP at 55 — because the grade for one
+critical was decided by arithmetic. Their scores are unchanged; their grades
+are not. The floor is keyed by the grade scale rather than passed in, so a
+caller cannot choose a scale and forget the floor belonging to it, and a test
+asserts every scale is registered.
+
+### Fixed
+
+- **A SpaceMouse whose descriptor declares no axis range no longer reads as
+  dead, or as saturated.** `src/app/spacemouse.js` derived an axis's range from
+  the width of its field when the descriptor did not declare one, which is not
+  a neutral default: a 16-bit axis became ±32768, so a puck swinging its real
+  ±350 normalised to 0.011 — inside the navigator's 0.08 dead zone. The device
+  would connect, report, and never move the camera. Bounds declared as `0/0`,
+  which is what an item that never set them looks like once WebHID has filled
+  the gaps, collapsed the divisor to 1 instead, so a single count saturated the
+  axis and the camera slammed to full rate on a touch. Both now fall back to a
+  6-DoF full scale of ±350; a descriptor that declares a usable range is still
+  believed, which is the point of reading it. No score is affected — this is
+  viewer navigation only.
+
+### Testing and infrastructure
+
+- **The report layout every current device uses is now a fixture.** The
+  SpaceNavigator and Compact split translation and rotation across two
+  reports; the Pro, the Wireless and the Universal Receiver put all six axes
+  in one. Only the split shape was covered. Both are now.
+- **The device layer was cross-checked against implementations that have run
+  on real pucks** — pyspacenavigator and spacenavd, read as protocol
+  documentation rather than copied. It confirmed the two-vendor device filter
+  covers every known device and that merging the latest value per axis handles
+  both layouts, found the range-fallback defect above, and left two named
+  questions for a session with hardware: whether the axis directions need
+  flipping, where the reference predicts four of six, and whether a real
+  descriptor over-declares its range. Recorded at R2.7 in `docs/ROADMAP.md`.
 
 ---
 
