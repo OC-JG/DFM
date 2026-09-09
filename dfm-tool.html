@@ -3,7 +3,7 @@
 OnlyCat DFM — injection moulding design-for-manufacture analyser
 
 Version 2.1.0
-Source fingerprint 92797fcc3f42
+Source fingerprint 3ed091d10b65
 
 Copyright (c) 2026 OnlyCat. Released under the MIT License.
 Full terms: the LICENSE file in the source repository, or
@@ -2324,7 +2324,7 @@ function fpcCompatibility(material) {
  * directly — and they say so rather than claiming a version they are not.
  */
 const TOOL_VERSION = "2.1.0";
-const BUILD_FINGERPRINT = "92797fcc3f42";
+const BUILD_FINGERPRINT = "3ed091d10b65";
 const BUILD_STAMP = "";
 
 /* One short string for a banner or a footer. */
@@ -2559,6 +2559,48 @@ function createNavigatorLoop({ source, controls, settings, now = () => performan
  * the latest value of each axis is held rather than a whole sample being
  * expected at once: a report carrying only rotation must not blank the
  * translation the previous one set.
+ *
+ * ── Cross-checked against implementations that have run on real pucks ────
+ *
+ * No device was attached to any of this, so the assumptions above were checked
+ * against projects that have been run against real hardware — pyspacenavigator
+ * (per-model byte layouts for eight devices) and spacenavd (the Linux daemon).
+ * Read as documentation of the protocol, not copied. Four things came back.
+ *
+ * *The vendor filter is complete.* All eight devices in the reference — from
+ * the SpaceNavigator to the Universal Receiver — sit under Logitech's id or
+ * 3Dconnexion's, which is what `requestSpaceMouse` already filters on. The
+ * Linux kernel knows the same two.
+ *
+ * *There are two report layouts, and both work here.* The SpaceNavigator and
+ * SpaceMouse Compact put translation in report 1 and rotation in report 2;
+ * the Pro, the Wireless and the Universal Receiver put all six axes in
+ * report 1. Holding the latest value per axis covers both, and both are now
+ * fixtures in the unit tests — the single-report shape was the untested one,
+ * and it is the layout of every current device.
+ *
+ * *The range fallback was wrong in both directions.* See
+ * `DEFAULT_AXIS_FULL_SCALE` and `axisRange`. Found by asking what this code
+ * does with a descriptor that declares nothing, which is a question the
+ * synthetic fixtures never posed because they all declared ±350.
+ *
+ * *Axis directions are still a hardware question, and the reference says to
+ * expect them to need flipping.* pyspacenavigator negates four of the six
+ * axes — Y, Z, pitch and roll — and leaves X and yaw alone, to reach a
+ * conventional screen frame. This file deliberately applies no sign
+ * correction: it reports what the descriptor's axes say, and `navigator.js`
+ * maps them onto the camera. So the thing to check with a puck in hand is
+ * whether pushing away from you flies the camera forward or backward, per
+ * axis, and the likely correction is a sign flip in that mapping rather than
+ * anything here. Four of six is a specific enough prediction to be worth
+ * writing down before the session rather than rediscovering during it.
+ *
+ * One failure mode the reference cannot rule out: a device that declares a
+ * range far wider than it actually swings would normalise to a fraction of
+ * full scale and feel dead, and the honest response is a per-device override
+ * rather than second-guessing every descriptor here. If a real puck reads
+ * dead with a range declared, that is what it is, and it belongs in the same
+ * session as the direction check.
  */
 
 /* Generic Desktop usage page, and the six axes on it. WebHID reports a usage
@@ -2578,6 +2620,48 @@ const AXIS_USAGES = {
 const VENDOR_3DCONNEXION = 0x256f;
 /* Logitech's, under which the older SpaceNavigators shipped. */
 const VENDOR_LOGITECH = 0x046d;
+
+/*
+ * Full-scale deflection to assume when the descriptor will not say.
+ *
+ * Only a fallback: a descriptor that declares a usable range is believed,
+ * because believing the device is the whole point of reading the descriptor.
+ * It matters because the previous fallback was the width of the field itself,
+ * and that is not a neutral choice — see `axisRange` below for what it did.
+ *
+ * 350 rather than a round number: every 3Dconnexion device in the
+ * cross-checked reference implementations uses ±350, from the 2007
+ * SpaceNavigator through the current wireless pucks. It is a house constant
+ * of the vendor's, not a per-model figure, which is what makes it a
+ * defensible thing to fall back to.
+ */
+const DEFAULT_AXIS_FULL_SCALE = 350;
+
+/*
+ * The usable signed range of one axis item, from the descriptor or from the
+ * fallback above.
+ *
+ * The rule is spacenavd's: seed a sane default, then let the device's own
+ * declaration override it — rather than deriving a range from the field width,
+ * which is what this used to do and which fails in two directions.
+ *
+ * A 16-bit field with no declared bounds became ±32768, so a device swinging
+ * its full ±350 normalised to 0.011 — inside the navigator's 0.08 dead zone,
+ * making a connected, reporting puck that never moves the camera. And bounds
+ * declared as 0/0 collapsed the scale to 1, so a single count saturated the
+ * axis and the camera slammed to full rate on a touch. Neither is a plausible
+ * reading of a device that declared nothing useful; both were reachable from a
+ * descriptor this code would otherwise have accepted without comment.
+ *
+ * `min < max` is the test rather than `!= null`, because 0/0 is what an
+ * item that never set its bounds looks like once WebHID has filled the gaps.
+ */
+function axisRange(item) {
+  const min = item.logicalMinimum;
+  const max = item.logicalMaximum;
+  if (min != null && max != null && min < max) return { min, max };
+  return { min: -DEFAULT_AXIS_FULL_SCALE, max: DEFAULT_AXIS_FULL_SCALE };
+}
 
 function hidAvailable() {
   return typeof navigator !== 'undefined' && !!navigator.hid;
@@ -2606,12 +2690,9 @@ function axesFromCollections(collections) {
           const usage = usages.length ? usages[Math.min(i, usages.length - 1)] : null;
           const axis = usage != null ? AXIS_USAGES[usage] : null;
           if (axis) {
+            const { min, max } = axisRange(item);
             (byReport[id] = byReport[id] || []).push({
-              axis,
-              bitOffset: bit,
-              bitSize: size,
-              min: item.logicalMinimum != null ? item.logicalMinimum : -(2 ** (size - 1)),
-              max: item.logicalMaximum != null ? item.logicalMaximum : 2 ** (size - 1) - 1,
+              axis, bitOffset: bit, bitSize: size, min, max,
             });
           }
           bit += size;

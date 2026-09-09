@@ -22,7 +22,35 @@ carries the built `dfm-tool.html`; see `.github/workflows/release.yml`.
 
 ## Unreleased
 
-Nothing since `v2.1.0`.
+### Fixed
+
+- **A SpaceMouse whose descriptor declares no axis range no longer reads as
+  dead, or as saturated.** `src/app/spacemouse.js` derived an axis's range from
+  the width of its field when the descriptor did not declare one, which is not
+  a neutral default: a 16-bit axis became ±32768, so a puck swinging its real
+  ±350 normalised to 0.011 — inside the navigator's 0.08 dead zone. The device
+  would connect, report, and never move the camera. Bounds declared as `0/0`,
+  which is what an item that never set them looks like once WebHID has filled
+  the gaps, collapsed the divisor to 1 instead, so a single count saturated the
+  axis and the camera slammed to full rate on a touch. Both now fall back to a
+  6-DoF full scale of ±350; a descriptor that declares a usable range is still
+  believed, which is the point of reading it. No score is affected — this is
+  viewer navigation only.
+
+### Testing and infrastructure
+
+- **The report layout every current device uses is now a fixture.** The
+  SpaceNavigator and Compact split translation and rotation across two
+  reports; the Pro, the Wireless and the Universal Receiver put all six axes
+  in one. Only the split shape was covered. Both are now.
+- **The device layer was cross-checked against implementations that have run
+  on real pucks** — pyspacenavigator and spacenavd, read as protocol
+  documentation rather than copied. It confirmed the two-vendor device filter
+  covers every known device and that merging the latest value per axis handles
+  both layouts, found the range-fallback defect above, and left two named
+  questions for a session with hardware: whether the axis directions need
+  flipping, where the reference predicts four of six, and whether a real
+  descriptor over-declares its range. Recorded at R2.7 in `docs/ROADMAP.md`.
 
 ---
 

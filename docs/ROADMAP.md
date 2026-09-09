@@ -572,6 +572,29 @@ shape WebHID documents, and whether the rates feel right in the hand. Both need
 a device and half an hour. The tuning constants are all exported and
 commented for that session.
 
+**Narrowed by a cross-check, without hardware.** The assumptions above were
+checked against implementations that have run on real pucks —
+pyspacenavigator's per-model byte layouts for eight devices, and spacenavd —
+read as protocol documentation rather than copied. It confirmed two things and
+found two. Confirmed: the two-vendor device filter covers every known device,
+and the merge-latest-per-axis design handles both report layouts in the wild.
+Found: the axis-range fallback was wrong in both directions, and it was
+reachable rather than theoretical — a descriptor declaring no bounds
+normalised a full ±350 swing to 0.011, inside the navigator's 0.08 dead zone,
+so the puck connected, reported, and never moved the camera; bounds declared
+as 0/0 collapsed the divisor to 1, so one count saturated the axis. Both are
+fixed and locked by tests, and the single-report six-axis layout — the layout
+of every current device, and the one the fixtures did not cover — is now a
+fixture too.
+
+So the hardware session is smaller than it was: not "does any of this work"
+but two specific questions. Whether the axis directions need flipping, where
+the reference predicts four of six (Y, Z, pitch, roll) and the correction
+belongs in `navigator.js` rather than in the reader; and whether a real
+descriptor declares a range far wider than it swings, whose symptom is a puck
+that feels dead and whose answer is a per-device override rather than
+second-guessing every descriptor.
+
 **Exit criteria.** The camera refactor lands and passes the existing browser
 test with no device present — met, and the browser test now covers the camera
 itself. Synthetic axis samples produce the expected camera pose in a test —
@@ -885,7 +908,9 @@ something a keyboard cannot supply:
 
 - R2.5's sixteen Vicat softening points need datasheet access, which this
   environment does not have.
-- R2.7's device layer needs a SpaceMouse plugged in for half an hour.
+- R2.7's device layer needs a SpaceMouse plugged in for half an hour — now
+  for two named questions rather than a general shakedown, the rest having
+  been settled against implementations that have run on real hardware.
 - The SRI hashes need a machine that can reach cdnjs and jsdelivr, which both
   answer 403 here. `npm run sri` does the rest of that job.
 

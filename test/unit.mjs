@@ -60,7 +60,7 @@ import {
 import { applyRates, shape, isIdle, createNavigatorLoop, NAVIGATOR_DEFAULTS } from '../src/app/navigator.js';
 import {
   axesFromCollections, decodeReport, readField, createHidSource,
-  AXIS_USAGES, hidAvailable,
+  AXIS_USAGES, hidAvailable, DEFAULT_AXIS_FULL_SCALE,
 } from '../src/app/spacemouse.js';
 
 const REPO_ROOT = join(fileURLToPath(new URL('.', import.meta.url)), '..');
@@ -3012,6 +3012,21 @@ describe('a 6-DoF device, read from its own descriptor');
     ],
   }];
 
+  /*
+   * The other layout, and the one every current device uses: all six axes in
+   * a single 12-byte report. The SpaceNavigator and the Compact split
+   * translation and rotation across two reports; the Pro, the Wireless and the
+   * Universal Receiver do not. Both shapes are covered because the split one
+   * was the only fixture here, and the merged one is the commoner device.
+   */
+  const ONE_REPORT_PUCK = [{
+    inputReports: [
+      { reportId: 1, items: [axis16([
+        usage(0x30), usage(0x31), usage(0x32), usage(0x33), usage(0x34), usage(0x35),
+      ])] },
+    ],
+  }];
+
   /* Little-endian 16-bit fields, which is what the descriptor above declares. */
   const report = (...values) => {
     const buf = new ArrayBuffer(values.length * 2);
@@ -3076,6 +3091,81 @@ describe('a 6-DoF device, read from its own descriptor');
     const axes = axesFromCollections(TWO_REPORT_PUCK);
     close(decodeReport(axes, 1, report(500, -500, 0)).tx, 1, 1e-12, 'over:');
     close(decodeReport(axes, 1, report(500, -500, 0)).ty, -1, 1e-12, 'under:');
+  });
+
+  await it('decodes a puck that puts all six axes in one report', () => {
+    /* Six axes, one report, 12 bytes — and the offsets have to keep
+       accumulating across a single item whose count is 6 rather than 3. */
+    const axes = axesFromCollections(ONE_REPORT_PUCK);
+    eq(Object.keys(axes).join(','), '1', 'one report:');
+    eq(axes[1].map((f) => `${f.axis}@${f.bitOffset}`).join(','),
+      'tx@0,ty@16,tz@32,rx@48,ry@64,rz@80', 'all six, in order:');
+    const all = decodeReport(axes, 1, report(350, -350, 0, 175, 0, -175));
+    eq(Object.keys(all).sort().join(','), 'rx,ry,rz,tx,ty,tz', 'every axis in one go:');
+    close(all.tx, 1, 1e-12, 'tx:');
+    close(all.ty, -1, 1e-12, 'ty:');
+    close(all.rx, 0.5, 1e-12, 'rx:');
+    close(all.rz, -0.5, 1e-12, 'rz:');
+  });
+
+  await it('falls back to a 6-DoF full scale when the descriptor declares no range', () => {
+    /*
+     * The fallback used to be the width of the field, which is not a neutral
+     * default: a 16-bit axis became ±32768, so a puck swinging its real ±350
+     * normalised to 0.011 — inside the navigator's 0.08 dead zone. The device
+     * connected, reported, and never moved the camera.
+     */
+    const noBounds = [{
+      inputReports: [{
+        reportId: 1,
+        items: [{ reportSize: 16, reportCount: 3, usages: [usage(0x30), usage(0x31), usage(0x32)] }],
+      }],
+    }];
+    const axes = axesFromCollections(noBounds);
+    eq(axes[1][0].min, -DEFAULT_AXIS_FULL_SCALE, 'assumed minimum:');
+    eq(axes[1][0].max, DEFAULT_AXIS_FULL_SCALE, 'assumed maximum:');
+    close(decodeReport(axes, 1, report(350, 0, 0)).tx, 1, 1e-12, 'a full push reads as full:');
+    /* The point of the fallback, stated as the thing that was broken. */
+    const deflection = decodeReport(axes, 1, report(350, 0, 0)).tx;
+    eq(shape(deflection, NAVIGATOR_DEFAULTS.deadZone) > 0, true,
+      'and it has to clear the dead zone, which is what the old fallback did not:');
+  });
+
+  await it('falls back rather than saturating when the declared range is empty', () => {
+    /* 0/0 is what an item that never set its bounds looks like once WebHID has
+       filled the gaps. Scaling by it collapsed the divisor to 1, so a single
+       count read as full deflection and the camera slammed to full rate. */
+    const zeroBounds = [{
+      inputReports: [{
+        reportId: 1,
+        items: [{
+          reportSize: 16, reportCount: 3,
+          usages: [usage(0x30), usage(0x31), usage(0x32)],
+          logicalMinimum: 0, logicalMaximum: 0,
+        }],
+      }],
+    }];
+    const axes = axesFromCollections(zeroBounds);
+    eq(axes[1][0].max, DEFAULT_AXIS_FULL_SCALE, 'assumed maximum:');
+    close(decodeReport(axes, 1, report(1, 0, 0)).tx, 1 / DEFAULT_AXIS_FULL_SCALE, 1e-12,
+      'one count is one count, not full deflection:');
+  });
+
+  await it('believes a descriptor that does declare a usable range', () => {
+    /* The fallback must not become a policy. A device declaring something
+       unusual is still the authority on its own range. */
+    const wide = [{
+      inputReports: [{
+        reportId: 1,
+        items: [{
+          reportSize: 16, reportCount: 1, usages: [usage(0x30)],
+          logicalMinimum: -32768, logicalMaximum: 32767,
+        }],
+      }],
+    }];
+    const axes = axesFromCollections(wide);
+    eq(axes[1][0].min, -32768, 'declared minimum is kept:');
+    close(decodeReport(axes, 1, report(32767)).tx, 1, 1e-3, 'and scales to it:');
   });
 
   await it('reads a field that is not byte-aligned', () => {
