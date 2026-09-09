@@ -1,6 +1,6 @@
 {
   "name": "onlycat-dfm",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "private": true,
   "description": "Injection moulding design-for-manufacture analyser — single-file browser tool, reads .ipt via a local Inventor",
   "license": "MIT",

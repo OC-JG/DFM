@@ -22,12 +22,27 @@ carries the built `dfm-tool.html`; see `.github/workflows/release.yml`.
 
 ## Unreleased
 
-**Nothing has been released yet.** `package.json` has read `2.0.0` since the
-first modular commit on 2026-08-17 and has never been tagged, so one version
-number has stood for every state of the tool across 48 commits — which is the
-gap this file and the release workflow close. The entries below are
-reconstructed from that history rather than written as the work landed; the
-dates are the dates it reached `main`.
+Nothing since `v2.1.0`.
+
+---
+
+## v2.1.0 — 2026-09-09
+
+**The first tagged release.** `package.json` had read `2.0.0` since the first
+modular commit on 2026-08-17 and was never tagged, so one version number stood
+for every state of the tool across 48 commits — which is the gap this file and
+the release workflow close. The entries below are reconstructed from that
+history rather than written as the work landed; the dates are the dates each
+reached `main`.
+
+It is tagged `2.1.0` rather than the `2.0.0` the field already read, and that
+is deliberate rather than a bump for its own sake. `2.0.0` named the tool at
+the first modular commit and, unchanged, went on to name every state of it
+since — including the nine score movements tabulated below. Releasing under
+that number would hand a recipient a version string that had already meant a
+dozen different things and let the ambiguity this file exists to end survive
+its own fix. Nothing was ever published as `2.0.0`, so no promise is broken by
+leaving it behind; the number is retired unreleased.
 
 ### Scores and thresholds
 
